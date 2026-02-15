@@ -37,6 +37,21 @@ class PeriodicRunnerConfig:
     alert_config: Any = None
 
 
+def process_wallet_analysis(
+    wallet: str,
+    db: Any,
+    anomaly_config: Any,
+    alert_config: Any,
+    max_history: int,
+) -> None:
+    """
+    Run full analysis pipeline for a wallet: load history, update graph, features,
+    anomalies, trust score, risk propagation, alerts, reputation. Used by periodic
+    runner and by real-time ingestion consumer. No return value; exceptions are logged.
+    """
+    _analyze_and_save_wallet(wallet, db, anomaly_config, alert_config, max_history)
+
+
 def _analyze_and_save_wallet(
     wallet: str,
     db: Any,
@@ -54,11 +69,17 @@ def _analyze_and_save_wallet(
     from backend_blockid.analysis_engine.features import extract_features
     from backend_blockid.analysis_engine.anomaly import detect_anomalies
     from backend_blockid.analysis_engine.scorer import compute_trust_score
+    from backend_blockid.analysis_engine.graph import update_wallet_graph
+    from backend_blockid.analysis_engine.risk_propagation import propagate_risk
 
     history = db.get_transaction_history(wallet, limit=max_history)
     if not history:
         logger.debug("periodic_wallet_skip_no_history", wallet_id=wallet)
         return
+    try:
+        update_wallet_graph(db, history)
+    except Exception as e:
+        logger.warning("periodic_graph_update_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
     txs = [
         ParsedTransaction(
             sender=r.sender,
@@ -72,7 +93,12 @@ def _analyze_and_save_wallet(
     ]
     features = extract_features(txs, wallet)
     anomaly_result = detect_anomalies(features, config=anomaly_config)
-    score = compute_trust_score(features, anomaly_result)
+    base_score = compute_trust_score(features, anomaly_result)
+    try:
+        score = propagate_risk(db, wallet, base_score)
+    except Exception as e:
+        logger.warning("periodic_risk_propagation_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
+        score = base_score
     now = int(time.time())
     db.insert_trust_score(
         wallet,
@@ -86,20 +112,54 @@ def _analyze_and_save_wallet(
     )
     ts_min = min((r.timestamp for r in history if r.timestamp is not None), default=now)
     ts_max = max((r.timestamp for r in history if r.timestamp is not None), default=now)
-    db.upsert_wallet_profile(
-        WalletProfile(wallet=wallet, first_seen_at=ts_min, last_seen_at=ts_max, profile_json=None)
-    )
+    profile = WalletProfile(wallet=wallet, first_seen_at=ts_min, last_seen_at=ts_max, profile_json=None)
+    db.upsert_wallet_profile(profile)
     stored_alerts = evaluate_and_store_alerts(
         wallet, round(score, 2), anomaly_result, db, config=alert_config
     )
+    final_score = round(score, 2)
+    risk_stage = "normal"
+    try:
+        from backend_blockid.alerts.escalation import update_escalation_and_get_risk_stage
+        risk_stage = update_escalation_and_get_risk_stage(db, wallet, anomaly_result, now_ts=now)
+    except Exception as e:
+        logger.warning(
+            "periodic_escalation_failed",
+            wallet_id=wallet[:16] if wallet else "?",
+            error=str(e),
+        )
+    try:
+        from backend_blockid.behavioral_memory import update_and_get_trend
+        update_and_get_trend(
+            db,
+            wallet,
+            final_score,
+            anomaly_result.is_anomalous,
+            now_ts=now,
+            profile=profile,
+        )
+    except Exception as e:
+        logger.warning(
+            "periodic_behavioral_memory_failed",
+            wallet_id=wallet[:16] if wallet else "?",
+            error=str(e),
+        )
     if anomaly_result.flags:
         logger.info(
             "periodic_wallet_anomalies",
             wallet_id=wallet,
-            trust_score=round(score, 2),
+            trust_score=final_score,
             anomaly_flags=[f.to_dict() for f in anomaly_result.flags],
             flag_count=len(anomaly_result.flags),
             alerts_stored=stored_alerts,
+            risk_stage=risk_stage,
+        )
+    else:
+        logger.debug(
+            "periodic_wallet_analyzed",
+            wallet_id=wallet,
+            trust_score=final_score,
+            risk_stage=risk_stage,
         )
 
 

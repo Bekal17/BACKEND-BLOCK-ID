@@ -76,9 +76,12 @@ CREATE INDEX IF NOT EXISTS ix_trust_scores_wallet_computed ON trust_scores(walle
 SCHEMA_TRACKED_WALLETS = """
 CREATE TABLE IF NOT EXISTS tracked_wallets (
     wallet TEXT PRIMARY KEY,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    last_analyzed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_tracked_wallets_created_at ON tracked_wallets(created_at);
+CREATE INDEX IF NOT EXISTS ix_tracked_wallets_priority ON tracked_wallets(priority);
 """
 
 SCHEMA_ALERTS = """
@@ -92,6 +95,72 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS ix_alerts_wallet ON alerts(wallet);
 CREATE INDEX IF NOT EXISTS ix_alerts_wallet_severity_reason_created ON alerts(wallet, severity, reason, created_at);
 CREATE INDEX IF NOT EXISTS ix_alerts_created_at ON alerts(created_at);
+"""
+
+SCHEMA_WALLET_ROLLING_STATS = """
+CREATE TABLE IF NOT EXISTS wallet_rolling_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT NOT NULL,
+    period_end_ts INTEGER NOT NULL,
+    window_days INTEGER NOT NULL,
+    volume_lamports INTEGER NOT NULL,
+    tx_count INTEGER NOT NULL,
+    anomaly_count INTEGER NOT NULL,
+    avg_trust_score REAL,
+    alert_count INTEGER NOT NULL,
+    created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_rolling_stats_wallet_window ON wallet_rolling_stats(wallet, window_days);
+CREATE INDEX IF NOT EXISTS ix_wallet_rolling_stats_period ON wallet_rolling_stats(wallet, window_days, period_end_ts DESC);
+"""
+
+SCHEMA_WALLET_ESCALATION_STATE = """
+CREATE TABLE IF NOT EXISTS wallet_escalation_state (
+    wallet TEXT PRIMARY KEY,
+    risk_stage TEXT NOT NULL,
+    escalation_score REAL NOT NULL,
+    last_alert_ts INTEGER,
+    last_clean_ts INTEGER,
+    state_json TEXT,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_escalation_risk_stage ON wallet_escalation_state(risk_stage);
+"""
+
+SCHEMA_WALLET_PRIORITY = """
+CREATE TABLE IF NOT EXISTS wallet_priority (
+    wallet TEXT PRIMARY KEY,
+    tier TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_priority_tier ON wallet_priority(tier);
+"""
+
+SCHEMA_WALLET_REPUTATION_STATE = """
+CREATE TABLE IF NOT EXISTS wallet_reputation_state (
+    wallet TEXT PRIMARY KEY,
+    current_score REAL NOT NULL,
+    avg_7d REAL,
+    avg_30d REAL,
+    trend TEXT NOT NULL,
+    volatility REAL,
+    decay_factor REAL NOT NULL DEFAULT 1.0,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_reputation_trend ON wallet_reputation_state(trend);
+"""
+
+SCHEMA_WALLET_GRAPH_EDGES = """
+CREATE TABLE IF NOT EXISTS wallet_graph_edges (
+    sender_wallet TEXT NOT NULL,
+    receiver_wallet TEXT NOT NULL,
+    tx_count INTEGER NOT NULL DEFAULT 0,
+    total_volume INTEGER NOT NULL DEFAULT 0,
+    last_seen_timestamp INTEGER NOT NULL,
+    PRIMARY KEY (sender_wallet, receiver_wallet)
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_graph_sender ON wallet_graph_edges(sender_wallet);
+CREATE INDEX IF NOT EXISTS ix_wallet_graph_receiver ON wallet_graph_edges(receiver_wallet);
 """
 
 
@@ -187,6 +256,23 @@ class DatabaseBackend(ABC):
         ...
 
     @abstractmethod
+    def get_tracked_wallets_with_priority_and_analyzed(
+        self, *, limit: int = 50000
+    ) -> list[tuple[str, str, int | None]]:
+        """Return (wallet, priority, last_analyzed_at) for all tracked wallets, oldest first."""
+        ...
+
+    @abstractmethod
+    def update_tracked_wallet_priority(self, wallet: str, priority: str) -> None:
+        """Set priority (critical | watchlist | normal) for a tracked wallet."""
+        ...
+
+    @abstractmethod
+    def update_tracked_wallet_last_analyzed(self, wallet: str, last_analyzed_at: int) -> None:
+        """Set last_analyzed_at (Unix timestamp) for a tracked wallet."""
+        ...
+
+    @abstractmethod
     def insert_alert(self, wallet: str, severity: str, reason: str, created_at: int) -> int:
         """Insert an alert. Returns row id."""
         ...
@@ -200,6 +286,127 @@ class DatabaseBackend(ABC):
         since_created_at: int,
     ) -> bool:
         """True if an alert (wallet, severity, reason) exists with created_at >= since_created_at."""
+        ...
+
+    @abstractmethod
+    def get_alert_count(
+        self,
+        wallet: str,
+        since_created_at: int,
+        until_created_at: int | None = None,
+    ) -> int:
+        """Count alerts for wallet with created_at in [since_created_at, until_created_at] (until optional)."""
+        ...
+
+    @abstractmethod
+    def insert_wallet_rolling_stats(
+        self,
+        wallet: str,
+        period_end_ts: int,
+        window_days: int,
+        volume_lamports: int,
+        tx_count: int,
+        anomaly_count: int,
+        avg_trust_score: float | None,
+        alert_count: int,
+    ) -> int:
+        """Append one rolling stats snapshot. Returns row id."""
+        ...
+
+    @abstractmethod
+    def get_wallet_rolling_stats_history(
+        self,
+        wallet: str,
+        window_days: int,
+        *,
+        limit: int = 32,
+    ) -> list[tuple[int, int, int, int, float | None, int]]:
+        """Return (period_end_ts, volume_lamports, tx_count, anomaly_count, avg_trust_score, alert_count) newest first."""
+        ...
+
+    @abstractmethod
+    def get_alerts_for_wallet(
+        self,
+        wallet: str,
+        since_created_at: int,
+        until_created_at: int | None = None,
+        limit: int = 200,
+    ) -> list[tuple[int, str, str]]:
+        """Return (created_at, severity, reason) for wallet, newest first."""
+        ...
+
+    @abstractmethod
+    def get_escalation_state(
+        self,
+        wallet: str,
+    ) -> tuple[str, float, int | None, int | None, str | None, int] | None:
+        """Return (risk_stage, escalation_score, last_alert_ts, last_clean_ts, state_json, updated_at) or None."""
+        ...
+
+    @abstractmethod
+    def upsert_escalation_state(
+        self,
+        wallet: str,
+        risk_stage: str,
+        escalation_score: float,
+        last_alert_ts: int | None,
+        last_clean_ts: int | None,
+        state_json: str | None,
+    ) -> None:
+        """Insert or update escalation state for wallet."""
+        ...
+
+    @abstractmethod
+    def get_wallet_priority(self, wallet: str) -> str | None:
+        """Return tier (critical | watchlist | normal) for wallet, or None if not set (default normal)."""
+        ...
+
+    @abstractmethod
+    def set_wallet_priority(self, wallet: str, tier: str) -> None:
+        """Set wallet priority tier (critical | watchlist | normal)."""
+        ...
+
+    @abstractmethod
+    def get_wallet_priorities_for_wallets(self, wallets: list[str]) -> dict[str, str]:
+        """Return dict wallet -> tier for given wallets; missing wallets default to normal in scheduler."""
+        ...
+
+    @abstractmethod
+    def get_wallet_reputation_state(
+        self,
+        wallet: str,
+    ) -> tuple[float, float | None, float | None, str, float | None, float, int] | None:
+        """Return (current_score, avg_7d, avg_30d, trend, volatility, decay_factor, updated_at) or None."""
+        ...
+
+    @abstractmethod
+    def upsert_wallet_reputation_state(
+        self,
+        wallet: str,
+        current_score: float,
+        avg_7d: float | None,
+        avg_30d: float | None,
+        trend: str,
+        volatility: float | None,
+        decay_factor: float,
+    ) -> None:
+        """Insert or update reputation state for wallet."""
+        ...
+
+    @abstractmethod
+    def upsert_wallet_graph_edge(
+        self,
+        sender_wallet: str,
+        receiver_wallet: str,
+        amount_lamports: int,
+        timestamp: int,
+    ) -> None:
+        """Increment edge (sender -> receiver): tx_count += 1, total_volume += amount, last_seen = max(last_seen, timestamp)."""
+        ...
+
+    @abstractmethod
+    def get_wallet_graph_adjacent(self, wallet: str) -> list[str]:
+        """Return distinct wallet addresses that share an edge with wallet (as sender or receiver)."""
         ...
 
 
@@ -244,8 +451,20 @@ class SQLiteBackend(DatabaseBackend):
                 SCHEMA_TRUST_SCORES,
                 SCHEMA_TRACKED_WALLETS,
                 SCHEMA_ALERTS,
+                SCHEMA_WALLET_ROLLING_STATS,
+                SCHEMA_WALLET_ESCALATION_STATE,
+                SCHEMA_WALLET_PRIORITY,
+                SCHEMA_WALLET_REPUTATION_STATE,
+                SCHEMA_WALLET_GRAPH_EDGES,
             ):
                 cur.executescript(stmt)
+            cur.execute("PRAGMA table_info(tracked_wallets)")
+            columns = [row[1] for row in cur.fetchall()]
+            if "priority" not in columns:
+                cur.execute("ALTER TABLE tracked_wallets ADD COLUMN priority TEXT DEFAULT 'normal'")
+                cur.execute("UPDATE tracked_wallets SET priority = 'normal' WHERE priority IS NULL")
+            if "last_analyzed_at" not in columns:
+                cur.execute("ALTER TABLE tracked_wallets ADD COLUMN last_analyzed_at INTEGER")
 
     def upsert_wallet_profile(self, profile: WalletProfile) -> None:
         now = int(time.time())
@@ -414,10 +633,19 @@ class SQLiteBackend(DatabaseBackend):
             )
             return [row["wallet"] for row in cur.fetchall()]
 
-    def add_tracked_wallet(self, wallet: str) -> bool:
+    def add_tracked_wallet(self, wallet: str, priority: str = "normal") -> bool:
         now = int(time.time())
         with self._cursor() as cur:
             try:
+                cur.execute(
+                    """
+                    INSERT INTO tracked_wallets (wallet, created_at, priority, last_analyzed_at)
+                    VALUES (?, ?, ?, NULL)
+                    """,
+                    (wallet.strip(), now, (priority or "normal").strip().lower()),
+                )
+                return cur.rowcount > 0
+            except sqlite3.OperationalError:
                 cur.execute(
                     "INSERT INTO tracked_wallets (wallet, created_at) VALUES (?, ?)",
                     (wallet.strip(), now),
@@ -434,6 +662,43 @@ class SQLiteBackend(DatabaseBackend):
             )
             row = cur.fetchone()
         return int(row["created_at"]) if row is not None else None
+
+    def get_tracked_wallets_with_priority_and_analyzed(
+        self, *, limit: int = 50000
+    ) -> list[tuple[str, str, int | None]]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT wallet, COALESCE(priority, 'normal') AS priority, last_analyzed_at
+                FROM tracked_wallets
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            (
+                row["wallet"],
+                (row["priority"] or "normal").lower(),
+                int(row["last_analyzed_at"]) if row["last_analyzed_at"] is not None else None,
+            )
+            for row in rows
+        ]
+
+    def update_tracked_wallet_priority(self, wallet: str, priority: str) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE tracked_wallets SET priority = ? WHERE wallet = ?",
+                ((priority or "normal").strip().lower(), wallet.strip()),
+            )
+
+    def update_tracked_wallet_last_analyzed(self, wallet: str, last_analyzed_at: int) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE tracked_wallets SET last_analyzed_at = ? WHERE wallet = ?",
+                (last_analyzed_at, wallet.strip()),
+            )
 
     def get_tracked_wallet_addresses(self, *, limit: int = 10000) -> list[str]:
         with self._cursor() as cur:
@@ -468,6 +733,315 @@ class SQLiteBackend(DatabaseBackend):
                 (wallet.strip(), severity.strip(), reason.strip(), since_created_at),
             )
             return cur.fetchone() is not None
+
+    def get_alert_count(
+        self,
+        wallet: str,
+        since_created_at: int,
+        until_created_at: int | None = None,
+    ) -> int:
+        sql = "SELECT COUNT(*) FROM alerts WHERE wallet = ? AND created_at >= ?"
+        params: list[Any] = [wallet.strip(), since_created_at]
+        if until_created_at is not None:
+            sql += " AND created_at <= ?"
+            params.append(until_created_at)
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    def insert_wallet_rolling_stats(
+        self,
+        wallet: str,
+        period_end_ts: int,
+        window_days: int,
+        volume_lamports: int,
+        tx_count: int,
+        anomaly_count: int,
+        avg_trust_score: float | None,
+        alert_count: int,
+    ) -> int:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_rolling_stats
+                (wallet, period_end_ts, window_days, volume_lamports, tx_count, anomaly_count, avg_trust_score, alert_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    wallet.strip(),
+                    period_end_ts,
+                    window_days,
+                    volume_lamports,
+                    tx_count,
+                    anomaly_count,
+                    avg_trust_score,
+                    alert_count,
+                    now,
+                ),
+            )
+            return cur.lastrowid or 0
+
+    def get_wallet_rolling_stats_history(
+        self,
+        wallet: str,
+        window_days: int,
+        *,
+        limit: int = 32,
+    ) -> list[tuple[int, int, int, int, float | None, int]]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT period_end_ts, volume_lamports, tx_count, anomaly_count, avg_trust_score, alert_count
+                FROM wallet_rolling_stats
+                WHERE wallet = ? AND window_days = ?
+                ORDER BY period_end_ts DESC
+                LIMIT ?
+                """,
+                (wallet.strip(), window_days, limit),
+            )
+            rows = cur.fetchall()
+        return [
+            (
+                int(row["period_end_ts"]),
+                int(row["volume_lamports"]),
+                int(row["tx_count"]),
+                int(row["anomaly_count"]),
+                float(row["avg_trust_score"]) if row["avg_trust_score"] is not None else None,
+                int(row["alert_count"]),
+            )
+            for row in rows
+        ]
+
+    def get_alerts_for_wallet(
+        self,
+        wallet: str,
+        since_created_at: int,
+        until_created_at: int | None = None,
+        limit: int = 200,
+    ) -> list[tuple[int, str, str]]:
+        sql = """
+            SELECT created_at, severity, reason FROM alerts
+            WHERE wallet = ? AND created_at >= ?
+        """
+        params: list[Any] = [wallet.strip(), since_created_at]
+        if until_created_at is not None:
+            sql += " AND created_at <= ?"
+            params.append(until_created_at)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [(int(row["created_at"]), row["severity"], row["reason"]) for row in rows]
+
+    def get_escalation_state(
+        self,
+        wallet: str,
+    ) -> tuple[str, float, int | None, int | None, str | None, int] | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT risk_stage, escalation_score, last_alert_ts, last_clean_ts, state_json, updated_at
+                FROM wallet_escalation_state WHERE wallet = ?
+                """,
+                (wallet.strip(),),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (
+            row["risk_stage"],
+            float(row["escalation_score"]),
+            int(row["last_alert_ts"]) if row["last_alert_ts"] is not None else None,
+            int(row["last_clean_ts"]) if row["last_clean_ts"] is not None else None,
+            row["state_json"],
+            int(row["updated_at"]),
+        )
+
+    def upsert_escalation_state(
+        self,
+        wallet: str,
+        risk_stage: str,
+        escalation_score: float,
+        last_alert_ts: int | None,
+        last_clean_ts: int | None,
+        state_json: str | None,
+    ) -> None:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_escalation_state
+                (wallet, risk_stage, escalation_score, last_alert_ts, last_clean_ts, state_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(wallet) DO UPDATE SET
+                    risk_stage = excluded.risk_stage,
+                    escalation_score = excluded.escalation_score,
+                    last_alert_ts = excluded.last_alert_ts,
+                    last_clean_ts = excluded.last_clean_ts,
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    wallet.strip(),
+                    risk_stage,
+                    escalation_score,
+                    last_alert_ts,
+                    last_clean_ts,
+                    state_json,
+                    now,
+                ),
+            )
+
+    def get_wallet_priority(self, wallet: str) -> str | None:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT tier FROM wallet_priority WHERE wallet = ?",
+                (wallet.strip(),),
+            )
+            row = cur.fetchone()
+        return row["tier"] if row is not None else None
+
+    def set_wallet_priority(self, wallet: str, tier: str) -> None:
+        now = int(time.time())
+        tier_lower = (tier or "normal").strip().lower()
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_priority (wallet, tier, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(wallet) DO UPDATE SET tier = excluded.tier, updated_at = excluded.updated_at
+                """,
+                (wallet.strip(), tier_lower, now),
+            )
+            cur.execute(
+                "UPDATE tracked_wallets SET priority = ? WHERE wallet = ?",
+                (tier_lower, wallet.strip()),
+            )
+
+    def get_wallet_priorities_for_wallets(self, wallets: list[str]) -> dict[str, str]:
+        if not wallets:
+            return {}
+        placeholders = ",".join("?" for _ in wallets)
+        params = [w.strip() for w in wallets]
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT wallet, tier FROM wallet_priority WHERE wallet IN ({placeholders})",
+                params,
+            )
+            rows = cur.fetchall()
+        return {row["wallet"]: row["tier"] for row in rows}
+
+    def get_wallet_reputation_state(
+        self,
+        wallet: str,
+    ) -> tuple[float, float | None, float | None, str, float | None, float, int] | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT current_score, avg_7d, avg_30d, trend, volatility, decay_factor, updated_at
+                FROM wallet_reputation_state WHERE wallet = ?
+                """,
+                (wallet.strip(),),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (
+            float(row["current_score"]),
+            float(row["avg_7d"]) if row["avg_7d"] is not None else None,
+            float(row["avg_30d"]) if row["avg_30d"] is not None else None,
+            row["trend"],
+            float(row["volatility"]) if row["volatility"] is not None else None,
+            float(row["decay_factor"]),
+            int(row["updated_at"]),
+        )
+
+    def upsert_wallet_reputation_state(
+        self,
+        wallet: str,
+        current_score: float,
+        avg_7d: float | None,
+        avg_30d: float | None,
+        trend: str,
+        volatility: float | None,
+        decay_factor: float,
+    ) -> None:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_reputation_state
+                (wallet, current_score, avg_7d, avg_30d, trend, volatility, decay_factor, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(wallet) DO UPDATE SET
+                    current_score = excluded.current_score,
+                    avg_7d = excluded.avg_7d,
+                    avg_30d = excluded.avg_30d,
+                    trend = excluded.trend,
+                    volatility = excluded.volatility,
+                    decay_factor = excluded.decay_factor,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    wallet.strip(),
+                    current_score,
+                    avg_7d,
+                    avg_30d,
+                    trend.strip().lower(),
+                    volatility,
+                    decay_factor,
+                    now,
+                ),
+            )
+
+    def upsert_wallet_graph_edge(
+        self,
+        sender_wallet: str,
+        receiver_wallet: str,
+        amount_lamports: int,
+        timestamp: int,
+    ) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_graph_edges
+                (sender_wallet, receiver_wallet, tx_count, total_volume, last_seen_timestamp)
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(sender_wallet, receiver_wallet) DO UPDATE SET
+                    tx_count = tx_count + 1,
+                    total_volume = total_volume + ?,
+                    last_seen_timestamp = CASE
+                        WHEN last_seen_timestamp >= ? THEN last_seen_timestamp
+                        ELSE ?
+                    END
+                """,
+                (
+                    sender_wallet.strip(),
+                    receiver_wallet.strip(),
+                    amount_lamports,
+                    timestamp,
+                    amount_lamports,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    def get_wallet_graph_adjacent(self, wallet: str) -> list[str]:
+        w = wallet.strip()
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT receiver_wallet AS other FROM wallet_graph_edges WHERE sender_wallet = ?
+                UNION
+                SELECT sender_wallet AS other FROM wallet_graph_edges WHERE receiver_wallet = ?
+                """,
+                (w, w),
+            )
+            rows = cur.fetchall()
+        return [row["other"] for row in rows]
 
 
 # -----------------------------------------------------------------------------
@@ -598,6 +1172,45 @@ class Database:
         """Return wallet addresses from tracked_wallets registry."""
         return self._backend.get_tracked_wallet_addresses(limit=limit)
 
+    def get_tracked_wallets_with_priority_and_analyzed(
+        self, *, limit: int = 50000
+    ) -> list[tuple[str, str, int | None]]:
+        """Return (wallet, priority, last_analyzed_at) for all tracked wallets, oldest first."""
+        return self._backend.get_tracked_wallets_with_priority_and_analyzed(limit=limit)
+
+    def update_tracked_wallet_priority(self, wallet: str, priority: str) -> None:
+        """Set priority (critical | watchlist | normal) for a tracked wallet."""
+        self._backend.update_tracked_wallet_priority(wallet, priority)
+
+    def update_tracked_wallet_last_analyzed(self, wallet: str, last_analyzed_at: int) -> None:
+        """Set last_analyzed_at (Unix timestamp) for a tracked wallet."""
+        self._backend.update_tracked_wallet_last_analyzed(wallet, last_analyzed_at)
+
+    def get_latest_trust_scores_for_wallets(
+        self, wallets: list[str]
+    ) -> dict[str, TrustScoreRecord | None]:
+        """
+        Return latest trust score per wallet. Keys are input wallets;
+        value is latest TrustScoreRecord or None if no score exists.
+        """
+        out: dict[str, TrustScoreRecord | None] = {}
+        for w in wallets:
+            timeline = self.get_trust_score_timeline(w, limit=1)
+            out[w] = timeline[0] if timeline else None
+        return out
+
+    def get_wallet_profiles_for_wallets(
+        self, wallets: list[str]
+    ) -> dict[str, WalletProfile | None]:
+        """
+        Return wallet profile per wallet. Keys are input wallets;
+        value is WalletProfile or None if no profile exists.
+        """
+        out: dict[str, WalletProfile | None] = {}
+        for w in wallets:
+            out[w] = self.get_wallet_profile(w)
+        return out
+
     def insert_alert(self, wallet: str, severity: str, reason: str, created_at: int | None = None) -> int:
         """Insert an alert. created_at defaults to now. Returns row id."""
         now = int(time.time())
@@ -613,6 +1226,131 @@ class Database:
     ) -> bool:
         """True if an alert (wallet, severity, reason) exists with created_at >= since_created_at."""
         return self._backend.has_recent_alert(wallet, severity, reason, since_created_at)
+
+    def get_alert_count(
+        self,
+        wallet: str,
+        since_created_at: int,
+        until_created_at: int | None = None,
+    ) -> int:
+        """Count alerts for wallet with created_at in [since_created_at, until_created_at] (until optional)."""
+        return self._backend.get_alert_count(wallet, since_created_at, until_created_at)
+
+    def insert_wallet_rolling_stats(
+        self,
+        wallet: str,
+        period_end_ts: int,
+        window_days: int,
+        volume_lamports: int,
+        tx_count: int,
+        anomaly_count: int,
+        avg_trust_score: float | None,
+        alert_count: int,
+    ) -> int:
+        """Append one rolling stats snapshot. Returns row id."""
+        return self._backend.insert_wallet_rolling_stats(
+            wallet,
+            period_end_ts,
+            window_days,
+            volume_lamports,
+            tx_count,
+            anomaly_count,
+            avg_trust_score,
+            alert_count,
+        )
+
+    def get_wallet_rolling_stats_history(
+        self,
+        wallet: str,
+        window_days: int,
+        *,
+        limit: int = 32,
+    ) -> list[tuple[int, int, int, int, float | None, int]]:
+        """Return (period_end_ts, volume_lamports, tx_count, anomaly_count, avg_trust_score, alert_count) newest first."""
+        return self._backend.get_wallet_rolling_stats_history(wallet, window_days, limit=limit)
+
+    def get_alerts_for_wallet(
+        self,
+        wallet: str,
+        since_created_at: int,
+        until_created_at: int | None = None,
+        limit: int = 200,
+    ) -> list[tuple[int, str, str]]:
+        """Return (created_at, severity, reason) for wallet, newest first."""
+        return self._backend.get_alerts_for_wallet(
+            wallet, since_created_at, until_created_at=until_created_at, limit=limit
+        )
+
+    def get_escalation_state(
+        self,
+        wallet: str,
+    ) -> tuple[str, float, int | None, int | None, str | None, int] | None:
+        """Return (risk_stage, escalation_score, last_alert_ts, last_clean_ts, state_json, updated_at) or None."""
+        return self._backend.get_escalation_state(wallet)
+
+    def upsert_escalation_state(
+        self,
+        wallet: str,
+        risk_stage: str,
+        escalation_score: float,
+        last_alert_ts: int | None,
+        last_clean_ts: int | None,
+        state_json: str | None,
+    ) -> None:
+        """Insert or update escalation state for wallet."""
+        self._backend.upsert_escalation_state(
+            wallet, risk_stage, escalation_score, last_alert_ts, last_clean_ts, state_json
+        )
+
+    def get_wallet_priority(self, wallet: str) -> str | None:
+        """Return tier (critical | watchlist | normal) for wallet, or None if not set (default normal)."""
+        return self._backend.get_wallet_priority(wallet)
+
+    def set_wallet_priority(self, wallet: str, tier: str) -> None:
+        """Set wallet priority tier (critical | watchlist | normal)."""
+        self._backend.set_wallet_priority(wallet, tier)
+
+    def get_wallet_priorities_for_wallets(self, wallets: list[str]) -> dict[str, str]:
+        """Return dict wallet -> tier for given wallets; missing wallets default to normal in scheduler."""
+        return self._backend.get_wallet_priorities_for_wallets(wallets)
+
+    def get_wallet_reputation_state(
+        self,
+        wallet: str,
+    ) -> tuple[float, float | None, float | None, str, float | None, float, int] | None:
+        """Return (current_score, avg_7d, avg_30d, trend, volatility, decay_factor, updated_at) or None."""
+        return self._backend.get_wallet_reputation_state(wallet)
+
+    def upsert_wallet_reputation_state(
+        self,
+        wallet: str,
+        current_score: float,
+        avg_7d: float | None,
+        avg_30d: float | None,
+        trend: str,
+        volatility: float | None,
+        decay_factor: float,
+    ) -> None:
+        """Insert or update reputation state for wallet."""
+        self._backend.upsert_wallet_reputation_state(
+            wallet, current_score, avg_7d, avg_30d, trend, volatility, decay_factor
+        )
+
+    def upsert_wallet_graph_edge(
+        self,
+        sender_wallet: str,
+        receiver_wallet: str,
+        amount_lamports: int,
+        timestamp: int,
+    ) -> None:
+        """Increment edge stats for sender -> receiver. Idempotent per tx if called once per tx."""
+        self._backend.upsert_wallet_graph_edge(
+            sender_wallet, receiver_wallet, amount_lamports, timestamp
+        )
+
+    def get_wallet_graph_adjacent(self, wallet: str) -> list[str]:
+        """Return distinct wallets that share an edge with wallet (sender or receiver)."""
+        return self._backend.get_wallet_graph_adjacent(wallet)
 
 
 def get_database(path: str | Path | None = None) -> Database:

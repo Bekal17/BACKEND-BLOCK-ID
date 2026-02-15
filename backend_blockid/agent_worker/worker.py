@@ -133,6 +133,11 @@ def process_wallet_batch(
     history = db.get_transaction_history(wallet, limit=max_history)
     if not history:
         return
+    try:
+        from backend_blockid.analysis_engine.graph import update_wallet_graph
+        update_wallet_graph(db, history)
+    except Exception as e:
+        logger.warning("worker_graph_update_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
     txs_for_features = [
         ParsedTransaction(
             sender=r.sender,
@@ -146,7 +151,13 @@ def process_wallet_batch(
     ]
     features = extract_features(txs_for_features, wallet)
     anomaly_result = detect_anomalies(features, config=anomaly_config)
-    score = compute_trust_score(features, anomaly_result)
+    base_score = compute_trust_score(features, anomaly_result)
+    try:
+        from backend_blockid.analysis_engine.risk_propagation import propagate_risk
+        score = propagate_risk(db, wallet, base_score)
+    except Exception as e:
+        logger.warning("worker_risk_propagation_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
+        score = base_score
     now = int(time.time())
     db.insert_trust_score(
         wallet,
@@ -167,8 +178,9 @@ def process_wallet_batch(
         profile_json=None,
     )
     db.upsert_wallet_profile(profile)
+    final_score = round(score, 2)
     stored_alerts = evaluate_and_store_alerts(
-        wallet, round(score, 2), anomaly_result, db, config=alert_config
+        wallet, final_score, anomaly_result, db, config=alert_config
     )
     state.last_wallet_processed = wallet
     state.last_processed_at = time.time()
@@ -177,7 +189,7 @@ def process_wallet_batch(
     logger.info(
         "worker_wallet_analyzed",
         wallet_id=wallet,
-        trust_score=round(score, 2),
+        trust_score=final_score,
         anomaly_flags=anomaly_flags,
         is_anomalous=anomaly_result.is_anomalous,
         tx_count=features.tx_count,
