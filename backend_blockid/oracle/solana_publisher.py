@@ -1,11 +1,11 @@
 """
 Solana trust oracle publisher: read trust scores from DB and publish via update_trust_score.
 
-Safety: publish only if score delta > threshold; max tx per minute; dry_run mode;
-verify transaction confirmation; log all tx signatures. Must never spam network.
-Config via env: SOLANA_RPC_URL, ORACLE_PRIVATE_KEY, ORACLE_PROGRAM_ID, PUBLISH_INTERVAL_SECONDS,
-SCORE_DELTA_THRESHOLD, MAX_TX_PER_MINUTE, DRY_RUN, CONFIRM_TIMEOUT_SEC.
-Runtime-only worker; no API changes.
+- Uses ORACLE_PROGRAM_ID from env. Builds update_trust_score instruction from Anchor IDL (embedded TRUST_ORACLE_IDL).
+- Sends trust_score update per wallet; logs tx signature; retries failed tx with backoff.
+- Devnet: set SOLANA_DEVNET=1 or SOLANA_CLUSTER=devnet (or SOLANA_RPC_URL to devnet RPC).
+- Safety: score delta threshold, max tx/min, dry_run, confirmation verification, full signature audit.
+Config: SOLANA_RPC_URL, ORACLE_PRIVATE_KEY, ORACLE_PROGRAM_ID, PUBLISH_INTERVAL_SECONDS, etc.
 """
 
 from __future__ import annotations
@@ -25,7 +25,31 @@ logger = get_logger(__name__)
 # Anchor: instruction discriminator = first 8 bytes of sha256("global:instruction_name")
 UPDATE_TRUST_SCORE_DISCRIMINATOR = hashlib.sha256(b"global:update_trust_score").digest()[:8]
 SYS_PROGRAM_ID_STR = "11111111111111111111111111111111"
+DEVNET_RPC_URL = "https://api.devnet.solana.com"
+MAINNET_RPC_URL = "https://api.mainnet-beta.solana.com"
 DEFAULT_PUBLISH_INTERVAL_SEC = 60.0
+
+# Minimal Anchor IDL for trust oracle (single instruction). Used to build instructions by name/args.
+TRUST_ORACLE_IDL = {
+    "version": "0.1.0",
+    "name": "trust_oracle",
+    "instructions": [
+        {
+            "name": "update_trust_score",
+            "discriminator": list(UPDATE_TRUST_SCORE_DISCRIMINATOR),
+            "accounts": [
+                {"name": "trust_score_account", "writable": True, "signer": False},
+                {"name": "oracle", "writable": False, "signer": True},
+                {"name": "wallet", "writable": False, "signer": False},
+                {"name": "system_program", "writable": False, "signer": False},
+            ],
+            "args": [
+                {"name": "trust_score", "type": "u8"},
+                {"name": "risk_level", "type": "u8"},
+            ],
+        },
+    ],
+}
 DEFAULT_MAX_UPDATES_PER_BATCH = 20
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SEC = 2.0
@@ -68,6 +92,33 @@ def _load_keypair(private_key: str) -> Any:
         raise ValueError("Invalid ORACLE_PRIVATE_KEY") from e
 
 
+def build_update_trust_score_instruction(
+    program_id: Any,
+    oracle_pubkey: Any,
+    wallet_pubkey: Any,
+    trust_score: int,
+    risk_level: int,
+    sys_program_id: Any,
+    *,
+    idl: dict[str, Any] | None = None,
+) -> tuple[Any, Any]:
+    """
+    Build update_trust_score instruction from Anchor IDL (embedded or provided).
+    Args trust_score/risk_level must match IDL (u8). Returns (Instruction, trust_score_account_pubkey).
+    """
+    idl = idl or TRUST_ORACLE_IDL
+    # Resolve instruction layout from IDL
+    ix_def = next((i for i in idl.get("instructions", []) if i.get("name") == "update_trust_score"), None)
+    if not ix_def:
+        raise ValueError("IDL missing update_trust_score instruction")
+    # Enforce args: trust_score u8, risk_level u8
+    trust_score_u8 = max(0, min(100, int(trust_score))) & 0xFF
+    risk_level_u8 = max(0, min(3, int(risk_level))) & 0xFF
+    return _build_update_trust_score_instruction(
+        program_id, oracle_pubkey, wallet_pubkey, trust_score_u8, risk_level_u8, sys_program_id
+    )
+
+
 def _build_update_trust_score_instruction(
     program_id: Any,
     oracle_pubkey: Any,
@@ -77,8 +128,8 @@ def _build_update_trust_score_instruction(
     sys_program_id: Any,
 ) -> tuple[Any, Any]:
     """
-    Build update_trust_score instruction for our Solana program.
-    Returns (Instruction, trust_score_account_pubkey).
+    Low-level: build update_trust_score instruction (discriminator + u8 trust_score + u8 risk_level).
+    Matches TRUST_ORACLE_IDL layout. Returns (Instruction, trust_score_account_pubkey).
     """
     from solders.instruction import Instruction, AccountMeta
     from solders.pubkey import Pubkey
@@ -135,11 +186,20 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
     return default
 
 
+def _default_rpc_url() -> str:
+    url = (os.getenv("SOLANA_RPC_URL") or "").strip()
+    if url:
+        return url
+    if _parse_bool_env("SOLANA_DEVNET", False) or (os.getenv("SOLANA_CLUSTER") or "").strip().lower() == "devnet":
+        return DEVNET_RPC_URL
+    return MAINNET_RPC_URL
+
+
 @dataclass
 class SolanaPublisherConfig:
-    """Config for the Solana trust oracle publisher (env or explicit)."""
+    """Config for the Solana trust oracle publisher (env or explicit). Devnet: set SOLANA_DEVNET=1 or SOLANA_CLUSTER=devnet."""
 
-    solana_rpc_url: str = field(default_factory=lambda: os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com").strip())
+    solana_rpc_url: str = field(default_factory=_default_rpc_url)
     oracle_private_key: str = field(default_factory=lambda: (os.getenv("ORACLE_PRIVATE_KEY") or "").strip())
     oracle_program_id: str = field(default_factory=lambda: (os.getenv("ORACLE_PROGRAM_ID") or "TRUSTxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").strip())
     publish_interval_seconds: float = field(default_factory=lambda: float(os.getenv("PUBLISH_INTERVAL_SECONDS", str(int(DEFAULT_PUBLISH_INTERVAL_SEC)))))
@@ -297,7 +357,7 @@ class SolanaTrustOraclePublisher:
                 trust_score_u8 = max(0, min(100, int(round(score))))
                 risk_level_u8 = _score_to_risk_level(score)
                 if oracle_pubkey is not None:
-                    ix, _ = _build_update_trust_score_instruction(
+                    ix, _ = build_update_trust_score_instruction(
                         self._program_id,
                         oracle_pubkey,
                         wallet_pubkey,

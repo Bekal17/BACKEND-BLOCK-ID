@@ -15,9 +15,9 @@ import time
 
 from backend_blockid.logging import get_logger
 from backend_blockid.oracle.solana_publisher import (
-    _build_update_trust_score_instruction,
     _load_keypair,
     _score_to_risk_level,
+    build_update_trust_score_instruction,
     get_trust_score_pda,
     parse_trust_score_account_data,
 )
@@ -74,7 +74,7 @@ def _run_devnet_publish_test() -> bool:
 
     trust_score_u8 = test_score_val
     risk_level_u8 = _score_to_risk_level(float(test_score_val))
-    ix, _ = _build_update_trust_score_instruction(
+    ix, _ = build_update_trust_score_instruction(
         program_id,
         oracle_pubkey,
         wallet_pubkey,
