@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,20 @@ class WalletResponse(BaseModel):
     trust_score: float = Field(..., ge=0, le=100, description="Latest trust score (0–100)")
     computed_at: int = Field(..., description="Unix timestamp when score was computed")
     flags: list[dict[str, Any]] = Field(default_factory=list, description="Anomaly flags from latest computation")
+
+
+class TrackWalletRequest(BaseModel):
+    """POST /track-wallet body: register a wallet for monitoring."""
+
+    wallet: str = Field(..., min_length=8, max_length=64, description="Solana wallet address (base58)")
+
+
+class TrackWalletResponse(BaseModel):
+    """POST /track-wallet response."""
+
+    wallet: str = Field(..., description="Wallet address registered")
+    created_at: int = Field(..., description="Unix timestamp when registered")
+    registered: bool = Field(..., description="True if newly added, False if already tracked")
 
 
 # -----------------------------------------------------------------------------
@@ -105,6 +120,38 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.post("/track-wallet", response_model=TrackWalletResponse)
+def track_wallet(
+    body: TrackWalletRequest,
+    db: Database = Depends(get_db),
+):
+    """
+    Register a wallet for monitoring. The agent automatically monitors all
+    registered wallets. Returns 201 when newly added, 200 when already tracked.
+    """
+    wallet = body.wallet.strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet must be non-empty")
+    now = int(time.time())
+    registered = db.add_tracked_wallet(wallet)
+    created_at = now if registered else (db.get_tracked_wallet_created_at(wallet) or now)
+    logger.info(
+        "track_wallet",
+        wallet_id=wallet,
+        registered=registered,
+        created_at=created_at,
+    )
+    resp = TrackWalletResponse(
+        wallet=wallet,
+        created_at=created_at,
+        registered=registered,
+    )
+    return JSONResponse(
+        status_code=201 if registered else 200,
+        content=resp.model_dump(),
+    )
 
 
 @app.get("/wallet/{address}", response_model=WalletResponse)

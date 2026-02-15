@@ -73,6 +73,14 @@ CREATE INDEX IF NOT EXISTS ix_trust_scores_wallet ON trust_scores(wallet);
 CREATE INDEX IF NOT EXISTS ix_trust_scores_wallet_computed ON trust_scores(wallet, computed_at);
 """
 
+SCHEMA_TRACKED_WALLETS = """
+CREATE TABLE IF NOT EXISTS tracked_wallets (
+    wallet TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_tracked_wallets_created_at ON tracked_wallets(created_at);
+"""
+
 
 # -----------------------------------------------------------------------------
 # Abstract backend: swap implementation for PostgreSQL later.
@@ -150,6 +158,21 @@ class DatabaseBackend(ABC):
         """Return wallet addresses from wallet_profiles, most recently seen first."""
         ...
 
+    @abstractmethod
+    def add_tracked_wallet(self, wallet: str) -> bool:
+        """Register a wallet for monitoring. Returns True if inserted, False if already present."""
+        ...
+
+    @abstractmethod
+    def get_tracked_wallet_created_at(self, wallet: str) -> int | None:
+        """Return created_at for a tracked wallet, or None if not found."""
+        ...
+
+    @abstractmethod
+    def get_tracked_wallet_addresses(self, *, limit: int = 10000) -> list[str]:
+        """Return wallet addresses from tracked_wallets registry, oldest first (FIFO)."""
+        ...
+
 
 # -----------------------------------------------------------------------------
 # SQLite backend
@@ -186,7 +209,12 @@ class SQLiteBackend(DatabaseBackend):
 
     def ensure_schema(self) -> None:
         with self._cursor() as cur:
-            for stmt in (SCHEMA_WALLET_PROFILES, SCHEMA_TRANSACTIONS, SCHEMA_TRUST_SCORES):
+            for stmt in (
+                SCHEMA_WALLET_PROFILES,
+                SCHEMA_TRANSACTIONS,
+                SCHEMA_TRUST_SCORES,
+                SCHEMA_TRACKED_WALLETS,
+            ):
                 cur.executescript(stmt)
 
     def upsert_wallet_profile(self, profile: WalletProfile) -> None:
@@ -356,6 +384,35 @@ class SQLiteBackend(DatabaseBackend):
             )
             return [row["wallet"] for row in cur.fetchall()]
 
+    def add_tracked_wallet(self, wallet: str) -> bool:
+        now = int(time.time())
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    "INSERT INTO tracked_wallets (wallet, created_at) VALUES (?, ?)",
+                    (wallet.strip(), now),
+                )
+                return cur.rowcount > 0
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_tracked_wallet_created_at(self, wallet: str) -> int | None:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT created_at FROM tracked_wallets WHERE wallet = ?",
+                (wallet.strip(),),
+            )
+            row = cur.fetchone()
+        return int(row["created_at"]) if row is not None else None
+
+    def get_tracked_wallet_addresses(self, *, limit: int = 10000) -> list[str]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT wallet FROM tracked_wallets ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            )
+            return [row["wallet"] for row in cur.fetchall()]
+
 
 # -----------------------------------------------------------------------------
 # Database facade: single entrypoint; backend is swappable.
@@ -472,6 +529,18 @@ class Database:
     def get_tracked_wallets(self, *, limit: int = 5000) -> list[str]:
         """Return wallet addresses from wallet_profiles, most recently seen first."""
         return self._backend.get_tracked_wallets(limit=limit)
+
+    def add_tracked_wallet(self, wallet: str) -> bool:
+        """Register a wallet for monitoring. Returns True if inserted, False if already present."""
+        return self._backend.add_tracked_wallet(wallet)
+
+    def get_tracked_wallet_created_at(self, wallet: str) -> int | None:
+        """Return created_at for a tracked wallet, or None if not found."""
+        return self._backend.get_tracked_wallet_created_at(wallet)
+
+    def get_tracked_wallet_addresses(self, *, limit: int = 10000) -> list[str]:
+        """Return wallet addresses from tracked_wallets registry."""
+        return self._backend.get_tracked_wallet_addresses(limit=limit)
 
 
 def get_database(path: str | Path | None = None) -> Database:
