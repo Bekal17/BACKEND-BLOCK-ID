@@ -145,6 +145,11 @@ class DatabaseBackend(ABC):
         """Return trust score timeline for a wallet, newest first."""
         ...
 
+    @abstractmethod
+    def get_tracked_wallets(self, *, limit: int = 5000) -> list[str]:
+        """Return wallet addresses from wallet_profiles, most recently seen first."""
+        ...
+
 
 # -----------------------------------------------------------------------------
 # SQLite backend
@@ -343,6 +348,14 @@ class SQLiteBackend(DatabaseBackend):
             for row in rows
         ]
 
+    def get_tracked_wallets(self, *, limit: int = 5000) -> list[str]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT wallet FROM wallet_profiles ORDER BY last_seen_at DESC LIMIT ?",
+                (limit,),
+            )
+            return [row["wallet"] for row in cur.fetchall()]
+
 
 # -----------------------------------------------------------------------------
 # Database facade: single entrypoint; backend is swappable.
@@ -455,6 +468,10 @@ class Database:
         return self._backend.get_trust_score_timeline(
             wallet, limit=limit, since_timestamp=since_timestamp, until_timestamp=until_timestamp
         )
+
+    def get_tracked_wallets(self, *, limit: int = 5000) -> list[str]:
+        """Return wallet addresses from wallet_profiles, most recently seen first."""
+        return self._backend.get_tracked_wallets(limit=limit)
 
 
 def get_database(path: str | Path | None = None) -> Database:
