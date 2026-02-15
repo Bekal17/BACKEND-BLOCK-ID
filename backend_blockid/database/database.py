@@ -484,6 +484,13 @@ class DatabaseBackend(ABC):
         ...
 
     @abstractmethod
+    def get_cluster_by_id(
+        self, cluster_id: int
+    ) -> tuple[float, str | None, float | None, int | None] | None:
+        """Return (confidence_score, reason_tags_json, cluster_risk, risk_updated_at) or None."""
+        ...
+
+    @abstractmethod
     def get_cluster_for_wallet(
         self, wallet: str
     ) -> tuple[int, float, str | None, float | None] | None:
@@ -1254,6 +1261,27 @@ class SQLiteBackend(DatabaseBackend):
             )
             return [row["wallet"] for row in cur.fetchall()]
 
+    def get_cluster_by_id(
+        self, cluster_id: int
+    ) -> tuple[float, str | None, float | None, int | None] | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT confidence_score, reason_tags, cluster_risk, risk_updated_at
+                FROM wallet_clusters WHERE cluster_id = ?
+                """,
+                (cluster_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (
+            float(row["confidence_score"]),
+            row["reason_tags"],
+            float(row["cluster_risk"]) if row["cluster_risk"] is not None else None,
+            int(row["risk_updated_at"]) if row["risk_updated_at"] is not None else None,
+        )
+
     def get_cluster_for_wallet(
         self, wallet: str
     ) -> tuple[int, float, str | None, float | None] | None:
@@ -1784,6 +1812,12 @@ class Database:
     def get_cluster_members(self, cluster_id: int) -> list[str]:
         """Return wallet addresses in the cluster."""
         return self._backend.get_cluster_members(cluster_id)
+
+    def get_cluster_by_id(
+        self, cluster_id: int
+    ) -> tuple[float, str | None, float | None, int | None] | None:
+        """Return (confidence_score, reason_tags_json, cluster_risk, risk_updated_at) or None."""
+        return self._backend.get_cluster_by_id(cluster_id)
 
     def get_cluster_for_wallet(
         self, wallet: str
