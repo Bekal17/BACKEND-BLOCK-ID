@@ -99,6 +99,16 @@ def _analyze_and_save_wallet(
     except Exception as e:
         logger.warning("periodic_risk_propagation_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
         score = base_score
+    try:
+        from backend_blockid.analysis_engine.identity_cluster import apply_cluster_penalty
+        score = apply_cluster_penalty(db, wallet, score)
+    except Exception as e:
+        logger.warning("periodic_cluster_penalty_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
+    try:
+        from backend_blockid.analysis_engine.entity_reputation import apply_entity_modifier
+        score = apply_entity_modifier(db, wallet, score)
+    except Exception as e:
+        logger.warning("periodic_entity_modifier_failed", wallet_id=wallet[:16] if wallet else "?", error=str(e))
     now = int(time.time())
     db.insert_trust_score(
         wallet,

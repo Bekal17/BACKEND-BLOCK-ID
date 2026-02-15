@@ -163,6 +163,56 @@ CREATE INDEX IF NOT EXISTS ix_wallet_graph_sender ON wallet_graph_edges(sender_w
 CREATE INDEX IF NOT EXISTS ix_wallet_graph_receiver ON wallet_graph_edges(receiver_wallet);
 """
 
+SCHEMA_WALLET_CLUSTERS = """
+CREATE TABLE IF NOT EXISTS wallet_clusters (
+    cluster_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    confidence_score REAL NOT NULL DEFAULT 0.0,
+    reason_tags TEXT,
+    cluster_risk REAL,
+    risk_updated_at INTEGER,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_clusters_confidence ON wallet_clusters(confidence_score);
+"""
+
+SCHEMA_WALLET_CLUSTER_MEMBERS = """
+CREATE TABLE IF NOT EXISTS wallet_cluster_members (
+    cluster_id INTEGER NOT NULL,
+    wallet TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (cluster_id, wallet),
+    FOREIGN KEY (cluster_id) REFERENCES wallet_clusters(cluster_id)
+);
+CREATE INDEX IF NOT EXISTS ix_wallet_cluster_members_wallet ON wallet_cluster_members(wallet);
+"""
+
+SCHEMA_ENTITY_PROFILES = """
+CREATE TABLE IF NOT EXISTS entity_profiles (
+    entity_id INTEGER PRIMARY KEY,
+    cluster_id INTEGER NOT NULL,
+    reputation_score REAL NOT NULL DEFAULT 50.0,
+    risk_history TEXT,
+    last_updated INTEGER NOT NULL,
+    decay_factor REAL NOT NULL DEFAULT 1.0,
+    reason_tags TEXT,
+    FOREIGN KEY (cluster_id) REFERENCES wallet_clusters(cluster_id)
+);
+CREATE INDEX IF NOT EXISTS ix_entity_profiles_cluster ON entity_profiles(cluster_id);
+"""
+
+SCHEMA_ENTITY_REPUTATION_HISTORY = """
+CREATE TABLE IF NOT EXISTS entity_reputation_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    reputation_score REAL NOT NULL,
+    reason_tags TEXT,
+    snapshot_at INTEGER NOT NULL,
+    FOREIGN KEY (entity_id) REFERENCES entity_profiles(entity_id)
+);
+CREATE INDEX IF NOT EXISTS ix_entity_reputation_history_entity ON entity_reputation_history(entity_id);
+CREATE INDEX IF NOT EXISTS ix_entity_reputation_history_snapshot ON entity_reputation_history(entity_id, snapshot_at DESC);
+"""
+
 
 # -----------------------------------------------------------------------------
 # Abstract backend: swap implementation for PostgreSQL later.
@@ -409,6 +459,111 @@ class DatabaseBackend(ABC):
         """Return distinct wallet addresses that share an edge with wallet (as sender or receiver)."""
         ...
 
+    @abstractmethod
+    def get_wallet_graph_edges_all(
+        self, limit: int = 50000
+    ) -> list[tuple[str, str, int, int, int]]:
+        """Return (sender_wallet, receiver_wallet, tx_count, total_volume, last_seen_timestamp) for clustering."""
+        ...
+
+    @abstractmethod
+    def insert_wallet_cluster(
+        self, confidence_score: float, reason_tags_json: str | None
+    ) -> int:
+        """Insert a cluster; return cluster_id."""
+        ...
+
+    @abstractmethod
+    def insert_wallet_cluster_member(self, cluster_id: int, wallet: str) -> None:
+        """Add wallet to cluster. Idempotent."""
+        ...
+
+    @abstractmethod
+    def get_cluster_members(self, cluster_id: int) -> list[str]:
+        """Return wallet addresses in the cluster."""
+        ...
+
+    @abstractmethod
+    def get_cluster_for_wallet(
+        self, wallet: str
+    ) -> tuple[int, float, str | None, float | None] | None:
+        """Return (cluster_id, confidence_score, reason_tags_json, cluster_risk) or None."""
+        ...
+
+    @abstractmethod
+    def get_all_clusters(
+        self,
+    ) -> list[tuple[int, float, str | None, float | None, int | None]]:
+        """Return (cluster_id, confidence_score, reason_tags_json, cluster_risk, risk_updated_at)."""
+        ...
+
+    @abstractmethod
+    def update_cluster_confidence(
+        self, cluster_id: int, confidence_score: float, reason_tags_json: str | None
+    ) -> None:
+        """Update cluster confidence and reason tags."""
+        ...
+
+    @abstractmethod
+    def update_cluster_risk(self, cluster_id: int, cluster_risk: float) -> None:
+        """Update stored cluster risk."""
+        ...
+
+    @abstractmethod
+    def delete_all_wallet_clusters(self) -> None:
+        """Remove all clusters and members; used before full recompute."""
+        ...
+
+    @abstractmethod
+    def upsert_entity_profile(
+        self,
+        entity_id: int,
+        cluster_id: int,
+        reputation_score: float,
+        risk_history_json: str | None,
+        last_updated: int,
+        decay_factor: float,
+        reason_tags_json: str | None,
+    ) -> None:
+        """Insert or update entity profile (entity_id = cluster_id for 1:1)."""
+        ...
+
+    @abstractmethod
+    def get_entity_profile(
+        self, entity_id: int
+    ) -> tuple[int, float, str | None, int, float, str | None] | None:
+        """Return (cluster_id, reputation_score, risk_history_json, last_updated, decay_factor, reason_tags_json) or None."""
+        ...
+
+    @abstractmethod
+    def get_entity_profile_by_cluster(
+        self, cluster_id: int
+    ) -> tuple[int, float, str | None, int, float, str | None] | None:
+        """Return (entity_id, reputation_score, risk_history_json, last_updated, decay_factor, reason_tags_json) or None."""
+        ...
+
+    @abstractmethod
+    def insert_entity_reputation_history(
+        self,
+        entity_id: int,
+        reputation_score: float,
+        reason_tags_json: str | None,
+        snapshot_at: int,
+    ) -> int:
+        """Append historical snapshot. Returns row id."""
+        ...
+
+    @abstractmethod
+    def get_entity_reputation_history(
+        self,
+        entity_id: int,
+        *,
+        limit: int = 100,
+        since_ts: int | None = None,
+    ) -> list[tuple[float, str | None, int]]:
+        """Return (reputation_score, reason_tags_json, snapshot_at) newest first."""
+        ...
+
 
 # -----------------------------------------------------------------------------
 # SQLite backend
@@ -456,6 +611,10 @@ class SQLiteBackend(DatabaseBackend):
                 SCHEMA_WALLET_PRIORITY,
                 SCHEMA_WALLET_REPUTATION_STATE,
                 SCHEMA_WALLET_GRAPH_EDGES,
+                SCHEMA_WALLET_CLUSTERS,
+                SCHEMA_WALLET_CLUSTER_MEMBERS,
+                SCHEMA_ENTITY_PROFILES,
+                SCHEMA_ENTITY_REPUTATION_HISTORY,
             ):
                 cur.executescript(stmt)
             cur.execute("PRAGMA table_info(tracked_wallets)")
@@ -1043,6 +1202,260 @@ class SQLiteBackend(DatabaseBackend):
             rows = cur.fetchall()
         return [row["other"] for row in rows]
 
+    def get_wallet_graph_edges_all(
+        self, limit: int = 50000
+    ) -> list[tuple[str, str, int, int, int]]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT sender_wallet, receiver_wallet, tx_count, total_volume, last_seen_timestamp
+                FROM wallet_graph_edges
+                ORDER BY last_seen_timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            (row["sender_wallet"], row["receiver_wallet"], row["tx_count"], row["total_volume"], row["last_seen_timestamp"])
+            for row in rows
+        ]
+
+    def insert_wallet_cluster(
+        self, confidence_score: float, reason_tags_json: str | None
+    ) -> int:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_clusters (confidence_score, reason_tags, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (confidence_score, reason_tags_json, now),
+            )
+            return cur.lastrowid or 0
+
+    def insert_wallet_cluster_member(self, cluster_id: int, wallet: str) -> None:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO wallet_cluster_members (cluster_id, wallet, added_at)
+                VALUES (?, ?, ?)
+                """,
+                (cluster_id, wallet.strip(), now),
+            )
+
+    def get_cluster_members(self, cluster_id: int) -> list[str]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT wallet FROM wallet_cluster_members WHERE cluster_id = ? ORDER BY added_at",
+                (cluster_id,),
+            )
+            return [row["wallet"] for row in cur.fetchall()]
+
+    def get_cluster_for_wallet(
+        self, wallet: str
+    ) -> tuple[int, float, str | None, float | None] | None:
+        w = wallet.strip()
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.cluster_id, c.confidence_score, c.reason_tags, c.cluster_risk
+                FROM wallet_clusters c
+                JOIN wallet_cluster_members m ON c.cluster_id = m.cluster_id
+                WHERE m.wallet = ?
+                """,
+                (w,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (
+            row["cluster_id"],
+            float(row["confidence_score"]),
+            row["reason_tags"],
+            float(row["cluster_risk"]) if row["cluster_risk"] is not None else None,
+        )
+
+    def get_all_clusters(
+        self,
+    ) -> list[tuple[int, float, str | None, float | None, int | None]]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT cluster_id, confidence_score, reason_tags, cluster_risk, risk_updated_at
+                FROM wallet_clusters
+                ORDER BY cluster_id
+                """
+            )
+            rows = cur.fetchall()
+        return [
+            (
+                row["cluster_id"],
+                float(row["confidence_score"]),
+                row["reason_tags"],
+                float(row["cluster_risk"]) if row["cluster_risk"] is not None else None,
+                row["risk_updated_at"],
+            )
+            for row in rows
+        ]
+
+    def update_cluster_confidence(
+        self, cluster_id: int, confidence_score: float, reason_tags_json: str | None
+    ) -> None:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE wallet_clusters
+                SET confidence_score = ?, reason_tags = ?, updated_at = ?
+                WHERE cluster_id = ?
+                """,
+                (confidence_score, reason_tags_json, now, cluster_id),
+            )
+
+    def update_cluster_risk(self, cluster_id: int, cluster_risk: float) -> None:
+        now = int(time.time())
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE wallet_clusters
+                SET cluster_risk = ?, risk_updated_at = ?
+                WHERE cluster_id = ?
+                """,
+                (cluster_risk, now, cluster_id),
+            )
+
+    def delete_all_wallet_clusters(self) -> None:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM wallet_cluster_members")
+            cur.execute("DELETE FROM wallet_clusters")
+
+    def upsert_entity_profile(
+        self,
+        entity_id: int,
+        cluster_id: int,
+        reputation_score: float,
+        risk_history_json: str | None,
+        last_updated: int,
+        decay_factor: float,
+        reason_tags_json: str | None,
+    ) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_profiles
+                (entity_id, cluster_id, reputation_score, risk_history, last_updated, decay_factor, reason_tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_id) DO UPDATE SET
+                    cluster_id = excluded.cluster_id,
+                    reputation_score = excluded.reputation_score,
+                    risk_history = excluded.risk_history,
+                    last_updated = excluded.last_updated,
+                    decay_factor = excluded.decay_factor,
+                    reason_tags = excluded.reason_tags
+                """,
+                (
+                    entity_id,
+                    cluster_id,
+                    reputation_score,
+                    risk_history_json,
+                    last_updated,
+                    decay_factor,
+                    reason_tags_json,
+                ),
+            )
+
+    def get_entity_profile(
+        self, entity_id: int
+    ) -> tuple[int, float, str | None, int, float, str | None] | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT cluster_id, reputation_score, risk_history, last_updated, decay_factor, reason_tags
+                FROM entity_profiles WHERE entity_id = ?
+                """,
+                (entity_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (
+            row["cluster_id"],
+            float(row["reputation_score"]),
+            row["risk_history"],
+            int(row["last_updated"]),
+            float(row["decay_factor"]),
+            row["reason_tags"],
+        )
+
+    def get_entity_profile_by_cluster(
+        self, cluster_id: int
+    ) -> tuple[int, float, str | None, int, float, str | None] | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT entity_id, reputation_score, risk_history, last_updated, decay_factor, reason_tags
+                FROM entity_profiles WHERE cluster_id = ?
+                """,
+                (cluster_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (
+            row["entity_id"],
+            float(row["reputation_score"]),
+            row["risk_history"],
+            int(row["last_updated"]),
+            float(row["decay_factor"]),
+            row["reason_tags"],
+        )
+
+    def insert_entity_reputation_history(
+        self,
+        entity_id: int,
+        reputation_score: float,
+        reason_tags_json: str | None,
+        snapshot_at: int,
+    ) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_reputation_history (entity_id, reputation_score, reason_tags, snapshot_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (entity_id, reputation_score, reason_tags_json, snapshot_at),
+            )
+            return cur.lastrowid or 0
+
+    def get_entity_reputation_history(
+        self,
+        entity_id: int,
+        *,
+        limit: int = 100,
+        since_ts: int | None = None,
+    ) -> list[tuple[float, str | None, int]]:
+        sql = """
+            SELECT reputation_score, reason_tags, snapshot_at
+            FROM entity_reputation_history
+            WHERE entity_id = ?
+        """
+        params: list[Any] = [entity_id]
+        if since_ts is not None:
+            sql += " AND snapshot_at >= ?"
+            params.append(since_ts)
+        sql += " ORDER BY snapshot_at DESC LIMIT ?"
+        params.append(limit)
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [
+            (float(r["reputation_score"]), r["reason_tags"], int(r["snapshot_at"]))
+            for r in rows
+        ]
+
 
 # -----------------------------------------------------------------------------
 # Database facade: single entrypoint; backend is swappable.
@@ -1351,6 +1764,111 @@ class Database:
     def get_wallet_graph_adjacent(self, wallet: str) -> list[str]:
         """Return distinct wallets that share an edge with wallet (sender or receiver)."""
         return self._backend.get_wallet_graph_adjacent(wallet)
+
+    def get_wallet_graph_edges_all(
+        self, limit: int = 50000
+    ) -> list[tuple[str, str, int, int, int]]:
+        """Return (sender, receiver, tx_count, total_volume, last_seen_timestamp) for clustering."""
+        return self._backend.get_wallet_graph_edges_all(limit=limit)
+
+    def insert_wallet_cluster(
+        self, confidence_score: float, reason_tags_json: str | None
+    ) -> int:
+        """Insert a cluster; return cluster_id."""
+        return self._backend.insert_wallet_cluster(confidence_score, reason_tags_json)
+
+    def insert_wallet_cluster_member(self, cluster_id: int, wallet: str) -> None:
+        """Add wallet to cluster. Idempotent."""
+        self._backend.insert_wallet_cluster_member(cluster_id, wallet)
+
+    def get_cluster_members(self, cluster_id: int) -> list[str]:
+        """Return wallet addresses in the cluster."""
+        return self._backend.get_cluster_members(cluster_id)
+
+    def get_cluster_for_wallet(
+        self, wallet: str
+    ) -> tuple[int, float, str | None, float | None] | None:
+        """Return (cluster_id, confidence_score, reason_tags_json, cluster_risk) or None."""
+        return self._backend.get_cluster_for_wallet(wallet)
+
+    def get_all_clusters(
+        self,
+    ) -> list[tuple[int, float, str | None, float | None, int | None]]:
+        """Return (cluster_id, confidence_score, reason_tags_json, cluster_risk, risk_updated_at)."""
+        return self._backend.get_all_clusters()
+
+    def update_cluster_confidence(
+        self, cluster_id: int, confidence_score: float, reason_tags_json: str | None
+    ) -> None:
+        """Update cluster confidence and reason tags."""
+        self._backend.update_cluster_confidence(
+            cluster_id, confidence_score, reason_tags_json
+        )
+
+    def update_cluster_risk(self, cluster_id: int, cluster_risk: float) -> None:
+        """Update stored cluster risk."""
+        self._backend.update_cluster_risk(cluster_id, cluster_risk)
+
+    def delete_all_wallet_clusters(self) -> None:
+        """Remove all clusters and members; used before full recompute."""
+        self._backend.delete_all_wallet_clusters()
+
+    def upsert_entity_profile(
+        self,
+        entity_id: int,
+        cluster_id: int,
+        reputation_score: float,
+        risk_history_json: str | None,
+        last_updated: int,
+        decay_factor: float,
+        reason_tags_json: str | None,
+    ) -> None:
+        """Insert or update entity profile (entity_id = cluster_id for 1:1)."""
+        self._backend.upsert_entity_profile(
+            entity_id,
+            cluster_id,
+            reputation_score,
+            risk_history_json,
+            last_updated,
+            decay_factor,
+            reason_tags_json,
+        )
+
+    def get_entity_profile(
+        self, entity_id: int
+    ) -> tuple[int, float, str | None, int, float, str | None] | None:
+        """Return (cluster_id, reputation_score, risk_history_json, last_updated, decay_factor, reason_tags_json) or None."""
+        return self._backend.get_entity_profile(entity_id)
+
+    def get_entity_profile_by_cluster(
+        self, cluster_id: int
+    ) -> tuple[int, float, str | None, int, float, str | None] | None:
+        """Return (entity_id, reputation_score, risk_history_json, last_updated, decay_factor, reason_tags_json) or None."""
+        return self._backend.get_entity_profile_by_cluster(cluster_id)
+
+    def insert_entity_reputation_history(
+        self,
+        entity_id: int,
+        reputation_score: float,
+        reason_tags_json: str | None,
+        snapshot_at: int,
+    ) -> int:
+        """Append historical snapshot. Returns row id."""
+        return self._backend.insert_entity_reputation_history(
+            entity_id, reputation_score, reason_tags_json, snapshot_at
+        )
+
+    def get_entity_reputation_history(
+        self,
+        entity_id: int,
+        *,
+        limit: int = 100,
+        since_ts: int | None = None,
+    ) -> list[tuple[float, str | None, int]]:
+        """Return (reputation_score, reason_tags_json, snapshot_at) newest first."""
+        return self._backend.get_entity_reputation_history(
+            entity_id, limit=limit, since_ts=since_ts
+        )
 
 
 def get_database(path: str | Path | None = None) -> Database:
