@@ -10,7 +10,6 @@ balance-delta fallback for other flows.
 from __future__ import annotations
 
 import base64
-import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,7 +19,9 @@ try:
 except ImportError:
     _base58 = None  # type: ignore[assignment]
 
-logger = logging.getLogger(__name__)
+from backend_blockid.logging import get_logger
+
+logger = get_logger(__name__)
 
 # System Program (native SOL transfers)
 SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"

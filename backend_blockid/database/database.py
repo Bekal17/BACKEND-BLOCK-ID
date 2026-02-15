@@ -9,7 +9,6 @@ SQL and placeholders are backend-specific (? for SQLite, %s for PostgreSQL).
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
 import time
 from abc import ABC, abstractmethod
@@ -22,8 +21,9 @@ from backend_blockid.database.models import (
     TrustScoreRecord,
     WalletProfile,
 )
+from backend_blockid.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # -----------------------------------------------------------------------------
 # Schema (SQLite). For PostgreSQL: use SERIAL/BIGSERIAL, TIMESTAMPTZ, and %s.

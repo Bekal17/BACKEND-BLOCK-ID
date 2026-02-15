@@ -8,7 +8,6 @@ Agent runner — main event loop and process lifecycle.
 
 from __future__ import annotations
 
-import logging
 import os
 import threading
 import time
@@ -17,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.agent_worker.worker import WorkerConfig, run_worker
+from backend_blockid.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DEFAULT_PERIODIC_INTERVAL_SEC = 30.0
 DEFAULT_MAX_WALLETS_PER_TICK = 2000
@@ -54,7 +54,7 @@ def _analyze_and_save_wallet(
 
     history = db.get_transaction_history(wallet, limit=max_history)
     if not history:
-        logger.debug("Periodic runner: wallet %s has no history, skip", wallet[:8])
+        logger.debug("periodic_wallet_skip_no_history", wallet_id=wallet)
         return
     txs = [
         ParsedTransaction(
@@ -88,10 +88,11 @@ def _analyze_and_save_wallet(
     )
     if anomaly_result.flags:
         logger.info(
-            "Periodic runner: wallet %s score=%.1f flags=%d",
-            wallet[:8],
-            score,
-            len(anomaly_result.flags),
+            "periodic_wallet_anomalies",
+            wallet_id=wallet,
+            trust_score=round(score, 2),
+            anomaly_flags=[f.to_dict() for f in anomaly_result.flags],
+            flag_count=len(anomaly_result.flags),
         )
 
 
@@ -110,10 +111,10 @@ def run_periodic_worker(
     db = get_database(config.db_path)
     interval = max(1.0, config.interval_sec)
     logger.info(
-        "Periodic runner started: interval=%.1fs max_wallets_per_tick=%d db=%s",
-        interval,
-        config.max_wallets_per_tick,
-        config.db_path,
+        "periodic_runner_started",
+        interval_sec=interval,
+        max_wallets_per_tick=config.max_wallets_per_tick,
+        db_path=str(config.db_path),
     )
     tick_count = 0
     while not stop_event.is_set():
@@ -124,7 +125,7 @@ def run_periodic_worker(
             processed = 0
             errors = 0
             if not wallets:
-                logger.debug("Periodic runner tick %d: no tracked wallets", tick_count)
+                logger.debug("periodic_tick_no_wallets", tick=tick_count)
             else:
                 for wallet in wallets:
                     if stop_event.is_set():
@@ -140,25 +141,24 @@ def run_periodic_worker(
                     except Exception as e:
                         errors += 1
                         logger.warning(
-                            "Periodic runner: wallet %s failed: %s",
-                            wallet[:8] if wallet else "?",
-                            e,
-                            exc_info=False,
+                            "periodic_wallet_failed",
+                            wallet_id=wallet[:8] if wallet else "?",
+                            error=str(e),
                         )
                 logger.info(
-                    "Periodic runner tick %d: wallets=%d processed=%d errors=%d",
-                    tick_count,
-                    len(wallets),
-                    processed,
-                    errors,
+                    "periodic_tick_done",
+                    tick=tick_count,
+                    wallets=len(wallets),
+                    processed=processed,
+                    errors=errors,
                 )
         except Exception as e:
-            logger.exception("Periodic runner tick %d failed: %s", tick_count, e)
+            logger.exception("periodic_tick_failed", tick=tick_count, error=str(e))
         # Sleep until next tick; wake periodically to check stop_event
         deadline = tick_start + interval
         while not stop_event.is_set() and time.monotonic() < deadline:
             stop_event.wait(timeout=min(1.0, max(0, deadline - time.monotonic())))
-    logger.info("Periodic runner stopped after %d ticks", tick_count)
+    logger.info("periodic_runner_stopped", tick_count=tick_count)
 
 
 def run_agent() -> None:

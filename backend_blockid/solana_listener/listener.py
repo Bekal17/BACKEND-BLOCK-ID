@@ -9,16 +9,16 @@ Responsibilities:
 """
 
 import asyncio
-import logging
 import signal
 from collections import deque
 from typing import Any, Awaitable, Callable
 
 import httpx
 
+from backend_blockid.logging import get_logger
 from backend_blockid.solana_listener.models import SignatureInfo
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # JSON-RPC request id counter
 _request_id = 0
@@ -119,7 +119,7 @@ class SolanaListener:
         """
         def _handle_sig(signum: int, frame: Any) -> None:
             sig = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-            logger.info("Received %s, initiating shutdown", sig)
+            logger.info("listener_shutdown_signal", signal=sig)
             self._stop_event.set()
 
         try:
@@ -133,9 +133,9 @@ class SolanaListener:
         try:
             asyncio.run(self._run_forever())
         except KeyboardInterrupt:
-            logger.info("KeyboardInterrupt, exiting")
+            logger.info("listener_keyboard_interrupt")
         finally:
-            logger.info("Listener stopped")
+            logger.info("listener_stopped")
 
     async def stop(self) -> None:
         """Request shutdown; the poll loop will exit after the current cycle."""
@@ -143,10 +143,10 @@ class SolanaListener:
 
     async def _run_forever(self) -> None:
         logger.info(
-            "Starting Solana listener for %d wallet(s), poll_interval=%.1fs, rpc=%s",
-            len(self._wallets),
-            self._poll_interval_sec,
-            self._rpc_url,
+            "listener_started",
+            wallet_count=len(self._wallets),
+            poll_interval_sec=self._poll_interval_sec,
+            rpc_url=self._rpc_url,
         )
         while not self._stop_event.is_set():
             try:
@@ -154,7 +154,7 @@ class SolanaListener:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.exception("Unexpected error in poll cycle: %s", e)
+                logger.exception("listener_poll_cycle_error", error=str(e))
             if self._stop_event.is_set():
                 break
             try:
@@ -163,7 +163,7 @@ class SolanaListener:
                 )
             except asyncio.TimeoutError:
                 pass
-        logger.info("Poll loop exited")
+        logger.info("listener_poll_loop_exited")
 
     async def _poll_once(self) -> None:
         """Fetch signatures for all wallets and emit new ones via callback."""
@@ -204,21 +204,21 @@ class SolanaListener:
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    "RPC request failed for wallet %s (attempt %d/%d): %s",
-                    wallet[:8] + "...",
-                    attempt + 1,
-                    self._max_retries_per_poll,
-                    e,
+                    "listener_rpc_retry",
+                    wallet_id=wallet[:8] + "...",
+                    attempt=attempt + 1,
+                    max_retries=self._max_retries_per_poll,
+                    error=str(e),
                 )
                 if attempt + 1 < self._max_retries_per_poll:
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, self._max_retry_delay)
                 else:
                     logger.error(
-                        "Giving up after %d retries for wallet %s: %s",
-                        self._max_retries_per_poll,
-                        wallet[:8] + "...",
-                        last_error,
+                        "listener_rpc_give_up",
+                        wallet_id=wallet[:8] + "...",
+                        max_retries=self._max_retries_per_poll,
+                        error=str(last_error),
                     )
                     return []
 
@@ -242,10 +242,10 @@ class SolanaListener:
         infos.reverse()
         if infos:
             logger.info(
-                "Wallet %s: %d new signature(s), oldest slot=%s",
-                wallet[:8] + "...",
-                len(infos),
-                infos[0].slot if infos else None,
+                "listener_new_signatures",
+                wallet_id=wallet,
+                signature_count=len(infos),
+                oldest_slot=infos[0].slot if infos else None,
             )
         return infos
 
@@ -283,4 +283,8 @@ class SolanaListener:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, lambda: cb(wallet, infos))
         except Exception as e:
-            logger.exception("on_transaction callback failed for %s: %s", wallet[:8], e)
+            logger.exception(
+                "listener_callback_failed",
+                wallet_id=wallet,
+                error=str(e),
+            )

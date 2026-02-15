@@ -10,20 +10,15 @@ Env: WALLETS (required), SOLANA_RPC_URL, DB_PATH, API_HOST, API_PORT, etc.
 API-only (no agent): uvicorn backend_blockid.api_server.app:app --host 0.0.0.0 --port 8000
 """
 
-import logging
 import os
 import sys
 import threading
 from pathlib import Path
 
-# Configure logging before other imports that may log
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-    stream=sys.stdout,
-)
-logger = logging.getLogger(__name__)
+# Configure structured JSON logging before other imports that may log
+from backend_blockid.logging import get_logger
+
+logger = get_logger("main")
 
 
 def main() -> None:
@@ -31,7 +26,7 @@ def main() -> None:
     wallets_raw = os.getenv("WALLETS", "").strip()
     wallets = [w.strip() for w in wallets_raw.split(",") if w.strip()]
     if not wallets:
-        logger.error("WALLETS env must be set (comma-separated wallet addresses)")
+        logger.error("main_config_error", message="WALLETS env must be set (comma-separated wallet addresses)")
         sys.exit(1)
 
     rpc_url = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com").strip()
@@ -51,12 +46,12 @@ def main() -> None:
 
     worker_thread = threading.Thread(target=run_worker, args=(config,), daemon=True)
     worker_thread.start()
-    logger.info("Agent worker started in background thread (daemon)")
+    logger.info("main_worker_started", thread="daemon")
 
     from backend_blockid.api_server.app import app
     import uvicorn
 
-    logger.info("Starting FastAPI server on %s:%s", api_host, api_port)
+    logger.info("main_server_starting", host=api_host, port=api_port)
     uvicorn.run(app, host=api_host, port=api_port, log_level=os.getenv("LOG_LEVEL", "info").lower())
 
 

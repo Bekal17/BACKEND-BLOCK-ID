@@ -8,7 +8,6 @@ Reads from database only; does not compute scores. Config via env (DB_PATH).
 from __future__ import annotations
 
 import json
-import logging
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -20,8 +19,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend_blockid.database import get_database, Database
+from backend_blockid.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Periodic runner: interval and shutdown join timeout (seconds)
 PERIODIC_INTERVAL_SEC = float(os.getenv("PERIODIC_INTERVAL_SEC", "30").strip() or "30")
@@ -82,14 +82,17 @@ async def lifespan(app: FastAPI):
         daemon=True,
     )
     thread.start()
-    logger.info("Background periodic runner started (interval=%.1fs)", config.interval_sec)
+    logger.info("api_periodic_runner_started", interval_sec=config.interval_sec)
     yield
     stop_event.set()
     thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT_SEC)
     if thread.is_alive():
-        logger.warning("Periodic runner did not stop within %.0fs", SHUTDOWN_JOIN_TIMEOUT_SEC)
+        logger.warning(
+            "api_periodic_runner_shutdown_timeout",
+            timeout_sec=SHUTDOWN_JOIN_TIMEOUT_SEC,
+        )
     else:
-        logger.info("Periodic runner stopped")
+        logger.info("api_periodic_runner_stopped")
 
 
 # -----------------------------------------------------------------------------

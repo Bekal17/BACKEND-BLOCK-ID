@@ -9,7 +9,6 @@ the agent keeps running.
 
 from __future__ import annotations
 
-import logging
 import queue
 import threading
 import time
@@ -24,11 +23,12 @@ from backend_blockid.analysis_engine.features import extract_features
 from backend_blockid.analysis_engine.scorer import compute_trust_score
 from backend_blockid.database import get_database
 from backend_blockid.database.models import WalletProfile
+from backend_blockid.logging import get_logger
 from backend_blockid.solana_listener.listener import SolanaListener
 from backend_blockid.solana_listener.models import SignatureInfo
 from backend_blockid.solana_listener.parser import ParsedTransaction, parse
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Default heartbeat interval (seconds)
 DEFAULT_HEARTBEAT_INTERVAL_SEC = 30.0
@@ -56,11 +56,11 @@ def fetch_transaction(rpc_url: str, signature: str) -> dict[str, Any] | None:
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        logger.debug("getTransaction %s failed: %s", signature[:16], e)
+        logger.debug("worker_fetch_tx_failed", signature=signature[:16], error=str(e))
         return None
     err = data.get("error")
     if err:
-        logger.debug("getTransaction RPC error: %s", err)
+        logger.debug("worker_fetch_tx_rpc_error", error=str(err))
         return None
     result = data.get("result")
     if result is None:
@@ -121,7 +121,12 @@ def process_wallet_batch(
     if not parsed_list:
         return
     inserted = db.insert_parsed_transactions(wallet, parsed_list)
-    logger.info("Wallet %s: inserted %d/%d new transactions", wallet[:8], inserted, len(parsed_list))
+    logger.info(
+        "worker_transactions_inserted",
+        wallet_id=wallet,
+        inserted=inserted,
+        total=len(parsed_list),
+    )
     history = db.get_transaction_history(wallet, limit=max_history)
     if not history:
         return
@@ -162,6 +167,15 @@ def process_wallet_batch(
     state.last_wallet_processed = wallet
     state.last_processed_at = time.time()
     state.processed_count += 1
+    anomaly_flags = [f.to_dict() for f in anomaly_result.flags]
+    logger.info(
+        "worker_wallet_analyzed",
+        wallet_id=wallet,
+        trust_score=round(score, 2),
+        anomaly_flags=anomaly_flags,
+        is_anomalous=anomaly_result.is_anomalous,
+        tx_count=features.tx_count,
+    )
 
 
 def run_worker(config: WorkerConfig) -> None:
@@ -187,11 +201,11 @@ def run_worker(config: WorkerConfig) -> None:
     listener_thread = threading.Thread(target=listener.start, daemon=True)
     listener_thread.start()
     logger.info(
-        "Agent worker started: %d wallet(s), poll=%.1fs, heartbeat=%.1fs, db=%s",
-        len(config.wallets),
-        config.poll_interval_sec,
-        config.heartbeat_interval_sec,
-        config.db_path,
+        "worker_started",
+        wallet_count=len(config.wallets),
+        poll_interval_sec=config.poll_interval_sec,
+        heartbeat_interval_sec=config.heartbeat_interval_sec,
+        db_path=str(config.db_path),
     )
     heartbeat_interval = max(1.0, config.heartbeat_interval_sec)
     last_heartbeat = time.monotonic()
@@ -207,13 +221,13 @@ def run_worker(config: WorkerConfig) -> None:
                 now = time.monotonic()
                 if now - last_heartbeat >= heartbeat_interval:
                     logger.info(
-                        "heartbeat | queue_size=%d last_wallet=%s last_processed_at=%s processed=%d errors=%d last_error=%s",
-                        work_queue.qsize(),
-                        state.last_wallet_processed,
-                        state.last_processed_at,
-                        state.processed_count,
-                        state.error_count,
-                        state.last_error or "none",
+                        "worker_heartbeat",
+                        queue_size=work_queue.qsize(),
+                        last_wallet=state.last_wallet_processed,
+                        last_processed_at=state.last_processed_at,
+                        processed_count=state.processed_count,
+                        error_count=state.error_count,
+                        last_error=state.last_error,
                     )
                     last_heartbeat = now
                 if wallet is not None and sigs:
@@ -227,12 +241,12 @@ def run_worker(config: WorkerConfig) -> None:
                         state,
                     )
             except KeyboardInterrupt:
-                logger.info("Agent worker received shutdown signal")
+                logger.info("worker_shutdown_signal")
                 break
             except Exception as e:
                 state.error_count += 1
                 state.last_error = str(e)
-                logger.exception("Worker batch failed: %s", e)
+                logger.exception("worker_batch_failed", error=str(e))
                 continue
     finally:
-        logger.info("Agent worker stopped")
+        logger.info("worker_stopped")

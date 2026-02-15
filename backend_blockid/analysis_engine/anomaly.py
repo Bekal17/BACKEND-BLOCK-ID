@@ -8,14 +8,14 @@ reason. No ML; thresholds are configurable.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from backend_blockid.analysis_engine.features import WalletFeatureVector
+from backend_blockid.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AnomalySeverity(str, Enum):
@@ -338,7 +338,11 @@ def detect_anomalies(
             if flag is not None:
                 flags.append(flag)
         except Exception as e:
-            logger.warning("Anomaly rule %s failed: %s", check.__name__, e, exc_info=True)
+            logger.warning(
+                "anomaly_rule_failed",
+                rule=check.__name__,
+                error=str(e),
+            )
 
     return AnomalyResult(
         wallet=features.wallet,

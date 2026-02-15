@@ -9,13 +9,13 @@ for downstream scoring, ML, or API exposure.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
+from backend_blockid.logging import get_logger
 from backend_blockid.solana_listener.parser import ParsedTransaction
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Seconds per day for frequency/velocity normalization
 SECONDS_PER_DAY = 86400
