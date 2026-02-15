@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from backend_blockid.alerts.engine import AlertConfig, evaluate_and_store_alerts
 from backend_blockid.analysis_engine.anomaly import AnomalyConfig, detect_anomalies
 from backend_blockid.analysis_engine.features import extract_features
 from backend_blockid.analysis_engine.scorer import compute_trust_score
@@ -78,6 +79,7 @@ class WorkerConfig:
     poll_interval_sec: float = 45.0
     heartbeat_interval_sec: float = DEFAULT_HEARTBEAT_INTERVAL_SEC
     anomaly_config: AnomalyConfig | None = None
+    alert_config: AlertConfig | None = None
     max_tx_history_for_features: int = 500
 
 
@@ -98,6 +100,7 @@ def process_wallet_batch(
     rpc_url: str,
     db: Any,
     anomaly_config: AnomalyConfig | None,
+    alert_config: AlertConfig | None,
     max_history: int,
     state: WorkerState,
 ) -> None:
@@ -164,6 +167,9 @@ def process_wallet_batch(
         profile_json=None,
     )
     db.upsert_wallet_profile(profile)
+    stored_alerts = evaluate_and_store_alerts(
+        wallet, round(score, 2), anomaly_result, db, config=alert_config
+    )
     state.last_wallet_processed = wallet
     state.last_processed_at = time.time()
     state.processed_count += 1
@@ -175,6 +181,7 @@ def process_wallet_batch(
         anomaly_flags=anomaly_flags,
         is_anomalous=anomaly_result.is_anomalous,
         tx_count=features.tx_count,
+        alerts_stored=stored_alerts,
     )
 
 
@@ -237,6 +244,7 @@ def run_worker(config: WorkerConfig) -> None:
                         config.rpc_url,
                         db,
                         anomaly_cfg,
+                        config.alert_config,
                         config.max_tx_history_for_features,
                         state,
                     )

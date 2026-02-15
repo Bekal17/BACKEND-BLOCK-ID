@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS tracked_wallets (
 CREATE INDEX IF NOT EXISTS ix_tracked_wallets_created_at ON tracked_wallets(created_at);
 """
 
+SCHEMA_ALERTS = """
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_alerts_wallet ON alerts(wallet);
+CREATE INDEX IF NOT EXISTS ix_alerts_wallet_severity_reason_created ON alerts(wallet, severity, reason, created_at);
+CREATE INDEX IF NOT EXISTS ix_alerts_created_at ON alerts(created_at);
+"""
+
 
 # -----------------------------------------------------------------------------
 # Abstract backend: swap implementation for PostgreSQL later.
@@ -173,6 +186,22 @@ class DatabaseBackend(ABC):
         """Return wallet addresses from tracked_wallets registry, oldest first (FIFO)."""
         ...
 
+    @abstractmethod
+    def insert_alert(self, wallet: str, severity: str, reason: str, created_at: int) -> int:
+        """Insert an alert. Returns row id."""
+        ...
+
+    @abstractmethod
+    def has_recent_alert(
+        self,
+        wallet: str,
+        severity: str,
+        reason: str,
+        since_created_at: int,
+    ) -> bool:
+        """True if an alert (wallet, severity, reason) exists with created_at >= since_created_at."""
+        ...
+
 
 # -----------------------------------------------------------------------------
 # SQLite backend
@@ -214,6 +243,7 @@ class SQLiteBackend(DatabaseBackend):
                 SCHEMA_TRANSACTIONS,
                 SCHEMA_TRUST_SCORES,
                 SCHEMA_TRACKED_WALLETS,
+                SCHEMA_ALERTS,
             ):
                 cur.executescript(stmt)
 
@@ -413,6 +443,32 @@ class SQLiteBackend(DatabaseBackend):
             )
             return [row["wallet"] for row in cur.fetchall()]
 
+    def insert_alert(self, wallet: str, severity: str, reason: str, created_at: int) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO alerts (wallet, severity, reason, created_at) VALUES (?, ?, ?, ?)",
+                (wallet.strip(), severity.strip(), reason.strip(), created_at),
+            )
+            return cur.lastrowid or 0
+
+    def has_recent_alert(
+        self,
+        wallet: str,
+        severity: str,
+        reason: str,
+        since_created_at: int,
+    ) -> bool:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM alerts
+                WHERE wallet = ? AND severity = ? AND reason = ? AND created_at >= ?
+                LIMIT 1
+                """,
+                (wallet.strip(), severity.strip(), reason.strip(), since_created_at),
+            )
+            return cur.fetchone() is not None
+
 
 # -----------------------------------------------------------------------------
 # Database facade: single entrypoint; backend is swappable.
@@ -541,6 +597,22 @@ class Database:
     def get_tracked_wallet_addresses(self, *, limit: int = 10000) -> list[str]:
         """Return wallet addresses from tracked_wallets registry."""
         return self._backend.get_tracked_wallet_addresses(limit=limit)
+
+    def insert_alert(self, wallet: str, severity: str, reason: str, created_at: int | None = None) -> int:
+        """Insert an alert. created_at defaults to now. Returns row id."""
+        now = int(time.time())
+        created_at = created_at if created_at is not None else now
+        return self._backend.insert_alert(wallet, severity, reason, created_at)
+
+    def has_recent_alert(
+        self,
+        wallet: str,
+        severity: str,
+        reason: str,
+        since_created_at: int,
+    ) -> bool:
+        """True if an alert (wallet, severity, reason) exists with created_at >= since_created_at."""
+        return self._backend.has_recent_alert(wallet, severity, reason, since_created_at)
 
 
 def get_database(path: str | Path | None = None) -> Database:

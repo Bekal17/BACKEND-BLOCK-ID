@@ -34,18 +34,21 @@ class PeriodicRunnerConfig:
     max_wallets_per_tick: int = DEFAULT_MAX_WALLETS_PER_TICK
     max_tx_history_per_wallet: int = 500
     anomaly_config: Any = None
+    alert_config: Any = None
 
 
 def _analyze_and_save_wallet(
     wallet: str,
     db: Any,
     anomaly_config: Any,
+    alert_config: Any,
     max_history: int,
 ) -> None:
     """
     Load wallet history from DB, compute features, anomalies, trust score;
-    write trust score and anomalies to DB. Swallow exceptions and log.
+    write trust score, anomalies, and alerts to DB. Swallow exceptions and log.
     """
+    from backend_blockid.alerts.engine import evaluate_and_store_alerts
     from backend_blockid.database.models import WalletProfile
     from backend_blockid.solana_listener.parser import ParsedTransaction
     from backend_blockid.analysis_engine.features import extract_features
@@ -86,6 +89,9 @@ def _analyze_and_save_wallet(
     db.upsert_wallet_profile(
         WalletProfile(wallet=wallet, first_seen_at=ts_min, last_seen_at=ts_max, profile_json=None)
     )
+    stored_alerts = evaluate_and_store_alerts(
+        wallet, round(score, 2), anomaly_result, db, config=alert_config
+    )
     if anomaly_result.flags:
         logger.info(
             "periodic_wallet_anomalies",
@@ -93,6 +99,7 @@ def _analyze_and_save_wallet(
             trust_score=round(score, 2),
             anomaly_flags=[f.to_dict() for f in anomaly_result.flags],
             flag_count=len(anomaly_result.flags),
+            alerts_stored=stored_alerts,
         )
 
 
@@ -135,6 +142,7 @@ def run_periodic_worker(
                             wallet,
                             db,
                             config.anomaly_config,
+                            config.alert_config,
                             config.max_tx_history_per_wallet,
                         )
                         processed += 1
