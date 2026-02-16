@@ -21,6 +21,10 @@ import sys
 import time
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Run from project root so backend_blockid is importable
 if __name__ == "__main__" and not __package__:
     _root = os.path.abspath(os.path.dirname(__file__))
@@ -92,7 +96,8 @@ def _wait_confirmed(client: Any, signature: str) -> bool:
                 if getattr(st, "err", None) is not None:
                     logger.error("publish_one_wallet_tx_failed_on_chain", signature=signature, err=str(st.err))
                     return False
-                if (getattr(st, "confirmation_status", None) or "") in ("confirmed", "finalized"):
+                confirmation_status = getattr(st, "confirmation_status", None) or ""
+                if confirmation_status in ("confirmed", "finalized"):
                     return True
             time.sleep(CONFIRM_POLL_INTERVAL_SEC)
         except Exception as e:
@@ -136,7 +141,7 @@ def main() -> int:
 
     wallet_str = (args.wallet or "").strip()
     if not wallet_str:
-        logger.error("WALLET required: set WALLET env or pass wallet pubkey as first argument")
+        logger.error("WALLET is required. Set WALLET in .env or pass wallet pubkey as the first argument.")
         return 1
     score = args.score
     if score is None:
@@ -150,7 +155,7 @@ def main() -> int:
     oracle_key = (os.getenv("ORACLE_PRIVATE_KEY") or "").strip()
     program_id_str = (os.getenv("ORACLE_PROGRAM_ID") or "").strip()
     if not oracle_key:
-        logger.error("ORACLE_PRIVATE_KEY required")
+        logger.error("ORACLE_PRIVATE_KEY is required. Set it in .env or the environment.")
         return 1
     if not program_id_str:
         logger.error("ORACLE_PROGRAM_ID required")
@@ -159,6 +164,10 @@ def main() -> int:
     client = Client(rpc_url)
     keypair = _load_keypair(oracle_key)
     oracle_pubkey = keypair.pubkey()
+    print("=== DEBUG ORACLE KEY ===")
+    print("KEYPAIR PUBKEY:", keypair.pubkey())
+    print("ORACLE PUBKEY:", oracle_pubkey)
+    print("========================")
     program_id = Pubkey.from_string(program_id_str)
     wallet_pubkey = Pubkey.from_string(wallet_str)
     sys_program_id = Pubkey.from_string("11111111111111111111111111111111")
@@ -169,14 +178,16 @@ def main() -> int:
     )
 
     resp = client.get_latest_blockhash()
-    recent_blockhash = getattr(resp, "value", None) or (
+    blockhash_value = getattr(resp, "value", None) or (
         getattr(resp.result, "value", None) if hasattr(resp, "result") else None
     )
-    if not recent_blockhash:
+    if not blockhash_value:
         logger.error("get_latest_blockhash failed")
         return 1
+    # solana-py >= 0.30: get_latest_blockhash returns RpcBlockhash; Transaction expects Hash from .value.blockhash
+    blockhash = getattr(blockhash_value, "blockhash", blockhash_value)
 
-    tx = Transaction(recent_blockhash=recent_blockhash, fee_payer=oracle_pubkey)
+    tx = Transaction(recent_blockhash=blockhash, fee_payer=oracle_pubkey)
     tx.add(ix)
 
     try:
@@ -190,6 +201,11 @@ def main() -> int:
 
     logger.info("oracle_tx_sent", signature=signature, wallet=wallet_str[:16] + "...", score=score)
     print(f"tx_signature={signature}")
+
+    from solders.signature import Signature
+    sig = Signature.from_string(signature)
+    status = client.get_signature_statuses([sig])
+    print("STATUS:", status)
 
     if not _wait_confirmed(client, signature):
         return 1

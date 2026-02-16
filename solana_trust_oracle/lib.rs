@@ -1,33 +1,36 @@
-//! Trust Oracle — Anchor-compatible interface spec only.
-//! No deployment; use as the contract surface for the Solana program.
+//! BlockID Oracle — Anchor program for on-chain trust scores.
+//! Oracle authority updates TrustScoreAccount per wallet.
 
 use anchor_lang::prelude::*;
 
 declare_id!("TRUSTxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
 
 #[program]
-pub mod trust_oracle {
+pub mod blockid_oracle {
     use super::*;
 
-    /// Updates the on-chain trust score and risk level for a wallet.
-    /// Callable only by the account's oracle authority.
+    /// Updates the on-chain trust score and risk for a wallet.
+    /// Callable only by the oracle authority (signer).
     pub fn update_trust_score(
         ctx: Context<UpdateTrustScore>,
-        trust_score: u8,
-        risk_level: RiskLevel,
+        wallet: Pubkey,
+        score: u8,
+        risk: u8,
     ) -> Result<()> {
+        require!(ctx.accounts.wallet.key() == wallet, TrustOracleError::InvalidWallet);
+        require!(score <= 100, TrustOracleError::InvalidTrustScore);
+        require!(risk <= 3, TrustOracleError::InvalidRisk);
+
         let account = &mut ctx.accounts.trust_score_account;
-        require!(trust_score <= 100, TrustOracleError::InvalidTrustScore);
-        account.wallet_pubkey = ctx.accounts.wallet.key();
-        account.trust_score = trust_score;
-        account.risk_level = risk_level;
-        account.last_updated = Clock::get()?.unix_timestamp;
-        account.oracle_pubkey = ctx.accounts.oracle.key();
+        account.wallet = wallet;
+        account.score = score;
+        account.risk = risk;
+        account.updated_at = Clock::get()?.unix_timestamp;
+
         Ok(())
     }
 
     /// Read-only: client fetches trust_score_account via RPC; no state change.
-    /// Exposed so IDL includes the "get" entrypoint; implementation is no-op.
     pub fn get_trust_score(_ctx: Context<GetTrustScore>) -> Result<()> {
         Ok(())
     }
@@ -41,33 +44,17 @@ pub mod trust_oracle {
 #[derive(Default)]
 pub struct TrustScoreAccount {
     /// Wallet whose trust score is stored.
-    pub wallet_pubkey: Pubkey,
+    pub wallet: Pubkey,
     /// Score 0–100.
-    pub trust_score: u8,
-    /// Risk level enum (u8).
-    pub risk_level: RiskLevel,
+    pub score: u8,
+    /// Risk level 0–3 (e.g. Low=0, Medium=1, High=2, Critical=3).
+    pub risk: u8,
     /// Unix timestamp (seconds) of last update.
-    pub last_updated: i64,
-    /// Oracle authority that may update this account.
-    pub oracle_pubkey: Pubkey,
+    pub updated_at: i64,
 }
 
 impl TrustScoreAccount {
-    pub const LEN: usize = 32 + 1 + 1 + 8 + 32; // 74
-}
-
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(u8)]
-pub enum RiskLevel {
-    #[default]
-    Low = 0,      // score >= 70
-    Medium = 1,   // 50 <= score < 70
-    High = 2,     // 30 <= score < 50
-    Critical = 3, // score < 30
+    pub const LEN: usize = 32 + 1 + 1 + 8; // 42
 }
 
 // ---------------------------------------------------------------------------
@@ -85,11 +72,12 @@ pub struct UpdateTrustScore<'info> {
     )]
     pub trust_score_account: Account<'info, TrustScoreAccount>,
 
-    /// CHECK: Oracle authority; must sign. Constraint: must match trust_score_account.oracle_pubkey after first init.
+    /// Oracle authority; must sign to update scores.
     #[account(mut)]
     pub oracle: Signer<'info>,
 
-    /// CHECK: Wallet pubkey; used for PDA seeds and stored in account.
+    /// Wallet pubkey; used for PDA seeds and must match instruction wallet arg.
+    /// CHECK: Used only for PDA derivation and key comparison.
     pub wallet: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -116,8 +104,12 @@ pub struct GetTrustScore<'info> {
 
 #[error_code]
 pub enum TrustOracleError {
+    #[msg("Wallet account must match instruction wallet pubkey")]
+    InvalidWallet,
     #[msg("Trust score must be 0–100")]
     InvalidTrustScore,
+    #[msg("Risk must be 0–3")]
+    InvalidRisk,
     #[msg("Only the oracle authority may update")]
     UnauthorizedOracle,
 }

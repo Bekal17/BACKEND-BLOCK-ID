@@ -10,7 +10,6 @@ Config: SOLANA_RPC_URL, ORACLE_PRIVATE_KEY, ORACLE_PROGRAM_ID, PUBLISH_INTERVAL_
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -22,21 +21,25 @@ from backend_blockid.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Anchor: instruction discriminator = first 8 bytes of sha256("global:instruction_name")
-UPDATE_TRUST_SCORE_DISCRIMINATOR = hashlib.sha256(b"global:update_trust_score").digest()[:8]
+DEFAULT_IDL_FILENAME = "blockid_oracle.json"
+IDL_SUBPATH = os.path.join("target", "idl", DEFAULT_IDL_FILENAME)
+
+# In-memory cache for loaded IDL and discriminator (avoids repeated file reads).
+_idl_cache: dict[str, Any] | None = None
+_discriminator_cache: bytes | None = None
+
 SYS_PROGRAM_ID_STR = "11111111111111111111111111111111"
 DEVNET_RPC_URL = "https://api.devnet.solana.com"
 MAINNET_RPC_URL = "https://api.mainnet-beta.solana.com"
 DEFAULT_PUBLISH_INTERVAL_SEC = 60.0
 
-# Minimal Anchor IDL for trust oracle (single instruction). Used to build instructions by name/args.
+# Fallback IDL for instruction lookup when file is not used (no discriminator; loaded IDL takes precedence).
 TRUST_ORACLE_IDL = {
     "version": "0.1.0",
-    "name": "trust_oracle",
+    "name": "blockid_oracle",
     "instructions": [
         {
             "name": "update_trust_score",
-            "discriminator": list(UPDATE_TRUST_SCORE_DISCRIMINATOR),
             "accounts": [
                 {"name": "trust_score_account", "writable": True, "signer": False},
                 {"name": "oracle", "writable": False, "signer": True},
@@ -44,12 +47,67 @@ TRUST_ORACLE_IDL = {
                 {"name": "system_program", "writable": False, "signer": False},
             ],
             "args": [
-                {"name": "trust_score", "type": "u8"},
-                {"name": "risk_level", "type": "u8"},
+                {"name": "wallet", "type": "pubkey"},
+                {"name": "score", "type": "u8"},
+                {"name": "risk", "type": "u8"},
             ],
         },
     ],
 }
+
+
+def _resolve_idl_path() -> str | None:
+    """Resolve path to target/idl/blockid_oracle.json. Tries ANCHOR_IDL_PATH, cwd, then repo root from __file__."""
+    env_path = (os.getenv("ANCHOR_IDL_PATH") or "").strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    cwd_path = os.path.join(os.getcwd(), IDL_SUBPATH)
+    if os.path.isfile(cwd_path):
+        return cwd_path
+    try:
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        candidate = os.path.join(root, "target", "idl", DEFAULT_IDL_FILENAME)
+        if os.path.isfile(candidate):
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _load_idl() -> dict[str, Any]:
+    """Load Anchor IDL from target/idl/blockid_oracle.json. Cached after first load."""
+    global _idl_cache
+    if _idl_cache is not None:
+        return _idl_cache
+    path = _resolve_idl_path()
+    if not path:
+        raise FileNotFoundError(
+            "Anchor IDL not found. Set ANCHOR_IDL_PATH to target/idl/blockid_oracle.json or run from repo root after 'anchor build'."
+        )
+    with open(path, encoding="utf-8") as f:
+        _idl_cache = json.load(f)
+    logger.debug("oracle_idl_loaded", path=path)
+    return _idl_cache
+
+
+def _get_update_trust_score_discriminator() -> bytes:
+    """Return 8-byte instruction discriminator for update_trust_score from Anchor IDL. Cached."""
+    global _discriminator_cache
+    if _discriminator_cache is not None:
+        return _discriminator_cache
+    idl = _load_idl()
+    instructions = idl.get("instructions") or idl.get("instruction") or []
+    for ix in instructions:
+        if ix.get("name") == "update_trust_score":
+            disc = ix.get("discriminator")
+            if disc is not None and len(disc) == 8:
+                _discriminator_cache = bytes(disc)
+                return _discriminator_cache
+            break
+    raise ValueError(
+        "IDL instruction 'update_trust_score' missing or has invalid discriminator (expected 8-byte array). "
+        "Regenerate IDL with 'anchor build'."
+    )
 DEFAULT_MAX_UPDATES_PER_BATCH = 20
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SEC = 2.0
@@ -72,24 +130,56 @@ def _score_to_risk_level(score: float) -> int:
 
 
 def _load_keypair(private_key: str) -> Any:
-    """Load Keypair from ORACLE_PRIVATE_KEY: base58 string or JSON array of 64 bytes."""
+    """
+    Load Keypair from ORACLE_PRIVATE_KEY. Supports:
+    - File path to Solana keypair JSON (e.g. id.json with 64-byte array)
+    - Inline JSON array of 64 bytes
+    - Base58 private key string
+    """
+    from solders.keypair import Keypair
+
     raw = private_key.strip()
+    if not raw:
+        raise ValueError("ORACLE_PRIVATE_KEY is empty. Set a file path to keypair JSON or a base58 secret key.")
+
+    # File path: load JSON and create keypair from array
+    if os.path.isfile(raw):
+        try:
+            with open(raw, encoding="utf-8") as f:
+                arr = json.load(f)
+            if not isinstance(arr, list) or len(arr) < 64:
+                raise ValueError(
+                    f"ORACLE_PRIVATE_KEY file must contain a JSON array of at least 64 bytes; got {type(arr).__name__} of length {len(arr) if isinstance(arr, list) else 0}."
+                )
+            return Keypair.from_bytes(bytes(arr[:64]))
+        except FileNotFoundError:
+            raise ValueError(f"ORACLE_PRIVATE_KEY file not found: {raw}") from None
+        except json.JSONDecodeError as e:
+            raise ValueError(f"ORACLE_PRIVATE_KEY file is not valid JSON: {e}") from e
+        except (TypeError, ValueError) as e:
+            logger.warning("oracle_keypair_load_failed", error=str(e))
+            raise ValueError(f"Invalid keypair data in ORACLE_PRIVATE_KEY file: {e}") from e
+
+    # Inline JSON array
     if raw.startswith("["):
         try:
             arr = json.loads(raw)
             if len(arr) >= 64:
-                from solders.keypair import Keypair
                 return Keypair.from_bytes(bytes(arr[:64]))
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
+
+    # Base58 private key string
     try:
         import base58
-        from solders.keypair import Keypair
         secret = base58.b58decode(raw)
         return Keypair.from_bytes(secret)
     except Exception as e:
         logger.warning("oracle_keypair_load_failed", error=str(e))
-        raise ValueError("Invalid ORACLE_PRIVATE_KEY") from e
+        raise ValueError(
+            "ORACLE_PRIVATE_KEY is not a valid file path, JSON array, or base58 secret key. "
+            "Use a path to id.json or a base58-encoded key."
+        ) from e
 
 
 def build_update_trust_score_instruction(
@@ -103,19 +193,23 @@ def build_update_trust_score_instruction(
     idl: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     """
-    Build update_trust_score instruction from Anchor IDL (embedded or provided).
-    Args trust_score/risk_level must match IDL (u8). Returns (Instruction, trust_score_account_pubkey).
+    Build update_trust_score instruction: update_trust_score(wallet, score, risk).
+    Validates score 0–100 and risk 0–3. Returns (Instruction, trust_score_account_pubkey).
     """
     idl = idl or TRUST_ORACLE_IDL
-    # Resolve instruction layout from IDL
     ix_def = next((i for i in idl.get("instructions", []) if i.get("name") == "update_trust_score"), None)
     if not ix_def:
         raise ValueError("IDL missing update_trust_score instruction")
-    # Enforce args: trust_score u8, risk_level u8
-    trust_score_u8 = max(0, min(100, int(trust_score))) & 0xFF
-    risk_level_u8 = max(0, min(3, int(risk_level))) & 0xFF
+
+    score = int(trust_score)
+    risk = int(risk_level)
+    if not 0 <= score <= 100:
+        raise ValueError(f"score must be 0–100, got {score}")
+    if not 0 <= risk <= 3:
+        raise ValueError(f"risk must be 0–3, got {risk}")
+
     return _build_update_trust_score_instruction(
-        program_id, oracle_pubkey, wallet_pubkey, trust_score_u8, risk_level_u8, sys_program_id
+        program_id, oracle_pubkey, wallet_pubkey, score & 0xFF, risk & 0xFF, sys_program_id
     )
 
 
@@ -128,8 +222,10 @@ def _build_update_trust_score_instruction(
     sys_program_id: Any,
 ) -> tuple[Any, Any]:
     """
-    Low-level: build update_trust_score instruction (discriminator + u8 trust_score + u8 risk_level).
-    Matches TRUST_ORACLE_IDL layout. Returns (Instruction, trust_score_account_pubkey).
+    Build update_trust_score instruction for Anchor (wallet: Pubkey, score: u8, risk: u8).
+    Data: 8-byte discriminator (from IDL) + 32-byte wallet + 1-byte score + 1-byte risk.
+    AccountMeta order must match Anchor IDL exactly; Anchor derives signer from AccountMeta.is_signer,
+    not from the transaction's signer list, so oracle must have is_signer=True here to avoid 3010 AccountNotSigner.
     """
     from solders.instruction import Instruction, AccountMeta
     from solders.pubkey import Pubkey
@@ -137,17 +233,39 @@ def _build_update_trust_score_instruction(
     seeds = [b"trust_score", bytes(oracle_pubkey), bytes(wallet_pubkey)]
     trust_score_account, _ = Pubkey.find_program_address(seeds, program_id)
 
-    data = bytearray(UPDATE_TRUST_SCORE_DISCRIMINATOR)
-    data.append(trust_score & 0xFF)
-    data.append(risk_level & 0xFF)
+    wallet_bytes = bytes(wallet_pubkey)
+    if len(wallet_bytes) != 32:
+        raise ValueError(f"Wallet pubkey must be 32 bytes, got {len(wallet_bytes)}")
 
+    discriminator = _get_update_trust_score_discriminator()
+    score_byte = trust_score & 0xFF
+    risk_byte = risk_level & 0xFF
+    data_bytes = (
+        discriminator
+        + wallet_bytes
+        + bytes([score_byte, risk_byte])
+    )
+    logger.debug(
+        "oracle_instruction_data",
+        length=len(data_bytes),
+        hex=data_bytes.hex(),
+    )
+
+    # Order must match Anchor IDL: 1 oracle (signer + writable), 2 wallet (readonly),
+    # 3 trust_score_account (writable), 4 system_program (readonly).
+    # Anchor checks signer from AccountMeta.is_signer, not from the tx signer list; oracle must be True here.
     accounts = [
-        AccountMeta(pubkey=trust_score_account, is_signer=False, is_writable=True),
-        AccountMeta(pubkey=oracle_pubkey, is_signer=True, is_writable=False),
+        AccountMeta(pubkey=oracle_pubkey, is_signer=True, is_writable=True),
         AccountMeta(pubkey=wallet_pubkey, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=trust_score_account, is_signer=False, is_writable=True),
         AccountMeta(pubkey=sys_program_id, is_signer=False, is_writable=False),
     ]
-    ix = Instruction(program_id=program_id, data=bytes(data), accounts=accounts)
+    print("=== DEBUG ACCOUNTS ===")
+    for a in accounts:
+        print(a.pubkey, "signer:", a.is_signer, "writable:", a.is_writable)
+    print("======================")
+
+    ix = Instruction(program_id=program_id, data=data_bytes, accounts=accounts)
     return ix, trust_score_account
 
 
