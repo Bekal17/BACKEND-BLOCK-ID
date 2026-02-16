@@ -43,6 +43,8 @@ htmlcov/
 
 # DB and local data
 *.db
+*.db-shm
+*.db-wal
 trust.db
 
 # Other project folder (separate repo)

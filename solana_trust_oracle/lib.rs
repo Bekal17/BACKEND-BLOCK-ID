@@ -3,7 +3,7 @@
 
 use anchor_lang::prelude::*;
 
-declare_id!("TRUSTxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+declare_id!("55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B");
 
 #[program]
 pub mod blockid_oracle {

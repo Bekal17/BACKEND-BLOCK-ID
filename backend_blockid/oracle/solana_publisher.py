@@ -196,6 +196,8 @@ def build_update_trust_score_instruction(
     Build update_trust_score instruction: update_trust_score(wallet, score, risk).
     Validates score 0–100 and risk 0–3. Returns (Instruction, trust_score_account_pubkey).
     """
+    print("INSTRUCTION SCORE ARG:", trust_score)
+    print("INSTRUCTION RISK ARG:", risk_level)
     idl = idl or TRUST_ORACLE_IDL
     ix_def = next((i for i in idl.get("instructions", []) if i.get("name") == "update_trust_score"), None)
     if not ix_def:
@@ -516,6 +518,8 @@ class SolanaTrustOraclePublisher:
                     )
                     if not recent_blockhash:
                         raise RuntimeError("No blockhash")
+                    pdas = [str(ix.accounts[0].pubkey) for ix in instructions]
+                    logger.info("oracle_tx_before_send", program_id=str(self._program_id), pdas=pdas)
                     tx = Transaction(recent_blockhash=recent_blockhash, fee_payer=oracle_pubkey)
                     for ix in instructions:
                         tx.add(ix)

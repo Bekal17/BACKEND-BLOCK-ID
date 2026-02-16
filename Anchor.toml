@@ -1,0 +1,13 @@
+# BlockID Oracle program IDs (must match declare_id! in programs and ORACLE_PROGRAM_ID in .env)
+[programs.devnet]
+blockid_oracle = "55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B"
+
+[programs.mainnet]
+blockid_oracle = "55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"

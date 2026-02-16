@@ -74,7 +74,7 @@ def _run_devnet_publish_test() -> bool:
 
     trust_score_u8 = test_score_val
     risk_level_u8 = _score_to_risk_level(float(test_score_val))
-    ix, _ = build_update_trust_score_instruction(
+    ix, pda = build_update_trust_score_instruction(
         program_id,
         oracle_pubkey,
         wallet_pubkey,
@@ -82,6 +82,7 @@ def _run_devnet_publish_test() -> bool:
         risk_level_u8,
         sys_program_id,
     )
+    print("program_id:", program_id_str, "PDA:", pda, "(before sending tx)")
 
     # Send transaction
     try:

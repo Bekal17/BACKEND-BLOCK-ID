@@ -286,6 +286,13 @@ class DatabaseBackend(ABC):
         ...
 
     @abstractmethod
+    def get_latest_trust_scores_batch(
+        self, wallets: list[str]
+    ) -> dict[str, TrustScoreRecord | None]:
+        """Return latest trust score per wallet in one query. Keys are input wallets; value is latest record or None."""
+        ...
+
+    @abstractmethod
     def get_tracked_wallets(self, *, limit: int = 5000) -> list[str]:
         """Return wallet addresses from wallet_profiles, most recently seen first."""
         ...
@@ -790,6 +797,39 @@ class SQLiteBackend(DatabaseBackend):
             )
             for row in rows
         ]
+
+    def get_latest_trust_scores_batch(
+        self, wallets: list[str]
+    ) -> dict[str, TrustScoreRecord | None]:
+        """Latest trust score per wallet in one query. Keys = input wallets; value = latest record or None."""
+        out: dict[str, TrustScoreRecord | None] = {w: None for w in wallets}
+        if not wallets:
+            return out
+        placeholders = ",".join("?" * len(wallets))
+        sql = f"""
+            SELECT t.id, t.wallet, t.score, t.computed_at, t.metadata_json
+            FROM trust_scores t
+            INNER JOIN (
+                SELECT wallet, MAX(computed_at) AS computed_at
+                FROM trust_scores WHERE wallet IN ({placeholders})
+                GROUP BY wallet
+            ) latest ON t.wallet = latest.wallet AND t.computed_at = latest.computed_at
+            WHERE t.wallet IN ({placeholders})
+            ORDER BY t.id DESC
+        """
+        params = list(wallets) + list(wallets)
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            for row in cur.fetchall():
+                if out[row["wallet"]] is None:
+                    out[row["wallet"]] = TrustScoreRecord(
+                    id=row["id"],
+                    wallet=row["wallet"],
+                    score=row["score"],
+                    computed_at=row["computed_at"],
+                    metadata_json=row["metadata_json"],
+                    )
+        return out
 
     def get_tracked_wallets(self, *, limit: int = 5000) -> list[str]:
         with self._cursor() as cur:
@@ -1639,6 +1679,12 @@ class Database:
             timeline = self.get_trust_score_timeline(w, limit=1)
             out[w] = timeline[0] if timeline else None
         return out
+
+    def get_latest_trust_scores_batch(
+        self, wallets: list[str]
+    ) -> dict[str, TrustScoreRecord | None]:
+        """Return latest trust score per wallet in one query (fast path for API list)."""
+        return self._backend.get_latest_trust_scores_batch(wallets)
 
     def get_wallet_profiles_for_wallets(
         self, wallets: list[str]

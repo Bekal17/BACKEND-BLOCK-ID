@@ -1,0 +1,74 @@
+{
+  "address": "CxQ4mo9UQxVZMQ3T9oxvtYL7huBAGMjF8nTxL7XnkuTe",
+  "metadata": {
+    "name": "blockid_oracle",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "initialize",
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [],
+      "args": []
+    },
+    {
+      "name": "update_trust_score",
+      "discriminator": [
+        100,
+        231,
+        130,
+        250,
+        180,
+        196,
+        20,
+        248
+      ],
+      "accounts": [
+        {
+          "name": "oracle",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "wallet",
+          "type": "pubkey"
+        },
+        {
+          "name": "score",
+          "type": "u8"
+        },
+        {
+          "name": "risk",
+          "type": "u8"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "CustomError",
+      "msg": "Custom error message"
+    }
+  ],
+  "constants": [
+    {
+      "name": "SEED",
+      "type": "string",
+      "value": "\"anchor\""
+    }
+  ]
+}
