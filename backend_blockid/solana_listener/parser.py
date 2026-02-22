@@ -19,7 +19,7 @@ try:
 except ImportError:
     _base58 = None  # type: ignore[assignment]
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 

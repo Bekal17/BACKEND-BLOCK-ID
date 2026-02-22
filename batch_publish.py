@@ -1,9 +1,10 @@
 """
-BlockID batch publish: load active wallets from Step 2 tracking DB, publish trust score
-for each via publish_one_wallet, then update last_score/last_risk in DB.
+BlockID batch publish: load active wallets from Step 2 tracking DB, run analytics
+(scan -> risk -> trust), publish trust score for each via publish_one_wallet,
+then update last_score/last_risk in DB.
 
 Cron-ready: run with `python batch_publish.py` (calls run_batch_once()).
-Uses backend_blockid.api_server.db_wallet_tracking for DB; does not modify publish_one_wallet.py.
+Uses backend_blockid.analytics and backend_blockid.api_server.db_wallet_tracking.
 """
 
 from __future__ import annotations
@@ -20,12 +21,16 @@ if __name__ == "__main__" and __package__ is None:
     if _root not in sys.path:
         sys.path.insert(0, _root)
 
+from pathlib import Path
+
+from backend_blockid.analytics.analytics_pipeline import run_wallet_analysis
 from backend_blockid.api_server.db_wallet_tracking import (
     init_db,
-    load_active_wallets_with_scores,
+    load_active_wallets,
     update_wallet_score,
 )
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
+from backend_blockid.database import get_database
 
 logger = get_logger(__name__)
 
@@ -42,13 +47,31 @@ def _default_score() -> int:
         return DEFAULT_SCORE
 
 
-def _publish_wallet(wallet: str, score: int) -> tuple[bool, int | None, int | None]:
+def _risk_label_to_u8(risk_label: str) -> int:
+    """Map analytics risk_label to oracle u8: LOW=0, MEDIUM=1, HIGH=2."""
+    m = (risk_label or "").strip().upper()
+    if m == "LOW":
+        return 0
+    if m == "MEDIUM":
+        return 1
+    if m == "HIGH":
+        return 2
+    return 0
+
+
+def _publish_wallet(
+    wallet: str,
+    score: int,
+    risk_level: int | None = None,
+) -> tuple[bool, int | None, int | None]:
     """
-    Call publish_one_wallet.py for one wallet and score. Returns (success, stored_score, stored_risk).
-    Parses stdout for stored_score= and stored_risk= when possible.
+    Call publish_one_wallet.py for one wallet, score, and optional risk (0-3).
+    Returns (success, stored_score, stored_risk).
     """
     cmd = [sys.executable, "publish_one_wallet.py", wallet, str(score)]
-    logger.info("batch_publish_start", wallet=wallet[:16] + "...", score=score)
+    if risk_level is not None:
+        cmd.append(str(max(0, min(3, risk_level))))
+    logger.info("batch_publish_start", wallet=wallet[:16] + "...", score=score, risk_level=risk_level)
     try:
         result = subprocess.run(
             cmd,
@@ -99,25 +122,46 @@ def _publish_wallet(wallet: str, score: int) -> tuple[bool, int | None, int | No
 
 def run_batch_once() -> tuple[int, int]:
     """
-    Load active wallets from DB, publish each via publish_one_wallet, update DB on success.
-    Returns (success_count, fail_count). Safe for cron: init_db() is called first.
+    Load active wallets, run analytics (scan -> risk -> trust) per wallet, publish
+    score and risk to oracle, update DB on success. Returns (success_count, fail_count).
     """
     init_db()
-    wallets_with_scores = load_active_wallets_with_scores()
-    if not wallets_with_scores:
+    wallets = load_active_wallets()
+    if not wallets:
         logger.info("batch_publish_no_wallets", message="No active wallets in tracking DB")
         return 0, 0
 
-    default = _default_score()
     success_count = 0
     fail_count = 0
 
-    for wallet, last_score in wallets_with_scores:
-        score = last_score if last_score is not None else default
-        ok, stored_score, stored_risk = _publish_wallet(wallet, score)
+    for wallet in wallets:
+        logger.info("analysis_started", wallet=wallet[:16] + "...")
+        try:
+            analysis = run_wallet_analysis(wallet)
+        except Exception as e:
+            logger.warning("analysis_failed", wallet=wallet[:16] + "...", error=str(e))
+            fail_count += 1
+            time.sleep(BATCH_DELAY_SEC)
+            continue
+
+        score = analysis.get("score", _default_score())
+        risk_label = analysis.get("risk_label") or "LOW"
+        logger.info("analysis_result", wallet=wallet[:16] + "...", score=score, risk_label=risk_label)
+
+        risk_u8 = _risk_label_to_u8(risk_label)
+        ok, stored_score, stored_risk = _publish_wallet(wallet, score, risk_u8)
         if ok and stored_score is not None:
             try:
-                update_wallet_score(wallet, stored_score, str(stored_risk) if stored_risk is not None else None)
+                reason_codes = analysis.get("reason_codes") or []
+                update_wallet_score(wallet, stored_score, risk_label, reason_codes=reason_codes)
+                db_path = Path((os.getenv("DB_PATH") or "blockid.db").strip() or "blockid.db")
+                main_db = get_database(db_path)
+                main_db.insert_trust_score(
+                    wallet,
+                    float(stored_score),
+                    int(time.time()),
+                    metadata={"risk": risk_u8, "reason_codes": reason_codes},
+                )
                 logger.debug("batch_publish_score_updated", wallet=wallet[:16] + "...", score=stored_score)
             except Exception as e:
                 logger.warning("batch_publish_update_failed", wallet=wallet[:16] + "...", error=str(e))
@@ -126,7 +170,7 @@ def run_batch_once() -> tuple[int, int]:
             fail_count += 1
         time.sleep(BATCH_DELAY_SEC)
 
-    logger.info("batch_publish_done", success=success_count, failed=fail_count, total=len(wallets_with_scores))
+    logger.info("batch_publish_done", success=success_count, failed=fail_count, total=len(wallets))
     return success_count, fail_count
 
 

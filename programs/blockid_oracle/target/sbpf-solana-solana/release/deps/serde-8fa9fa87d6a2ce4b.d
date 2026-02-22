@@ -1,0 +1,14 @@
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/deps/libserde-8fa9fa87d6a2ce4b.rmeta: /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs /mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/build/serde-c7a8be2ee9cfbdee/out/private.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/deps/libserde-8fa9fa87d6a2ce4b.rlib: /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs /mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/build/serde-c7a8be2ee9cfbdee/out/private.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/deps/serde-8fa9fa87d6a2ce4b.d: /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs /home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs /mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/build/serde-c7a8be2ee9cfbdee/out/private.rs
+
+/home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs:
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/build/serde-c7a8be2ee9cfbdee/out/private.rs:
+
+# env-dep:OUT_DIR=/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/sbpf-solana-solana/release/build/serde-c7a8be2ee9cfbdee/out

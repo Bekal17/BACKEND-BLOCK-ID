@@ -18,7 +18,7 @@ from backend_blockid.behavioral_memory.models import (
     TrendType,
 )
 from backend_blockid.database.models import WalletProfile
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 

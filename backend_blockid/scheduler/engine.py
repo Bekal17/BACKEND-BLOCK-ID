@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend_blockid.database.models import TrustScoreRecord, WalletProfile
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 

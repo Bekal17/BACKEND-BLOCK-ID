@@ -1,0 +1,5 @@
+wallet,label,notes,source
+BKVM59wJYMXnZfTkacKjnqNwChLFmbTcdFBsEc6UKUxx,wash_trading,repeated NFT self trades,graph_analysis
+6VL8hRjKRbEvqResPkiWuLMcoW6RRiNfv1b5H9fMqcb1,wash_trading,same NFT traded 20 times,helius
+4jkL4dNkY2UbpYrTgLA3u5FqKwKs1LM46RcE6FQU3qXi,wash_trading,suspicious NFT volume spike,manual
+3h6Qu9Vo1sDL25ajmidJnHEV4KeFnDuT9VCtAyhVWyMs,wash_trading,linked NFT wash cluster,graph_cluster

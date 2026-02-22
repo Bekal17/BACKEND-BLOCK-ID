@@ -1,9 +1,14 @@
-# BlockID Oracle program IDs (must match declare_id! in programs and ORACLE_PROGRAM_ID in .env)
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
 [programs.devnet]
 blockid_oracle = "55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B"
 
 [programs.mainnet]
-blockid_oracle = "55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B"
+blockid_oracle = "9etRwVdKdVkvRsMbYVroGPzcdDxZnRmDH1D8Ho6waXGA"
 
 [registry]
 url = "https://api.apr.dev"
@@ -11,3 +16,6 @@ url = "https://api.apr.dev"
 [provider]
 cluster = "devnet"
 wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["programs/blockid_oracle"]

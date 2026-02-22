@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.agent_worker.runner import _analyze_and_save_wallet
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 

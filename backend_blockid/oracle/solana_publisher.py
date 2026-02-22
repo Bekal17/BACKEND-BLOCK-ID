@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -307,21 +307,22 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
 
 
 def _default_rpc_url() -> str:
-    url = (os.getenv("SOLANA_RPC_URL") or "").strip()
-    if url:
-        return url
-    if _parse_bool_env("SOLANA_DEVNET", False) or (os.getenv("SOLANA_CLUSTER") or "").strip().lower() == "devnet":
-        return DEVNET_RPC_URL
-    return MAINNET_RPC_URL
+    from backend_blockid.config.env import get_solana_rpc_url
+    return get_solana_rpc_url()
+
+
+def _default_program_id() -> str:
+    from backend_blockid.config.env import get_oracle_program_id
+    return get_oracle_program_id()
 
 
 @dataclass
 class SolanaPublisherConfig:
-    """Config for the Solana trust oracle publisher (env or explicit). Devnet: set SOLANA_DEVNET=1 or SOLANA_CLUSTER=devnet."""
+    """Config for the Solana trust oracle publisher. Uses SOLANA_NETWORK, ORACLE_PROGRAM_ID from .env."""
 
     solana_rpc_url: str = field(default_factory=_default_rpc_url)
     oracle_private_key: str = field(default_factory=lambda: (os.getenv("ORACLE_PRIVATE_KEY") or "").strip())
-    oracle_program_id: str = field(default_factory=lambda: (os.getenv("ORACLE_PROGRAM_ID") or "TRUSTxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").strip())
+    oracle_program_id: str = field(default_factory=_default_program_id)
     publish_interval_seconds: float = field(default_factory=lambda: float(os.getenv("PUBLISH_INTERVAL_SECONDS", str(int(DEFAULT_PUBLISH_INTERVAL_SEC)))))
     max_updates_per_batch: int = DEFAULT_MAX_UPDATES_PER_BATCH
     retry_attempts: int = DEFAULT_RETRY_ATTEMPTS

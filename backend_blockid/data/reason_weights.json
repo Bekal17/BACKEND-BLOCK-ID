@@ -1,0 +1,21 @@
+{
+  "_schema": "reason_weights_v1",
+  "_comment": "Weights for weighted risk score. Higher = more severe. Default 0.5 for unknown codes.",
+  "SCAM_CLUSTER_MEMBER": 1.0,
+  "DRAINER_INTERACTION": 1.0,
+  "RUGPULL_DEPLOYER": 1.0,
+  "NEAR_SCAM_CLUSTER": 0.9,
+  "HIGH_APPROVAL_RISK": 0.9,
+  "MULTI_VICTIM_PATTERN": 0.9,
+  "SUDDEN_DRAIN_PATTERN": 0.85,
+  "LARGE_OUTFLOW_TO_NEW_WALLET": 0.85,
+  "RAPID_TOKEN_DUMP": 0.85,
+  "WASH_TRADE_PATTERN": 0.8,
+  "SWAP_THEN_TRANSFER": 0.75,
+  "NEW_CONTRACT_INTERACTION": 0.7,
+  "HIGH_RAPID_TX": 0.65,
+  "HIGH_CLUSTER_CONTAMINATION": 0.6,
+  "NEW_WALLET": 0.3,
+  "LOW_ACTIVITY": 0.25,
+  "_default": 0.5
+}

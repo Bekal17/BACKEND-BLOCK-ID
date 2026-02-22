@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 
 # Configure structured JSON logging before other imports that may log
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger("main")
 

@@ -1,0 +1,685 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Backend BlockID API",
+    "description": "Read-only API for wallet trust scores and flags (data from database).",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/trust-score/{wallet}": {
+      "get": {
+        "tags": [
+          "Trust Score",
+          "trust-score"
+        ],
+        "summary": "Get Trust Score",
+        "description": "Return trust score for a wallet. Reads from local database first (fast).\nReturns 404 if wallet has no cached score (sync worker or publish will populate).",
+        "operationId": "get_trust_score_api_trust_score__wallet__get",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Wallet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Trust Score Api Trust Score  Wallet  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trust-score/list": {
+      "post": {
+        "tags": [
+          "Trust Score",
+          "trust-score"
+        ],
+        "summary": "List Trust Scores",
+        "description": "Batch fetch trust scores from local database. One batch query; missing wallets\nreturn status=\"not_scored\". No RPC in hot path for fast response (< 50ms for 100 wallets).",
+        "operationId": "list_trust_scores_api_trust_score_list_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrustScoreListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array",
+                  "title": "Response List Trust Scores Api Trust Score List Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/track-wallet": {
+      "post": {
+        "summary": "Track Wallet",
+        "description": "Register a wallet for monitoring. Inserts into tracked_wallets (db_wallet_tracking).\nReturns registered=True when newly added, registered=False when already tracked.",
+        "operationId": "track_wallet_track_wallet_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrackWalletRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackWalletResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wallet/{address}": {
+      "get": {
+        "summary": "Get Wallet",
+        "description": "Return the latest trust score and anomaly flags for a wallet.\n\nReads from database only. Returns 404 if the wallet has no trust score record.",
+        "operationId": "get_wallet_wallet__address__get",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Address"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "description": "Liveness probe: API is up.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug/wallet_status/{wallet}": {
+      "get": {
+        "summary": "Debug Wallet Status",
+        "description": "Debug: check if wallet is in tracked_wallets and if its trust score PDA exists on-chain.\nUses db_wallet_tracking and Solana RPC (ORACLE_PROGRAM_ID, ORACLE_PRIVATE_KEY, SOLANA_RPC_URL).",
+        "operationId": "debug_wallet_status_debug_wallet_status__wallet__get",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Wallet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wallet_report/{wallet}": {
+      "get": {
+        "summary": "Get Wallet Report",
+        "description": "Run full analytics pipeline for a wallet (scan -> risk -> trust). Returns\nmetrics, risk, score, risk_label. Does not publish to the oracle.",
+        "operationId": "get_wallet_report_wallet_report__wallet__get",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Wallet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Wallet Report Wallet Report  Wallet  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/track_wallet": {
+      "post": {
+        "summary": "Track Wallet Step2",
+        "description": "Add a wallet to Step 2 tracking. Validates wallet with Solana PublicKey.\nReturns 201 when newly added, 200 when already tracked.",
+        "operationId": "track_wallet_step2_track_wallet_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrackWalletStep2Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackWalletStep2Response"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tracked_wallets": {
+      "get": {
+        "summary": "Get Tracked Wallets",
+        "description": "Return all wallets in Step 2 tracking (id, wallet, label, last_score, last_risk, last_checked, is_active).",
+        "operationId": "get_tracked_wallets_tracked_wallets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array",
+                  "title": "Response Get Tracked Wallets Tracked Wallets Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/import_wallets_csv": {
+      "post": {
+        "summary": "Import Wallets Csv",
+        "description": "Import wallets from CSV. Expected columns: wallet, label (label optional).\nInvalid wallets are rejected (Solana PublicKey validation); duplicates are skipped.",
+        "operationId": "import_wallets_csv_import_wallets_csv_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_import_wallets_csv_import_wallets_csv_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportWalletsCsvResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_import_wallets_csv_import_wallets_csv_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File",
+            "description": "CSV with columns: wallet, label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_import_wallets_csv_import_wallets_csv_post"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ImportWalletsCsvResponse": {
+        "properties": {
+          "imported": {
+            "type": "integer",
+            "title": "Imported",
+            "description": "Number of wallets newly added"
+          },
+          "duplicates": {
+            "type": "integer",
+            "title": "Duplicates",
+            "description": "Number skipped (already in DB)"
+          },
+          "invalid": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Invalid",
+            "description": "Invalid wallet values rejected"
+          }
+        },
+        "type": "object",
+        "required": [
+          "imported",
+          "duplicates"
+        ],
+        "title": "ImportWalletsCsvResponse",
+        "description": "POST /import_wallets_csv response."
+      },
+      "TrackWalletRequest": {
+        "properties": {
+          "wallet": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 8,
+            "title": "Wallet",
+            "description": "Solana wallet address (base58)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "wallet"
+        ],
+        "title": "TrackWalletRequest",
+        "description": "POST /track-wallet body: register a wallet for monitoring."
+      },
+      "TrackWalletResponse": {
+        "properties": {
+          "wallet": {
+            "type": "string",
+            "title": "Wallet",
+            "description": "Wallet address registered"
+          },
+          "registered": {
+            "type": "boolean",
+            "title": "Registered",
+            "description": "True if newly added, False if already tracked"
+          }
+        },
+        "type": "object",
+        "required": [
+          "wallet",
+          "registered"
+        ],
+        "title": "TrackWalletResponse",
+        "description": "POST /track-wallet response."
+      },
+      "TrackWalletStep2Request": {
+        "properties": {
+          "wallet": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 8,
+            "title": "Wallet",
+            "description": "Solana wallet (base58)"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "Optional label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "wallet"
+        ],
+        "title": "TrackWalletStep2Request",
+        "description": "POST /track_wallet body: wallet + optional label. Validated as Solana PublicKey."
+      },
+      "TrackWalletStep2Response": {
+        "properties": {
+          "wallet": {
+            "type": "string",
+            "title": "Wallet",
+            "description": "Wallet address"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "Label stored",
+            "default": ""
+          },
+          "registered": {
+            "type": "boolean",
+            "title": "Registered",
+            "description": "True if newly added, False if already tracked"
+          }
+        },
+        "type": "object",
+        "required": [
+          "wallet",
+          "registered"
+        ],
+        "title": "TrackWalletStep2Response",
+        "description": "POST /track_wallet response."
+      },
+      "TrustScoreListRequest": {
+        "properties": {
+          "wallets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Wallets",
+            "description": "Wallet pubkeys to fetch trust scores for"
+          }
+        },
+        "type": "object",
+        "required": [
+          "wallets"
+        ],
+        "title": "TrustScoreListRequest",
+        "description": "POST /trust-score/list body: list of wallet pubkeys."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WalletResponse": {
+        "properties": {
+          "address": {
+            "type": "string",
+            "title": "Address",
+            "description": "Wallet address (base58)"
+          },
+          "trust_score": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Trust Score",
+            "description": "Latest trust score (0\u2013100)"
+          },
+          "computed_at": {
+            "type": "integer",
+            "title": "Computed At",
+            "description": "Unix timestamp when score was computed"
+          },
+          "flags": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Flags",
+            "description": "Anomaly flags from latest computation"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reason Codes",
+            "description": "Trust score reason codes (e.g. NEW_WALLET, LOW_ACTIVITY)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "address",
+          "trust_score",
+          "computed_at"
+        ],
+        "title": "WalletResponse",
+        "description": "GET /wallet/{address} response: latest trust score, flags, and reason codes from DB."
+      },
+      "WalletStatusResponse": {
+        "properties": {
+          "in_database": {
+            "type": "boolean",
+            "title": "In Database",
+            "description": "Wallet is in tracked_wallets (db_wallet_tracking)"
+          },
+          "onchain_pda_exists": {
+            "type": "boolean",
+            "title": "Onchain Pda Exists",
+            "description": "Trust score PDA account exists on Solana"
+          },
+          "last_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Score",
+            "description": "Last score from tracked_wallets, or null"
+          }
+        },
+        "type": "object",
+        "required": [
+          "in_database",
+          "onchain_pda_exists"
+        ],
+        "title": "WalletStatusResponse",
+        "description": "GET /debug/wallet_status/{wallet} response."
+      }
+    }
+  }
+}

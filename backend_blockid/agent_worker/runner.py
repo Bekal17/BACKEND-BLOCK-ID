@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.agent_worker.worker import WorkerConfig, run_worker
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 

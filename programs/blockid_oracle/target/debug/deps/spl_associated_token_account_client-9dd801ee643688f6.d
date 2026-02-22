@@ -1,0 +1,9 @@
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/spl_associated_token_account_client-9dd801ee643688f6.d: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/address.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/instruction.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/libspl_associated_token_account_client-9dd801ee643688f6.rlib: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/address.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/instruction.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/libspl_associated_token_account_client-9dd801ee643688f6.rmeta: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/address.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/instruction.rs
+
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/lib.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/address.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-associated-token-account-client-2.0.0/src/instruction.rs:

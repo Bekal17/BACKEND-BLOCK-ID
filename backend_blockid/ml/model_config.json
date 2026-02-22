@@ -1,0 +1,24 @@
+{
+  "feature_names": [
+    "wallet_age_days",
+    "tx_count",
+    "unique_programs",
+    "token_accounts",
+    "nft_count",
+    "scam_interactions",
+    "rugpull_interactions",
+    "cluster_size",
+    "wallet_type_encoded",
+    "avg_tx_value",
+    "dex_interaction_count",
+    "lp_interaction_count",
+    "unique_counterparties",
+    "cluster_size_estimate",
+    "scam_cluster_flag"
+  ],
+  "score_bin_edges": [0, 34, 67, 101],
+  "n_estimators": 100,
+  "random_state": 42,
+  "train_from_csv": true,
+  "scaler_saved": true
+}

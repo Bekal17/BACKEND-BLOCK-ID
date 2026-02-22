@@ -1,0 +1,104 @@
+warning: unexpected `cfg` condition value: `no-entrypoint`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `no-entrypoint` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+  = note: this warning originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `cpi`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `cpi` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `custom-heap`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `custom-heap` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the macro `$crate::custom_heap_default` which comes from the expansion of the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `custom-panic`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `custom-panic` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the macro `$crate::custom_panic_default` which comes from the expansion of the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `anchor-debug`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `anchor-debug` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `no-idl`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `no-idl` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `anchor-debug`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `anchor-debug` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the derive macro `Accounts` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `no-log-ix-name`
+ --> src/lib.rs:8:1
+  |
+8 | #[program]
+  | ^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+  = help: consider adding `no-log-ix-name` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: this warning originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `anchor-debug`
+  --> src/lib.rs:41:10
+   |
+41 | #[derive(Accounts)]
+   |          ^^^^^^^^
+   |
+   = note: expected values for `feature` are: `default`, `idl-build`, and `init-if-needed`
+   = help: consider adding `anchor-debug` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: this warning originates in the derive macro `Accounts` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `blockid_oracle` (lib) generated 14 warnings (5 duplicates)
+    Finished `release` profile [optimized] target(s) in 5.28s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.39s
+     Running unittests src/lib.rs (target/debug/deps/blockid_oracle-885c80d78882e145)

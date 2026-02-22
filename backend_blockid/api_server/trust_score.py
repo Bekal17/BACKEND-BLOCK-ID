@@ -22,7 +22,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend_blockid.database import Database, get_database
-from backend_blockid.logging import get_logger
+from backend_blockid.ai_engine.reason_weight_engine import aggregate_score
+from backend_blockid.database.repositories import get_wallet_reasons
+from backend_blockid.database.repositories import get_wallet_reasons
+from backend_blockid.ml.reason_codes import REASON_WEIGHTS
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.solana_publisher import (
     TRUST_SCORE_ACCOUNT_DISCRIMINATOR_LEN,
     TRUST_SCORE_ACCOUNT_TRUST_SCORE_OFFSET,
@@ -166,7 +170,7 @@ def _oracle_and_pda_for_wallet(wallet: str) -> tuple[Any, Any]:
 
 
 def _record_to_response(wallet: str, record: Any, oracle_pubkey: Any, pda: Any) -> dict[str, Any]:
-    """Build API response from DB record + oracle/pda."""
+    """Build API response from DB record + oracle/pda. Includes reason_codes from metadata when present."""
     risk = 0
     if record.metadata_json:
         try:
@@ -174,14 +178,39 @@ def _record_to_response(wallet: str, record: Any, oracle_pubkey: Any, pda: Any) 
             risk = int(meta.get("risk", 0))
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
-    return {
+
+    reason_codes = get_wallet_reasons(wallet)
+    if not reason_codes:
+        from backend_blockid.ai_engine.positive_reasons import default_positive_reason
+        from backend_blockid.database.repositories import insert_wallet_reason
+
+        positive = default_positive_reason()
+        try:
+            insert_wallet_reason(
+                wallet,
+                positive["code"],
+                positive["weight"],
+                confidence=positive["confidence"],
+                tx_hash=None,
+                tx_link=None,
+            )
+            logger.info("positive_reason_inserted", wallet=wallet)
+        except Exception:
+            logger.exception("positive_reason_insert_failed", wallet=wallet)
+
+        reason_codes = [positive]
+    base_score = int(round(record.score))
+    final_score = aggregate_score(base_score, reason_codes)
+    out = {
         "wallet": wallet,
-        "score": int(round(record.score)),
+        "score": final_score,
         "risk": risk,
+        "reason_codes": reason_codes,
         "updated_at": _updated_at_iso(record.computed_at),
         "oracle_pubkey": str(oracle_pubkey),
         "pda": str(pda),
     }
+    return out
 
 
 @router.get("/{wallet}")

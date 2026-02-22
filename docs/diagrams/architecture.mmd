@@ -1,0 +1,60 @@
+flowchart TB
+    subgraph External[External Systems]
+        Solana[Solana Blockchain]
+        Helius[Helius RPC]
+        Clients[Wallet Apps / DeFi / NFT]
+    end
+
+    subgraph DataCollection[Data Collection]
+        FetchTx[fetch_tx_edges_helius]
+        TxCSV[(transactions.csv)]
+    end
+
+    subgraph FeatureEngine[Feature Extraction]
+        Graph[graph_clustering]
+        Flow[flow_features]
+        Drainer[drainer_detection]
+        ClusterCSV[(cluster_features)]
+        FlowCSV[(flow_features)]
+        DrainerCSV[(drainer_features)]
+    end
+
+    subgraph ML[ML Scoring Engine]
+        Train[train_blockid_model]
+        Model[(blockid_model.joblib)]
+        Publish[publish_scores]
+    end
+
+    subgraph Oracle[Oracle Layer]
+        Publisher[solana_publisher]
+        PDA[TrustScoreAccount PDA]
+    end
+
+    subgraph Backend[Backend]
+        FastAPI[FastAPI Server]
+        Sync[trust_score_sync]
+        MainDB[(trust_scores)]
+        TrackDB[(wallet_tracking)]
+    end
+
+    Helius --> FetchTx
+    FetchTx --> TxCSV
+    TxCSV --> Graph
+    Helius --> Flow
+    Helius --> Drainer
+    Graph --> ClusterCSV
+    Flow --> FlowCSV
+    Drainer --> DrainerCSV
+    ClusterCSV --> Train
+    FlowCSV --> Train
+    DrainerCSV --> Train
+    Train --> Model
+    Model --> Publish
+    Publish --> Publisher
+    Publisher --> PDA
+    PDA --> Solana
+    Sync --> PDA
+    Sync --> MainDB
+    FastAPI --> MainDB
+    FastAPI --> TrackDB
+    FastAPI --> Clients

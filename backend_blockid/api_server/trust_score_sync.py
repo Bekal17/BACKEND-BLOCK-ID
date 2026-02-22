@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.database import Database, get_database
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.solana_publisher import (
     TRUST_SCORE_ACCOUNT_DISCRIMINATOR_LEN,
     TRUST_SCORE_ACCOUNT_WALLET_LEN,
@@ -66,9 +66,12 @@ def run_sync_once(db: Database) -> int:
     from solders.pubkey import Pubkey
     from solana.rpc.api import Client
 
-    rpc_url = (os.getenv("SOLANA_RPC_URL") or "").strip() or "https://api.devnet.solana.com"
+    from backend_blockid.config.env import get_oracle_program_id, get_solana_rpc_url, load_blockid_env
+
+    load_blockid_env()
+    rpc_url = get_solana_rpc_url()
     oracle_key = (os.getenv("ORACLE_PRIVATE_KEY") or "").strip()
-    program_id_str = (os.getenv("ORACLE_PROGRAM_ID") or "").strip()
+    program_id_str = get_oracle_program_id()
     if not oracle_key or not program_id_str:
         logger.warning("trust_score_sync_skip", reason="missing ORACLE_PRIVATE_KEY or ORACLE_PROGRAM_ID")
         return 0

@@ -29,7 +29,7 @@ import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.solana_listener.parser import ParsedTransaction, parse
 
 logger = get_logger(__name__)

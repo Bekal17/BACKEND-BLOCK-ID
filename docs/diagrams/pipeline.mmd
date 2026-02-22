@@ -1,0 +1,27 @@
+flowchart LR
+    S0[STEP 0\nfetch_tx_edges]
+    TX[(transactions.csv)]
+    S1[STEP 1\ngraph_clustering]
+    CF[(cluster_features)]
+    S2[STEP 2\nflow_features]
+    FF[(flow_features)]
+    S3[STEP 3\ndrainer_detection]
+    DF[(drainer_features)]
+    S4[STEP 4\ntrain_blockid_model]
+    MDL[(blockid_model.joblib)]
+    S5[STEP 5\npublish_scores]
+    PDA[TrustScoreAccount PDA]
+
+    S0 --> TX
+    TX --> S1
+    S1 --> CF
+    TX --> S2
+    S2 --> FF
+    TX --> S3
+    S3 --> DF
+    CF --> S4
+    FF --> S4
+    DF --> S4
+    S4 --> MDL
+    MDL --> S5
+    S5 --> PDA

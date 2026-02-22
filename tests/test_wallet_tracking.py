@@ -88,6 +88,21 @@ def test_update_score(wallet_tracking_db):
     assert wallets[0]["last_risk"] == "0"
 
 
+def test_update_score_with_reason_codes(wallet_tracking_db):
+    """update_wallet_score with reason_codes stores JSON list; get_wallet_info returns it."""
+    wallet_tracking_db.add_wallet(VALID_WALLET)
+    wallet_tracking_db.update_wallet_score(
+        VALID_WALLET, 70, "LOW", reason_codes=["NEW_WALLET", "LOW_ACTIVITY"]
+    )
+    info = wallet_tracking_db.get_wallet_info(VALID_WALLET)
+    assert info is not None
+    assert info["last_score"] == 70
+    assert info["reason_codes"] is not None
+    import json
+    codes = json.loads(info["reason_codes"]) if isinstance(info["reason_codes"], str) else info["reason_codes"]
+    assert codes == ["NEW_WALLET", "LOW_ACTIVITY"]
+
+
 def test_csv_import(client):
     """POST /import_wallets_csv imports wallet,label CSV and returns imported/duplicates/invalid."""
     csv_content = "wallet,label\n"
@@ -118,7 +133,11 @@ def test_run_batch_once_mocked(wallet_tracking_db, monkeypatch):
     wallet_tracking_db.update_wallet_score(VALID_WALLET, 50, "0")  # so last_score exists
     success_count = 0
 
-    def fake_publish(wallet: str, score: int) -> tuple[bool, int | None, int | None]:
+    def fake_publish(
+        wallet: str,
+        score: int,
+        risk_level: int | None = None,
+    ) -> tuple[bool, int | None, int | None]:
         nonlocal success_count
         success_count += 1
         return True, 88, 1  # success, stored_score, stored_risk
@@ -133,4 +152,5 @@ def test_run_batch_once_mocked(wallet_tracking_db, monkeypatch):
     wallets = wallet_tracking_db.list_wallets()
     assert len(wallets) == 1
     assert wallets[0]["last_score"] == 88
-    assert wallets[0]["last_risk"] == "1"
+    # batch_publish stores risk_label from analytics (e.g. MEDIUM)
+    assert wallets[0]["last_risk"] in ("1", "MEDIUM")

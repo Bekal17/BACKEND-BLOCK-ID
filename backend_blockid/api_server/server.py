@@ -30,7 +30,7 @@ from backend_blockid.api_server.db_wallet_tracking import (
 )
 from backend_blockid.api_server.trust_score import router as trust_router
 from backend_blockid.database import get_database, Database
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -57,12 +57,13 @@ def get_db() -> Database:
 # -----------------------------------------------------------------------------
 
 class WalletResponse(BaseModel):
-    """GET /wallet/{address} response: latest trust score and flags from DB."""
+    """GET /wallet/{address} response: latest trust score, flags, and reason codes from DB."""
 
     address: str = Field(..., description="Wallet address (base58)")
     trust_score: float = Field(..., ge=0, le=100, description="Latest trust score (0–100)")
     computed_at: int = Field(..., description="Unix timestamp when score was computed")
     flags: list[dict[str, Any]] = Field(default_factory=list, description="Anomaly flags from latest computation")
+    reason_codes: list[str] = Field(default_factory=list, description="Trust score reason codes (e.g. NEW_WALLET, LOW_ACTIVITY)")
 
 
 class TrackWalletRequest(BaseModel):
@@ -226,10 +227,27 @@ def get_wallet(address: str, db: Database = Depends(get_db)) -> WalletResponse:
         )
     latest = timeline[0]
     flags: list[dict[str, Any]] = []
+    reason_codes: list[str] = []
     if latest.metadata_json:
         try:
             meta = json.loads(latest.metadata_json)
             flags = meta.get("anomaly_flags") or []
+            rc = meta.get("reason_codes")
+            if isinstance(rc, list):
+                reason_codes = [str(c) for c in rc]
+        except Exception:
+            pass
+    if not reason_codes:
+        try:
+            info = tracking_get_wallet_info(address)
+            if info and info.get("reason_codes"):
+                rc_raw = info["reason_codes"]
+                if isinstance(rc_raw, str):
+                    parsed = json.loads(rc_raw)
+                    if isinstance(parsed, list):
+                        reason_codes = [str(c) for c in parsed]
+                elif isinstance(rc_raw, list):
+                    reason_codes = [str(c) for c in rc_raw]
         except Exception:
             pass
 
@@ -238,6 +256,7 @@ def get_wallet(address: str, db: Database = Depends(get_db)) -> WalletResponse:
         trust_score=round(latest.score, 2),
         computed_at=latest.computed_at,
         flags=flags,
+        reason_codes=reason_codes,
     )
 
 
@@ -279,9 +298,12 @@ def debug_wallet_status(wallet: str) -> WalletStatusResponse:
     last_score = info.get("last_score") if info else None
 
     onchain_pda_exists = False
+    from backend_blockid.config.env import get_oracle_program_id, get_solana_rpc_url, load_blockid_env
+
+    load_blockid_env()
     oracle_key = (os.getenv("ORACLE_PRIVATE_KEY") or "").strip()
-    program_id_str = (os.getenv("ORACLE_PROGRAM_ID") or "").strip()
-    rpc_url = (os.getenv("SOLANA_RPC_URL") or "").strip() or "https://api.devnet.solana.com"
+    program_id_str = get_oracle_program_id()
+    rpc_url = get_solana_rpc_url()
     if oracle_key and program_id_str:
         try:
             from backend_blockid.oracle.solana_publisher import _load_keypair, get_trust_score_pda
@@ -305,6 +327,33 @@ def debug_wallet_status(wallet: str) -> WalletStatusResponse:
         onchain_pda_exists=onchain_pda_exists,
         last_score=last_score,
     )
+
+
+# -----------------------------------------------------------------------------
+# Analytics: wallet report (run_wallet_analysis without publishing)
+# -----------------------------------------------------------------------------
+
+
+@app.get("/wallet_report/{wallet}")
+def get_wallet_report(wallet: str) -> dict[str, Any]:
+    """
+    Run full analytics pipeline for a wallet (scan -> risk -> trust). Returns
+    metrics, risk, score, risk_label. Does not publish to the oracle.
+    """
+    wallet = wallet.strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet must be non-empty")
+    try:
+        Pubkey.from_string(wallet)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Solana wallet address")
+
+    try:
+        from backend_blockid.analytics.analytics_pipeline import run_wallet_analysis
+        return run_wallet_analysis(wallet)
+    except Exception as e:
+        logger.exception("wallet_report_failed", wallet=wallet[:16] + "...", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Analytics failed: {e!s}") from e
 
 
 # -----------------------------------------------------------------------------

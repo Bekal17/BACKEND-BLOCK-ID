@@ -13,7 +13,7 @@ import os
 import sys
 import time
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.solana_publisher import (
     _load_keypair,
     _score_to_risk_level,

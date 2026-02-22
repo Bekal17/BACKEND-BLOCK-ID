@@ -1,17 +1,23 @@
 from locust import HttpUser, task, between
+import csv
+import random
 
-# Pakai wallet yang sudah kamu publish di BlockID
-wallets = [
-    "EgVMwBG3hLodAMPHbHgEuAXfYcxoWCwrsLAXwXGkWM7H",
-    "4syyc9yo5NKW2RVEU4YSVxjxtDfDBT6R9MFsKSVU8Bts",
-]
+# Load wallets dari CSV
+wallets = []
+with open("wallets.csv") as f:
+    for row in csv.DictReader(f):
+        wallets.append(row["wallet"])
 
 class BlockIDUser(HttpUser):
     wait_time = between(1, 2)
 
     @task
-    def get_scores(self):
+    def trust_score_list(self):
+        # ambil random 5 wallet tiap request
+        sample = random.sample(wallets, min(5, len(wallets)))
+
         self.client.post(
             "/api/trust-score/list",
-            json={"wallets": wallets}
+            json=sample
         )
+

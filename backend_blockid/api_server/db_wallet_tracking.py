@@ -16,7 +16,7 @@ from sqlalchemy import Boolean, Column, Integer, String, create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -29,7 +29,7 @@ Base = declarative_base()
 
 class TrackedWallet(Base):
     """
-    Tracked wallet for Step 2: one row per wallet with optional label and last score.
+    Tracked wallet for Step 2: one row per wallet with optional label, last score, and reason codes.
     """
 
     __tablename__ = "tracked_wallets"
@@ -41,6 +41,7 @@ class TrackedWallet(Base):
     last_risk = Column(String(32), nullable=True)
     last_checked = Column(Integer, nullable=True)  # Unix timestamp
     is_active = Column(Boolean, nullable=False, default=True, index=True)
+    reason_codes = Column(String(1024), nullable=True)  # JSON array of reason code strings
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class TrackedWallet(Base):
             "last_risk": self.last_risk or "",
             "last_checked": self.last_checked,
             "is_active": self.is_active,
+            "reason_codes": self.reason_codes,
         }
 
 
@@ -68,6 +70,37 @@ class ScoreHistory(Base):
     timestamp = Column(Integer, nullable=False, index=True)  # Unix
 
 
+class WalletReasonEvidence(Base):
+    """
+    Evidence linking a wallet to a reason code: tx-level records supporting
+    why a wallet was flagged (e.g. DRAINER_INTERACTION, RAPID_TOKEN_DUMP).
+    Append-only audit trail for reason attribution.
+    """
+
+    __tablename__ = "wallet_reason_evidence"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    wallet = Column(String(64), nullable=False, index=True)
+    reason_code = Column(String(64), nullable=False, index=True)
+    tx_signature = Column(String(128), nullable=True, index=True)
+    counterparty = Column(String(64), nullable=True, index=True)
+    amount = Column(String(64), nullable=True)  # Lamports or human-readable; string avoids precision loss
+    token = Column(String(64), nullable=True, index=True)  # Mint address or symbol
+    timestamp = Column(Integer, nullable=True, index=True)  # Unix seconds
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "wallet": self.wallet,
+            "reason_code": self.reason_code,
+            "tx_signature": self.tx_signature,
+            "counterparty": self.counterparty,
+            "amount": self.amount,
+            "token": self.token,
+            "timestamp": self.timestamp,
+        }
+
+
 # -----------------------------------------------------------------------------
 # Engine and session (DATABASE_URL â†’ Postgres, else SQLite)
 # -----------------------------------------------------------------------------
@@ -76,8 +109,8 @@ DEFAULT_SQLITE_PATH = "wallet_tracking.db"
 
 
 def _get_database_url() -> str:
-    """Return DATABASE_URL for Postgres if set; else SQLite from DATABASE_PATH, WALLET_TRACKING_DB_PATH, or default."""
-    url = (os.getenv("DATABASE_URL") or "").strip()
+    """Return BLOCKID_DB_URL, DATABASE_URL for Postgres if set; else SQLite from DATABASE_PATH, WALLET_TRACKING_DB_PATH, or default."""
+    url = (os.getenv("BLOCKID_DB_URL") or os.getenv("DATABASE_URL") or "").strip()
     if url:
         return url
     path = (
@@ -86,6 +119,12 @@ def _get_database_url() -> str:
         or "blockid.db"
     )
     return f"sqlite:///{path}"
+
+
+# Expose DB_URL for init_db and logging
+DB_URL = _get_database_url()
+print("DB_URL USED:", DB_URL)
+
 
 
 _engine = None
@@ -140,14 +179,43 @@ def _validate_wallet(wallet: str) -> None:
         raise ValueError(f"Invalid Solana wallet: {e}") from e
 
 
+def _migrate_reason_codes(engine: Any) -> None:
+    """Add reason_codes column to tracked_wallets if missing (migration)."""
+    from sqlalchemy import text
+    url = _get_database_url()
+    if "sqlite" in url:
+        with engine.connect() as conn:
+            try:
+                result = conn.execute(text("PRAGMA table_info(tracked_wallets)"))
+                rows = result.fetchall()
+                if rows and not any(r[1] == "reason_codes" for r in rows):
+                    conn.execute(text("ALTER TABLE tracked_wallets ADD COLUMN reason_codes TEXT"))
+                    conn.commit()
+                    logger.info("wallet_tracking_migration", added="reason_codes")
+            except Exception as e:
+                logger.debug("wallet_tracking_migration_skip", error=str(e))
+    else:
+        with engine.connect() as conn:
+            try:
+                conn.execute(text(
+                    "ALTER TABLE tracked_wallets ADD COLUMN IF NOT EXISTS reason_codes VARCHAR(1024)"
+                ))
+                conn.commit()
+            except Exception as e:
+                if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                    logger.debug("wallet_tracking_migration_skip", error=str(e))
+
+
 def init_db() -> None:
     """
     Create wallet tracking tables if they do not exist.
     Uses SQLAlchemy Base.metadata.create_all. Safe to call on every startup.
+    Runs migration to add reason_codes column if missing.
     """
     try:
         engine = _get_engine()
         Base.metadata.create_all(bind=engine)
+        _migrate_reason_codes(engine)
         logger.info("wallet_tracking_init_db", url=_get_database_url().split("?")[0].split("//")[-1])
     except Exception as e:
         logger.exception("wallet_tracking_init_db_failed", error=str(e))
@@ -208,18 +276,36 @@ def list_wallets() -> list[dict[str, Any]]:
         raise
 
 
-def update_wallet_score(wallet: str, score: int, risk: str | None = None) -> None:
+def update_wallet_score(
+    wallet: str,
+    score: int,
+    risk: str | None = None,
+    reason_codes: list[str] | None = None,
+) -> None:
     """
-    Update last_score, last_risk, last_checked for a wallet and append a row to score_history.
+    Update last_score, last_risk, last_checked, reason_codes for a wallet and append a row to score_history.
+    reason_codes is stored as JSON list string; pass list of strings (e.g. ["NEW_WALLET", "LOW_ACTIVITY"]).
     """
     wallet = (wallet or "").strip()
     risk = (risk or "").strip() or None
     now = int(time.time())
+    reason_codes_json: str | None = None
+    if reason_codes is not None:
+        try:
+            import json
+            reason_codes_json = json.dumps(reason_codes) if reason_codes else None
+        except (TypeError, ValueError):
+            reason_codes_json = None
     try:
         with _session_scope() as session:
-            session.query(TrackedWallet).filter(TrackedWallet.wallet == wallet).update(
-                {"last_score": score, "last_risk": risk, "last_checked": now}
-            )
+            updates: dict[str, Any] = {
+                "last_score": score,
+                "last_risk": risk,
+                "last_checked": now,
+            }
+            if reason_codes is not None:
+                updates["reason_codes"] = reason_codes_json
+            session.query(TrackedWallet).filter(TrackedWallet.wallet == wallet).update(updates)
             session.add(ScoreHistory(wallet=wallet, score=score, risk=risk, timestamp=now))
         logger.debug("wallet_tracking_score_updated", wallet=wallet[:16], score=score)
     except Exception as e:
@@ -260,6 +346,65 @@ def load_active_wallets_with_scores() -> list[tuple[str, int | None]]:
         raise
 
 
+def insert_reason_evidence(
+    wallet: str,
+    reason_code: str,
+    *,
+    tx_signature: str | None = None,
+    counterparty: str | None = None,
+    amount: str | None = None,
+    token: str | None = None,
+    timestamp: int | None = None,
+) -> int:
+    """
+    Insert one wallet_reason_evidence row. Returns the new row id.
+    """
+    wallet = (wallet or "").strip()
+    reason_code = (reason_code or "").strip()
+    if not wallet or not reason_code:
+        raise ValueError("wallet and reason_code are required")
+    import time
+    ts = timestamp if timestamp is not None else int(time.time())
+    try:
+        with _session_scope() as session:
+            row = WalletReasonEvidence(
+                wallet=wallet,
+                reason_code=reason_code,
+                tx_signature=(tx_signature or "").strip() or None,
+                counterparty=(counterparty or "").strip() or None,
+                amount=(str(amount).strip() or None) if amount is not None else None,
+                token=(token or "").strip() or None,
+                timestamp=ts,
+            )
+            session.add(row)
+            session.flush()
+            return row.id
+    except Exception as e:
+        logger.exception("insert_reason_evidence_failed", wallet=wallet[:16], reason_code=reason_code, error=str(e))
+        raise
+
+
+def list_reason_evidence(
+    wallet: str | None = None,
+    reason_code: str | None = None,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return evidence rows as dicts, optionally filtered by wallet and/or reason_code."""
+    try:
+        with _session_scope() as session:
+            q = session.query(WalletReasonEvidence)
+            if wallet:
+                q = q.filter(WalletReasonEvidence.wallet == wallet.strip())
+            if reason_code:
+                q = q.filter(WalletReasonEvidence.reason_code == reason_code.strip())
+            rows = q.order_by(WalletReasonEvidence.id.desc()).limit(limit).all()
+            return [r.to_dict() for r in rows]
+    except Exception as e:
+        logger.exception("list_reason_evidence_failed", error=str(e))
+        raise
+
+
 def reset_engine_for_test() -> None:
     """
     Clear cached engine and session factory. For tests only; use with a new WALLET_TRACKING_DB_PATH.
@@ -267,3 +412,10 @@ def reset_engine_for_test() -> None:
     global _engine, _SessionLocal
     _engine = None
     _SessionLocal = None
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy engine: expose 'engine' without creating at import time until first access."""
+    if name == "engine":
+        return _get_engine()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

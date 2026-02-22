@@ -1,0 +1,11 @@
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/solana_borsh-cc9fed7a7117cba9.d: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/deprecated.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/macros.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v0_10.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v1.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/libsolana_borsh-cc9fed7a7117cba9.rlib: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/deprecated.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/macros.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v0_10.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v1.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/libsolana_borsh-cc9fed7a7117cba9.rmeta: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/deprecated.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/macros.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v0_10.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v1.rs
+
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/lib.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/deprecated.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/macros.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v0_10.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-borsh-2.2.1/src/v1.rs:

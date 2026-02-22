@@ -13,7 +13,7 @@ from enum import Enum
 from typing import Any
 
 from backend_blockid.analysis_engine.features import WalletFeatureVector
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -24,7 +24,7 @@ from backend_blockid.analysis_engine.features import extract_features
 from backend_blockid.analysis_engine.scorer import compute_trust_score
 from backend_blockid.database import get_database
 from backend_blockid.database.models import WalletProfile
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.solana_listener.listener import SolanaListener
 from backend_blockid.solana_listener.models import SignatureInfo
 from backend_blockid.solana_listener.parser import ParsedTransaction, parse

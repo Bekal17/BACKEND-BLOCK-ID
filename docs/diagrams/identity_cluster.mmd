@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph ClusterA[Identity Cluster A]
+        W1[Wallet A1]
+        W2[Wallet A2]
+        W3[Wallet A3]
+    end
+
+    subgraph ClusterB[Identity Cluster B]
+        W4[Wallet B1]
+        W5[Wallet B2]
+    end
+
+    subgraph Signals[Clustering Rules]
+        R1[bidirectional transfers]
+        R2[shared funding]
+        R3[burst timing]
+        R4[fan-in/fan-out]
+        R5[circular flow]
+    end
+
+    subgraph Propagation[Risk Propagation]
+        P1[Cluster risk to wallets]
+        P2[BFS 2 hops, decay]
+    end
+
+    W1 --- W2
+    W2 --- W3
+    W4 --- W5
+
+    Signals -.->|groups| ClusterA
+    Signals -.->|groups| ClusterB
+    ClusterA --> Propagation
+    ClusterB --> Propagation

@@ -1,0 +1,10 @@
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/spl_token_group_interface-2836906f22ce338c.d: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/error.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/instruction.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/state.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/libspl_token_group_interface-2836906f22ce338c.so: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/error.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/instruction.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/state.rs
+
+/mnt/d/BACKENDBLOCKID/programs/blockid_oracle/target/debug/deps/libspl_token_group_interface-2836906f22ce338c.rlib: /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/lib.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/error.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/instruction.rs /home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/state.rs
+
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/lib.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/error.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/instruction.rs:
+/home/bekal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spl-token-group-interface-0.6.0/src/state.rs:

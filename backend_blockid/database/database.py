@@ -21,7 +21,7 @@ from backend_blockid.database.models import (
     TrustScoreRecord,
     WalletProfile,
 )
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -271,6 +271,11 @@ class DatabaseBackend(ABC):
         metadata_json: str | None = None,
     ) -> int:
         """Append a trust score to the timeline. Returns row id."""
+        ...
+
+    @abstractmethod
+    def insert_wallet_score(self, wallet: str, score: float, created_at: int) -> int:
+        """Insert into wallet_scores table. Returns row id."""
         ...
 
     @abstractmethod
@@ -590,6 +595,55 @@ class SQLiteBackend(DatabaseBackend):
     def __init__(self, path: str | Path, *, timeout_sec: float = 5.0) -> None:
         self._path = Path(path)
         self._timeout_sec = timeout_sec
+        self.init_schema()
+
+    def init_schema(self) -> None:
+        """Create required tables if they do not exist."""
+        with self._cursor() as cur:
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS wallet_profiles (
+                    wallet TEXT PRIMARY KEY,
+                    first_seen_at INTEGER,
+                    last_seen_at INTEGER,
+                    profile_json TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet TEXT,
+                    signature TEXT,
+                    sender TEXT,
+                    receiver TEXT,
+                    amount_lamports INTEGER,
+                    timestamp INTEGER,
+                    slot INTEGER,
+                    created_at INTEGER,
+                    UNIQUE(wallet, signature)
+                );
+                CREATE TABLE IF NOT EXISTS trust_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet TEXT,
+                    score REAL,
+                    computed_at INTEGER,
+                    metadata_json TEXT,
+                    created_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS wallet_reason_evidence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet TEXT,
+                    reason_code TEXT,
+                    weight INTEGER,
+                    created_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS wallet_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet TEXT,
+                    score REAL,
+                    created_at INTEGER
+                );
+            """)
+        logger.info("sqlite_schema_initialized")
 
     def _connect(self) -> sqlite3.Connection:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -760,6 +814,15 @@ class SQLiteBackend(DatabaseBackend):
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (wallet, score, computed_at, metadata_json, now),
+            )
+            return cur.lastrowid or 0
+
+    def insert_wallet_score(self, wallet: str, score: float, created_at: int) -> int:
+        """Insert into wallet_scores table. Returns row id."""
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO wallet_scores(wallet, score, created_at) VALUES (?, ?, ?)",
+                (wallet, score, created_at),
             )
             return cur.lastrowid or 0
 
@@ -1624,6 +1687,10 @@ class Database:
         computed_at = computed_at if computed_at is not None else now
         metadata_json = json.dumps(metadata) if metadata else None
         return self._backend.insert_trust_score(wallet, score, computed_at, metadata_json)
+
+    def insert_wallet_score(self, wallet: str, score: float, created_at: int) -> int:
+        """Insert into wallet_scores table. Returns row id."""
+        return self._backend.insert_wallet_score(wallet, score, created_at)
 
     def get_trust_score_timeline(
         self,

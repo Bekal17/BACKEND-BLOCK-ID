@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.solana_listener.parser import ParsedTransaction
 
 logger = get_logger(__name__)

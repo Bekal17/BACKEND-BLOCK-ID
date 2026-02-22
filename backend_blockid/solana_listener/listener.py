@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from backend_blockid.logging import get_logger
+from backend_blockid.blockid_logging import get_logger
 from backend_blockid.solana_listener.models import SignatureInfo
 
 logger = get_logger(__name__)
