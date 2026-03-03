@@ -103,7 +103,7 @@ def run_sync_once(db: Database) -> int:
                 wallet_pubkey = Pubkey.from_string(w)
             except Exception:
                 continue
-            pda = get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+            pda = get_trust_score_pda(program_id, wallet_pubkey)
             pdas.append(pda)
             valid.append(w)
 

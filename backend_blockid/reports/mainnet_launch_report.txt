@@ -1,0 +1,153 @@
+BlockID Final Mainnet Launch Checklist
+======================================================================
+Generated: 2026-02-26 05:51:49 UTC
+Purpose: Prevent false positives, outages, incorrect mainnet publishing.
+
+======================================================================
+SECTION 1 — Pipeline Stability
+======================================================================
+  ✔ run_full_pipeline.py runs successfully 5 days in a row
+  ✔ No crashes in graph_clustering / propagation_engine
+  ✔ reason_aggregator dedup working
+      Manual: verify dedup in reason_aggregator.py
+  ✔ dynamic_risk Bayesian update stable
+
+======================================================================
+SECTION 2 — Accuracy Validation
+======================================================================
+  ✔ False positive rate < 5%
+  ✗ False negative spot-check
+      Manual: verify known scams detected
+  ✗ 100 random wallets manually reviewed
+      Manual step
+  ✗ Known scam wallets detected correctly
+      Manual: check scam_wallets.csv coverage
+
+======================================================================
+SECTION 3 — Confidence & Review Queue
+======================================================================
+  ✗ CONFIDENCE_THRESHOLD calibrated
+      Current: not set (suggest 0.72)
+  ✗ review_queue enabled
+      REVIEW_QUEUE_ENABLED=1
+  ✗ manual approve/reject tested
+      py -m backend_blockid.tools.review_queue_cli list
+  ✗ low-confidence wallets skipped
+      Verify in predict_wallet_score / batch_publish
+
+======================================================================
+SECTION 4 — Oracle Safety
+======================================================================
+  ✗ BLOCKID_TEST_MODE=0
+      Current: 1
+  ✗ BLOCKID_PIPELINE_MODE=0
+      Current: 1
+  ✗ Publishing limited to safe wallets
+      Verify batch_publish / pre_publish_check
+  ✗ PDA derivation verified on devnet
+      Manual: test publish on devnet
+  ✗ Oracle signer: 9QCfNuQuxct1Xk9ytFYg...
+      ORACLE_PRIVATE_KEY=not set, ORACLE_PROGRAM_ID=not set
+
+======================================================================
+SECTION 5 — Helius Cost Control
+======================================================================
+  ✗ incremental fetch enabled
+      HELIUS_INCREMENTAL_FETCH=1
+  ✔ wallet_scan_prioritizer working
+  ✔ helius_cost_monitor active
+  ✗ daily cost limit configured
+      Check helius_cost_monitor DAILY_LIMIT
+
+======================================================================
+SECTION 6 — Monitoring & Alerts
+======================================================================
+  ✔ Grafana dashboards live
+      monitoring/README.md, CANARY_DASHBOARD.md
+  ✔ Prometheus metrics working
+      GET /metrics
+  ✗ Alerts for pipeline failure
+      Configure in monitoring / alerts/engine.py
+  ✗ Alerts for RPC failover
+      blockid_rpc_switch_total metric
+
+======================================================================
+SECTION 7 — Deployment Safety
+======================================================================
+  ✔ Docker image tested
+  ✔ Kubernetes deploy tested
+      k8s/README.md
+  ✔ Canary deployment tested
+      k8s/backend-deployments.yaml, .github/workflows/blockid_canary.yml
+  ✔ Auto rollback tested
+      kubectl scale blockid-api-canary --replicas=0
+
+======================================================================
+SECTION 8 — Performance
+======================================================================
+  ✔ Locust load test passed
+      locust -f backend_blockid/tools/locust_blockid.py
+  ✗ API < 300ms response
+      Manual: run Locust, check p95 latency
+  ✗ DB queries optimized
+      Check indexes, query plans
+  ✔ Graph API tested
+      GET /wallet/{wallet}/graph
+
+======================================================================
+SECTION 9 — UI Integration
+======================================================================
+  ✗ API contract stable
+      OpenAPI / generate_spec.py
+  ✗ app.blockidscore.fun connected to staging API
+      Manual: verify staging endpoint
+  ✔ Investigation Explorer works
+      GET /wallet/{wallet}/investigation_badge
+  ✔ Badge timeline correct
+      GET /wallet/{wallet}/badge_timeline
+
+======================================================================
+SECTION 10 — Security
+======================================================================
+  ✗ Oracle keypair secure
+      Keypair path, not in repo
+  ✔ .env secrets not in repo
+      .gitignore contains .env
+  ✗ Rate limiting enabled
+      realtime_risk_engine rate limit, API middleware
+  ✗ Audit logs active
+      blockid_logging, structlog
+
+======================================================================
+SECTION 11 — Backup & Recovery
+======================================================================
+  ✗ DB backup tested
+      Manual: backup blockid.db
+  ✔ Rollback script tested
+      py -m backend_blockid.tools.rollback_deployment
+  ✔ PDA publish can be stopped
+      BLOCKID_DRY_RUN=1 or BLOCKID_SKIP_PUBLISH=1
+
+======================================================================
+SECTION 12 — Dry Run
+======================================================================
+  ✗ Run pipeline on 1000 wallets
+      py -m backend_blockid.tools.run_full_pipeline --limit 1000
+  ✗ Compare results with manual labels
+      Manual step
+  ✗ Verify top 20 risky wallets
+      Manual step
+
+======================================================================
+SECTION 13 — Launch Plan
+======================================================================
+  ✗ Start with small wallet set
+      e.g. 100–500 wallets initially
+  ✗ Monitor metrics 24 hours
+      Grafana, Prometheus, pipeline_run_log
+  ✗ Enable full publish
+      BLOCKID_TEST_MODE=0, BLOCKID_DRY_RUN=0
+
+======================================================================
+End of Mainnet Launch Checklist
+======================================================================

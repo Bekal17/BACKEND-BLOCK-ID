@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BlockID Monitoring Dashboard</title>
+  <style>
+    :root {
+      --bg: #0a0a0c;
+      --card: #121215;
+      --border: #1e1e24;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --ok: #22c55e;
+      --warn: #eab308;
+      --err: #ef4444;
+      --accent: #6366f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 1.5rem;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .container { max-width: 960px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 0.5rem; color: #fafafa; }
+    .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .card h2 {
+      font-size: 0.9rem;
+      margin: 0 0 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .grid { display: grid; gap: 1rem; }
+    .grid-2 { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    .row { display: flex; justify-content: space-between; padding: 0.25rem 0; }
+    .row span:last-child { color: var(--muted); font-size: 0.9rem; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+    .alerts { margin-top: 1.5rem; }
+    .alert {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid var(--err);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.5rem;
+      font-size: 0.9rem;
+    }
+    .alert.medium { background: rgba(234,179,8,0.1); border-color: var(--warn); }
+    #refresh { color: var(--muted); font-size: 0.8rem; }
+    .loading { opacity: 0.6; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>BlockID Monitoring Dashboard</h1>
+    <p class="sub">System health • Pipeline • Helius cost • Trust stats • Review queue • Pipeline summary</p>
+    <p id="refresh">Last update: — | Auto-refresh 60s</p>
+
+    <div id="content" class="loading">
+      <div class="grid grid-2">
+        <div class="card">
+          <h2>✔ System Health</h2>
+          <div id="health">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>✔ Pipeline Status</h2>
+          <div id="pipeline">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>✔ Helius Cost Today</h2>
+          <div id="helius">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>✔ Wallet Risk Stats</h2>
+          <div id="trust">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>✔ Review Queue Count</h2>
+          <div id="review">Loading…</div>
+        </div>
+        <div class="card">
+          <h2>✔ Pipeline Summary</h2>
+          <div id="summary">Loading…</div>
+        </div>
+      </div>
+      <div class="alerts" id="alerts"></div>
+    </div>
+  </div>
+
+  <script>
+    const BASE = window.location.origin;
+
+    function fmtTs(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      return d.toLocaleString();
+    }
+
+    async function load() {
+      const [health, pipeline, helius, trust, review, summary, alerts] = await Promise.all([
+        fetch(BASE + '/monitor/health').then(r => r.json()),
+        fetch(BASE + '/monitor/pipeline_status').then(r => r.json()),
+        fetch(BASE + '/monitor/helius_usage').then(r => r.json()),
+        fetch(BASE + '/monitor/trust_stats').then(r => r.json()),
+        fetch(BASE + '/monitor/review_queue').then(r => r.json()),
+        fetch(BASE + '/monitor/pipeline-summary').then(r => r.json()),
+        fetch(BASE + '/monitor/alerts').then(r => r.json()),
+      ]);
+
+      document.getElementById('refresh').textContent = 'Last update: ' + new Date().toLocaleTimeString() + ' | Auto-refresh 60s';
+      document.getElementById('content').classList.remove('loading');
+
+      // Health
+      const dbClass = health.database_connection_ok ? 'ok' : 'err';
+      let healthHtml = '<div class="row"><span>Database</span><span class="' + dbClass + '">' + (health.database_connection_ok ? 'OK' : 'FAIL') + '</span></div>';
+      healthHtml += '<div class="row"><span>API</span><span class="ok">OK</span></div>';
+      if (health.last_pipeline_run) {
+        healthHtml += '<div class="row"><span>Last run</span><span>' + fmtTs(health.last_pipeline_run.run_end_ts || health.last_pipeline_run.run_start_ts) + '</span></div>';
+      }
+      document.getElementById('health').innerHTML = healthHtml;
+
+      // Pipeline
+      let pipeHtml = '<div class="row"><span>Last run</span><span>' + fmtTs(pipeline.last_run_time) + '</span></div>';
+      pipeHtml += '<div class="row"><span>Wallets scanned</span><span>' + (pipeline.wallets_scanned ?? '—') + '</span></div>';
+      pipeHtml += '<div class="row"><span>Errors</span><span>' + (pipeline.errors_count ?? 0) + '</span></div>';
+      const successClass = pipeline.success === true ? 'ok' : (pipeline.success === false ? 'err' : '');
+      pipeHtml += '<div class="row"><span>Success</span><span class="' + successClass + '">' + (pipeline.success === true ? 'Yes' : pipeline.success === false ? 'No' : '—') + '</span></div>';
+      document.getElementById('pipeline').innerHTML = pipeHtml;
+
+      // Helius
+      const costClass = helius.over_budget ? 'err' : 'ok';
+      let heliusHtml = '<div class="row"><span>Calls today</span><span>' + helius.today_calls + '</span></div>';
+      heliusHtml += '<div class="row"><span>Cost</span><span class="' + costClass + '">$' + (helius.estimated_cost_usd ?? 0).toFixed(4) + ' / $' + helius.daily_limit_usd + '</span></div>';
+      if (helius.top_expensive_wallets && helius.top_expensive_wallets.length) {
+        heliusHtml += '<div class="row"><span>Top wallet</span><span>' + helius.top_expensive_wallets[0].wallet + ' ($' + helius.top_expensive_wallets[0].cost_usd + ')</span></div>';
+      }
+      document.getElementById('helius').innerHTML = heliusHtml;
+
+      // Trust
+      let trustHtml = '<div class="row"><span>Average score</span><span>' + (trust.average_score ?? 0) + '</span></div>';
+      trustHtml += '<div class="row"><span>Total scored</span><span>' + (trust.total_wallets_scored ?? 0) + '</span></div>';
+      trustHtml += '<div class="row"><span>High risk (&lt;40)</span><span>' + (trust.number_high_risk_wallets ?? 0) + '</span></div>';
+      trustHtml += '<div class="row"><span>New scam today</span><span>' + (trust.new_scam_wallets_today ?? 0) + '</span></div>';
+      document.getElementById('trust').innerHTML = trustHtml;
+
+      // Review
+      const revClass = review.over_threshold ? 'warn' : 'ok';
+      let reviewHtml = '<div class="row"><span>Pending</span><span class="' + revClass + '">' + (review.pending_count ?? 0) + ' / ' + review.threshold + '</span></div>';
+      document.getElementById('review').innerHTML = reviewHtml;
+
+      // Summary
+      const summaryClass = summary.pipeline_ok === true ? 'ok' : (summary.pipeline_ok === false ? 'err' : '');
+      let summaryHtml = '<div class="row"><span>Pipeline OK</span><span class="' + summaryClass + '">' + (summary.pipeline_ok === true ? 'Yes' : summary.pipeline_ok === false ? 'No' : '—') + '</span></div>';
+      summaryHtml += '<div class="row"><span>Wallets scored today</span><span>' + (summary.wallets_scored_today ?? 0) + '</span></div>';
+      summaryHtml += '<div class="row"><span>Avg RPC latency</span><span>' + (summary.avg_rpc_latency_ms ?? '—') + ' ms</span></div>';
+      summaryHtml += '<div class="row"><span>PDA failures (24h)</span><span>' + (summary.pda_failures_24h ?? 0) + '</span></div>';
+      summaryHtml += '<div class="row"><span>PDA success rate</span><span>' + (summary.pda_success_rate ?? '—') + '</span></div>';
+      summaryHtml += '<div class="row"><span>Errors last 24h</span><span>' + (summary.errors_last_24h ?? 0) + '</span></div>';
+      document.getElementById('summary').innerHTML = summaryHtml;
+
+      // Alerts
+      const alertsEl = document.getElementById('alerts');
+      if (alerts.alerts && alerts.alerts.length) {
+        alertsEl.innerHTML = '<h2 style="margin-bottom:0.5rem;">⚠ Alerts</h2>' + alerts.alerts.map(a =>
+          '<div class="alert ' + (a.severity === 'medium' ? 'medium' : '') + '">' + a.message + '</div>'
+        ).join('');
+      } else {
+        alertsEl.innerHTML = '';
+      }
+    }
+
+    load();
+    setInterval(load, 60000);
+  </script>
+</body>
+</html>

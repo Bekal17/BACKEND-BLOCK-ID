@@ -1,0 +1,101 @@
+# BlockID Canary Deployment
+# Deploy new version to canary (10% traffic), wait, then promote or rollback
+#
+# Future: automatic statistical canary analysis, per-endpoint canary, multi-region
+
+name: BlockID Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (e.g. main-abc1234)"
+        required: true
+      image_repo:
+        description: "Image repo (default blockid, use user/blockid for Docker Hub)"
+        default: blockid
+      wait_minutes:
+        description: "Minutes to wait before promote"
+        default: 30
+        type: number
+      auto_promote:
+        description: "Auto promote after wait (else manual)"
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      image_repo:
+        default: blockid
+        type: string
+      wait_minutes:
+        default: 30
+        type: number
+      auto_promote:
+        default: false
+        type: boolean
+
+jobs:
+  deploy-canary:
+    name: Deploy Canary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy canary
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          envs: IMAGE_TAG,IMAGE_REPO
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || github.event.inputs.image_tag }}
+          IMAGE_REPO: ${{ inputs.image_repo || github.event.inputs.image_repo || 'blockid' }}
+        script: |
+          IMG="${IMAGE_REPO}:${IMAGE_TAG}"
+          kubectl set image deployment/blockid-api-canary api=${IMG} -n blockid
+          kubectl scale deployment/blockid-api-canary --replicas=1 -n blockid
+          kubectl rollout status deployment/blockid-api-canary -n blockid --timeout=120s
+          echo "[canary] deployed version=${IMAGE_TAG} traffic=10%"
+
+      - name: Wait for monitoring
+        run: |
+          MINUTES="${{ inputs.wait_minutes || github.event.inputs.wait_minutes || 30 }}"
+          echo "Waiting ${MINUTES} minutes before promote/rollback..."
+          sleep $((MINUTES * 60))
+
+      - name: Promote canary
+        if: inputs.auto_promote == true || github.event.inputs.auto_promote == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          envs: IMAGE_TAG,IMAGE_REPO
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || github.event.inputs.image_tag }}
+          IMAGE_REPO: ${{ inputs.image_repo || github.event.inputs.image_repo || 'blockid' }}
+        script: |
+          IMG="${IMAGE_REPO}:${IMAGE_TAG}"
+          kubectl set image deployment/blockid-api-stable api=${IMG} -n blockid
+          kubectl scale deployment/blockid-api-stable --replicas=9 -n blockid
+          kubectl scale deployment/blockid-api-canary --replicas=0 -n blockid
+          kubectl rollout status deployment/blockid-api-stable -n blockid --timeout=120s
+          echo "[canary] promoted version=${IMAGE_TAG}"
+
+  rollback-canary:
+    name: Rollback Canary
+    runs-on: ubuntu-latest
+    needs: deploy-canary
+    if: failure()
+    steps:
+      - name: Scale canary to 0
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          script: |
+            kubectl scale deployment/blockid-api-canary --replicas=0 -n blockid
+            echo "[canary] rollback: canary scaled to 0"

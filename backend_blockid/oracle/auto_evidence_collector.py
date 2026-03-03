@@ -9,9 +9,14 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 
-from backend_blockid.api_server.db_wallet_tracking import init_db, load_active_wallets
+if os.getenv("BLOCKID_PIPELINE_MODE") == "1":
+    from backend_blockid.database.db_wallet_tracking_light import init_db, load_active_wallets
+else:
+    from backend_blockid.api_server.db_wallet_tracking import init_db, load_active_wallets
+print("[oracle] PIPELINE_MODE =", os.getenv("BLOCKID_PIPELINE_MODE"))
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.scan_wallet_transactions import main as scan_wallet_transactions
 

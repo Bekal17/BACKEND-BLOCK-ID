@@ -138,7 +138,7 @@ def _run_devnet_publish_test() -> bool:
         return False
 
     # Read back account (request base64 for consistent decoding)
-    pda = get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+    pda = get_trust_score_pda(program_id, wallet_pubkey)
     try:
         acc_resp = client.get_account_info(pda, encoding="base64")
         acc = getattr(acc_resp, "value", None) or (

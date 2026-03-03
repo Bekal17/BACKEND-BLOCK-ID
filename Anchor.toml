@@ -5,10 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-blockid_oracle = "55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B"
-
-[programs.mainnet]
-blockid_oracle = "9etRwVdKdVkvRsMbYVroGPzcdDxZnRmDH1D8Ho6waXGA"
+blockid_oracle = "9gmL8o1iW3Vrd51jKGkdSjupM3R4DfF9Ni2BhtqYkwng"
 
 [registry]
 url = "https://api.apr.dev"

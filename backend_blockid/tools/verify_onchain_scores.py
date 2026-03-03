@@ -137,7 +137,7 @@ def fetch_onchain_score(
         wallet_pubkey = Pubkey.from_string(wallet)
     except Exception:
         return None
-    pda = get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+    pda = get_trust_score_pda(program_id, wallet_pubkey)
     try:
         resp = client.get_account_info(pda, encoding="base64")
     except Exception as e:

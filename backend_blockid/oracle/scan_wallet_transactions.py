@@ -16,24 +16,28 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-import requests
-
+if os.getenv("BLOCKID_PIPELINE_MODE") == "1":
+    from backend_blockid.database.db_wallet_tracking_light import (
+        init_db,
+        insert_reason_evidence,
+        load_active_wallets,
+    )
+else:
+    from backend_blockid.api_server.db_wallet_tracking import (
+        init_db,
+        insert_reason_evidence,
+        load_active_wallets,
+    )
+print("[oracle] PIPELINE_MODE =", os.getenv("BLOCKID_PIPELINE_MODE"))
 from backend_blockid.blockid_logging import get_logger
-from backend_blockid.config.env import (
-    get_solana_rpc_url,
-    load_blockid_env,
-    print_blockid_startup,
-)
-from backend_blockid.api_server.db_wallet_tracking import (
-    init_db,
-    insert_reason_evidence,
-    load_active_wallets,
-)
+from backend_blockid.config.env import load_blockid_env, print_blockid_startup
+from backend_blockid.oracle.rpc_manager import get_rpc_manager
 
 logger = get_logger(__name__)
 
@@ -56,48 +60,25 @@ REQUEST_TIMEOUT = 30
 SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
 
 
-def _rpc_url() -> str | None:
-    load_blockid_env()
-    return get_solana_rpc_url()
+def _rpc_post(method: str, params: list[Any]) -> dict[str, Any] | None:
+    """Use RPC manager for failover. Retries and rotates RPC on failure."""
+    manager = get_rpc_manager()
+    data = manager.rpc_post(method, params, rpc_id="blockid-scan-tx")
+    return data
 
 
-def _rpc_post(url: str, method: str, params: list[Any]) -> dict[str, Any] | None:
-    payload = {"jsonrpc": "2.0", "id": "blockid-scan-tx", "method": method, "params": params}
-    for attempt in range(MAX_RETRIES):
-        try:
-            r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 429:
-                logger.warning("scan_wallet_tx_rate_limit", attempt=attempt + 1)
-                time.sleep(RETRY_DELAY_SEC)
-                continue
-            r.raise_for_status()
-            data = r.json()
-        except requests.RequestException as e:
-            logger.warning("scan_wallet_tx_request_error", error=str(e), attempt=attempt + 1)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY_SEC)
-                continue
-            return None
-        err = data.get("error")
-        if err:
-            logger.warning("scan_wallet_tx_rpc_error", error=str(err))
-            return None
-        return data
-    return None
-
-
-def _get_signatures(url: str, address: str, limit: int = TX_LIMIT) -> list[dict]:
+def _get_signatures(url_or_manager: Any, address: str, limit: int = TX_LIMIT) -> list[dict]:
     params = [address, {"limit": limit}]
-    data = _rpc_post(url, "getSignaturesForAddress", params)
+    data = _rpc_post("getSignaturesForAddress", params)
     if data is None:
         return []
     result = data.get("result")
     return result if isinstance(result, list) else []
 
 
-def _get_transaction(url: str, signature: str) -> dict | None:
+def _get_transaction(url_or_manager: Any, signature: str) -> dict | None:
     params = [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
-    data = _rpc_post(url, "getTransaction", params)
+    data = _rpc_post("getTransaction", params)
     if data is None:
         return None
     return data.get("result")
@@ -172,7 +153,6 @@ def load_scam_wallets() -> set[str]:
 
 
 def _scan_wallet(
-    url: str,
     wallet: str,
     scam_set: set[str],
 ) -> list[dict[str, Any]]:
@@ -181,7 +161,7 @@ def _scan_wallet(
     to insert. Each row: wallet, reason_code, tx_signature, counterparty, amount, token, timestamp.
     """
     evidence: list[dict[str, Any]] = []
-    sigs = _get_signatures(url, wallet)
+    sigs = _get_signatures(None, wallet)
     time.sleep(DELAY_SEC)
 
     now = int(time.time())
@@ -206,7 +186,7 @@ def _scan_wallet(
         sig = sig_info.get("signature")
         if not sig or not isinstance(sig, str):
             continue
-        tx = _get_transaction(url, sig)
+        tx = _get_transaction(None, sig)
         time.sleep(DELAY_SEC)
         if not tx:
             continue
@@ -309,10 +289,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="Max wallets to process (default: all)")
     args = ap.parse_args()
 
-    url = _rpc_url()
-    if not url:
-        logger.error("scan_wallet_tx_no_rpc", message="Set HELIUS_API_KEY or SOLANA_RPC_URL in .env")
-        print("[scan_wallet_tx] ERROR: set HELIUS_API_KEY or SOLANA_RPC_URL in .env", file=sys.stderr)
+    manager = get_rpc_manager()
+    if not manager.get_url():
+        logger.error("scan_wallet_tx_no_rpc", message="No healthy RPC; set HELIUS_API_KEY or RPC_ENDPOINTS")
+        print("[scan_wallet_tx] ERROR: No healthy RPC endpoint. Set HELIUS_API_KEY or RPC_ENDPOINTS in .env", file=sys.stderr)
         return 1
 
     init_db()
@@ -334,7 +314,7 @@ def main() -> int:
 
     for i, wallet in enumerate(wallets):
         try:
-            evidence = _scan_wallet(url, wallet, scam_set)
+            evidence = _scan_wallet(wallet, scam_set)
             for row in evidence:
                 key = (row["wallet"], row["reason_code"], row.get("tx_signature"), row.get("counterparty"))
                 if key in seen:

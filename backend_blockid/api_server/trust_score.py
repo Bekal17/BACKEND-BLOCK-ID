@@ -22,8 +22,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend_blockid.database import Database, get_database
-from backend_blockid.ai_engine.reason_weight_engine import aggregate_score
-from backend_blockid.database.repositories import get_wallet_reasons
 from backend_blockid.database.repositories import get_wallet_reasons
 from backend_blockid.ml.reason_codes import REASON_WEIGHTS
 from backend_blockid.blockid_logging import get_logger
@@ -80,13 +78,12 @@ UPDATED_AT_OFFSET = TRUST_SCORE_ACCOUNT_DISCRIMINATOR_LEN + TRUST_SCORE_ACCOUNT_
 
 
 @functools.lru_cache(maxsize=2048)
-def _get_trust_score_pda_cached(program_id_str: str, oracle_pubkey_str: str, wallet_str: str) -> Any:
-    """Derive trust score PDA; cached by (program_id, oracle, wallet) strings to avoid repeated find_program_address."""
+def _get_trust_score_pda_cached(program_id_str: str, wallet_str: str) -> Any:
+    """Derive trust score PDA; cached by (program_id, wallet). Seeds: [b'trust_score', wallet]."""
     from solders.pubkey import Pubkey
     program_id = Pubkey.from_string(program_id_str)
-    oracle_pubkey = Pubkey.from_string(oracle_pubkey_str)
     wallet_pubkey = Pubkey.from_string(wallet_str)
-    return get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+    return get_trust_score_pda(program_id, wallet_pubkey)
 
 
 def _raw_bytes_from_account_data(data: object) -> bytes | None:
@@ -165,19 +162,27 @@ def _oracle_and_pda_for_wallet(wallet: str) -> tuple[Any, Any]:
     oracle_pubkey = keypair.pubkey()
     program_id = Pubkey.from_string(program_id_str)
     wallet_pubkey = Pubkey.from_string(wallet)
-    pda = get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+    pda = get_trust_score_pda(program_id, wallet_pubkey)
     return oracle_pubkey, pda
 
 
 def _record_to_response(wallet: str, record: Any, oracle_pubkey: Any, pda: Any) -> dict[str, Any]:
-    """Build API response from DB record + oracle/pda. Includes reason_codes from metadata when present."""
+    """Build API response from DB record + oracle/pda. Includes reason_codes and summary from metadata."""
     risk = 0
-    if record.metadata_json:
-        try:
-            meta = json.loads(record.metadata_json)
-            risk = int(meta.get("risk", 0))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
+    summary = None
+    try:
+        meta = json.loads(record.metadata_json or "{}")
+        summary = meta.get("summary")
+        if "risk" in meta:
+            risk = int(meta["risk"])
+        else:
+            from backend_blockid.utils.risk import score_to_risk
+
+            risk = score_to_risk(int(round(record.score)))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        from backend_blockid.utils.risk import score_to_risk
+
+        risk = score_to_risk(int(round(record.score)))
 
     reason_codes = get_wallet_reasons(wallet)
     if not reason_codes:
@@ -199,12 +204,12 @@ def _record_to_response(wallet: str, record: Any, oracle_pubkey: Any, pda: Any) 
             logger.exception("positive_reason_insert_failed", wallet=wallet)
 
         reason_codes = [positive]
-    base_score = int(round(record.score))
-    final_score = aggregate_score(base_score, reason_codes)
+    final_score = int(round(record.score))
     out = {
         "wallet": wallet,
         "score": final_score,
         "risk": risk,
+        "summary": summary,
         "reason_codes": reason_codes,
         "updated_at": _updated_at_iso(record.computed_at),
         "oracle_pubkey": str(oracle_pubkey),
@@ -309,7 +314,7 @@ async def list_trust_scores(body: TrustScoreListRequest, db: Database = Depends(
         if record is None:
             results.append(_not_scored(wallet_str))
             continue
-        pda = _get_trust_score_pda_cached(program_id_str, oracle_pubkey_str, wallet_str)
+        pda = _get_trust_score_pda_cached(program_id_str, wallet_str)
         results.append(_record_to_response(wallet_str, record, oracle_pubkey, pda))
     decode_ms = (time.perf_counter() - t_decode) * 1000
     total_ms = (time.perf_counter() - t_total) * 1000

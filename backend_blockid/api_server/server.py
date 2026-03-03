@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from solders.pubkey import Pubkey
 
@@ -28,6 +28,19 @@ from backend_blockid.api_server.db_wallet_tracking import (
     init_db as wallet_tracking_init_db,
     list_wallets as tracking_list_wallets,
 )
+from backend_blockid.api_server.badge_api import router as badge_router
+from backend_blockid.api_server.graph_api import router as graph_router, investigation_router as graph_investigation_router
+from backend_blockid.api_server.investigation_api import router as investigation_router
+from backend_blockid.api_server.realtime_api import router as realtime_router
+from backend_blockid.api_server.explain_wallet import router as explain_router
+from backend_blockid.api_server.report_api import router as report_router
+from backend_blockid.api_server.review_queue_api import router as review_queue_router
+from backend_blockid.api_server.helius_api import router as helius_router
+from backend_blockid.api_server.monitoring_api import router as monitoring_router
+from backend_blockid.api_server.transaction_api import router as transaction_router
+from backend_blockid.api_server.billing_api import router as billing_router
+from backend_blockid.api_server.billing_middleware import BillingMiddleware
+from backend_blockid.api_server.metrics import generate_metrics, http_request_duration_seconds
 from backend_blockid.api_server.trust_score import router as trust_router
 from backend_blockid.database import get_database, Database
 from backend_blockid.blockid_logging import get_logger
@@ -114,6 +127,10 @@ TRUST_SCORE_SYNC_INTERVAL_SEC = float(os.getenv("TRUST_SCORE_SYNC_INTERVAL_SEC",
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start periodic runner and trust-score sync worker in background threads; signal stop on shutdown."""
+    from backend_blockid.config import ensure_production_safe
+
+    ensure_production_safe()
+
     from backend_blockid.agent_worker.runner import (
         PeriodicRunnerConfig,
         run_periodic_worker,
@@ -182,7 +199,48 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(BillingMiddleware)
+
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    """Track API request latency for Prometheus."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    dur = time.perf_counter() - start
+    try:
+        method = getattr(request, "method", "GET") or "GET"
+        path = getattr(request, "url", None) and getattr(request.url, "path", "") or request.scope.get("path", "")
+        # Normalize path for cardinality (e.g. /wallet/xxx -> /wallet/{address})
+        if path.startswith("/wallet/") and len(path) > 8:
+            path = "/wallet/{address}"
+        elif path.startswith("/api/wallet/"):
+            path = "/api/wallet/{address}"
+        http_request_duration_seconds.labels(method=method, endpoint=path).observe(dur)
+    except Exception:
+        pass
+    return response
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Prometheus metrics endpoint for Grafana scraping."""
+    return Response(generate_metrics(), media_type="text/plain; charset=utf-8")
+
+
 app.include_router(trust_router, prefix="/api", tags=["Trust Score"])
+app.include_router(explain_router)
+app.include_router(badge_router)
+app.include_router(investigation_router)
+app.include_router(graph_router)
+app.include_router(graph_investigation_router)
+app.include_router(realtime_router)
+app.include_router(report_router)
+app.include_router(review_queue_router)
+app.include_router(helius_router)
+app.include_router(monitoring_router)
+app.include_router(transaction_router)
+app.include_router(billing_router)
 
 
 
@@ -260,10 +318,53 @@ def get_wallet(address: str, db: Database = Depends(get_db)) -> WalletResponse:
     )
 
 
+def _health_checks() -> dict:
+    """Run health checks for database, Helius, pipeline, API."""
+    import os
+    db_ok = False
+    helius_ok = False
+    last_pipeline_success: bool | None = None
+    try:
+        from backend_blockid.database.connection import get_connection
+        conn = get_connection()
+        conn.cursor().execute("SELECT 1")
+        conn.close()
+        db_ok = True
+    except Exception:
+        pass
+    try:
+        key = (os.getenv("HELIUS_API_KEY") or "").strip()
+        helius_ok = bool(key)
+        if helius_ok:
+            try:
+                from backend_blockid.tools.helius_cost_monitor import get_today_stats, DAILY_LIMIT
+                _, cost = get_today_stats()
+                helius_ok = cost <= DAILY_LIMIT
+            except Exception:
+                helius_ok = True  # assume ok if we can't check
+    except Exception:
+        pass
+    try:
+        from backend_blockid.api_server.monitoring_api import _get_last_pipeline_run
+        last = _get_last_pipeline_run()
+        last_pipeline_success = last["success"] if last else None
+    except Exception:
+        pass
+    return {
+        "database_ok": db_ok,
+        "helius_ok": helius_ok,
+        "last_pipeline_success": last_pipeline_success,
+        "api_status": "ok",
+        "status": "ok" if db_ok else "degraded",
+    }
+
+
 @app.get("/health")
-def health() -> dict[str, str]:
-    """Liveness probe: API is up."""
-    return {"status": "ok"}
+def health() -> JSONResponse:
+    """Liveness/readiness probe: database, Helius, last pipeline, API status."""
+    data = _health_checks()
+    status = 200 if data.get("database_ok", False) else 503
+    return JSONResponse(status_code=status, content=data)
 
 
 # -----------------------------------------------------------------------------
@@ -312,7 +413,7 @@ def debug_wallet_status(wallet: str) -> WalletStatusResponse:
             oracle_pubkey = keypair.pubkey()
             program_id = Pubkey.from_string(program_id_str)
             wallet_pubkey = Pubkey.from_string(wallet)
-            pda = get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+            pda = get_trust_score_pda(program_id, wallet_pubkey)
             client = Client(rpc_url)
             resp = client.get_account_info(pda, encoding="base64")
             acc = getattr(resp, "value", None) or (

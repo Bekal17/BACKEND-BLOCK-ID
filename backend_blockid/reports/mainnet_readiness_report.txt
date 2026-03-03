@@ -1,0 +1,9 @@
+BlockID Mainnet Readiness Report
+Generated: (run py -m backend_blockid.tools.mainnet_readiness_checklist to generate)
+Report location: backend_blockid/reports/mainnet_readiness_report.txt
+
+Run the checklist:
+  py -m backend_blockid.tools.mainnet_readiness_checklist
+
+Quick run (skip subprocesses):
+  py -m backend_blockid.tools.mainnet_readiness_checklist --quick

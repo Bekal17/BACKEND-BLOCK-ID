@@ -1,0 +1,22 @@
+# Optional: Ingress for external access
+# Uncomment and configure for your ingress controller
+---
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: blockid-api
+#   namespace: blockid
+#   annotations:
+#     kubernetes.io/ingress.class: nginx
+# spec:
+#   rules:
+#     - host: blockid.example.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: blockid-api
+#                 port:
+#                   number: 80

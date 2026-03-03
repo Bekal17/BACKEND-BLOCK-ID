@@ -1,0 +1,134 @@
+# BlockID Stable + Canary Deployments
+# Traffic split by replica ratio: stable (90%) + canary (10%)
+# Both selected by blockid-api Service; K8s round-robins by pod count
+# Future: Istio/NGINX for exact % split, per-endpoint canary, multi-region
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blockid-api-stable
+  namespace: blockid
+  labels:
+    app: blockid-api
+    version: stable
+spec:
+  replicas: 9
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: blockid-api
+      version: stable
+  template:
+    metadata:
+      labels:
+        app: blockid-api
+        version: stable
+    spec:
+      containers:
+        - name: api
+          image: blockid:v1.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: blockid-config
+            - secretRef:
+                name: blockid-secrets
+                optional: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: blockid-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blockid-api-canary
+  namespace: blockid
+  labels:
+    app: blockid-api
+    version: canary
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: blockid-api
+      version: canary
+  template:
+    metadata:
+      labels:
+        app: blockid-api
+        version: canary
+    spec:
+      containers:
+        - name: api
+          image: blockid:v1.5
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: blockid-config
+            - secretRef:
+                name: blockid-secrets
+                optional: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: blockid-data

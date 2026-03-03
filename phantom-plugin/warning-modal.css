@@ -1,0 +1,169 @@
+/**
+ * BlockID Phantom Plugin - Warning Popup Styles
+ * Color rules: SCAM → red, HIGH_RISK → orange, TRUSTED → green
+ */
+
+#blockid-warning-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.blockid-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.blockid-modal {
+  position: relative;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  max-width: 420px;
+  width: calc(100% - 32px);
+  overflow: hidden;
+}
+
+.blockid-modal.blockid-alert {
+  border: 2px solid #dc2626;
+}
+
+.blockid-modal-header {
+  padding: 16px 20px;
+  border-bottom: 3px solid #f59e0b;
+  background: #fffbeb;
+}
+
+.blockid-modal-header h3 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.blockid-modal.blockid-alert .blockid-modal-header {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
+.blockid-modal-body {
+  padding: 20px;
+}
+
+.blockid-modal-body p {
+  margin: 0 0 12px;
+  font-size: 0.9375rem;
+  color: #374151;
+}
+
+.blockid-modal-body p:last-child {
+  margin-bottom: 0;
+}
+
+.blockid-modal-body code {
+  font-size: 0.875rem;
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.blockid-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px 20px;
+  background: #f9fafb;
+  border-top: 1px solid #e5e7eb;
+}
+
+.blockid-btn {
+  flex: 1;
+  min-width: 120px;
+  padding: 10px 16px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-radius: 8px;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: center;
+  border: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.blockid-btn-primary {
+  background: #22c55e;
+  color: #fff;
+}
+
+.blockid-btn-primary:hover {
+  background: #16a34a;
+}
+
+.blockid-btn-secondary {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.blockid-btn-secondary:hover {
+  background: #d1d5db;
+}
+
+.blockid-btn-danger {
+  background: #dc2626;
+  color: #fff;
+}
+
+.blockid-btn-danger:hover {
+  background: #b91c1c;
+}
+
+/* Transaction-level warning */
+.blockid-tx-modal .blockid-tx-sub {
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+  opacity: 0.9;
+}
+
+.blockid-extreme-note {
+  color: #dc2626;
+  font-weight: 500;
+}
+
+/* Low risk banner */
+.blockid-banner {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483645;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.blockid-banner a {
+  color: #b45309;
+  font-weight: 500;
+}
+
+.blockid-banner button {
+  margin-left: 4px;
+  padding: 2px 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 1.25rem;
+  line-height: 1;
+}

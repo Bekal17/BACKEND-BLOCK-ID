@@ -1,0 +1,170 @@
+# BlockID CI/CD Pipeline
+# Test, build Docker image, and deploy on main branch
+#
+# Future upgrades:
+#   - Multi-env deploy (devnet/mainnet)
+#   - Auto rollback
+#   - Load testing with Locust
+#
+# Canary: Use workflow "BlockID Canary" (manual) or commit message [canary]
+
+name: BlockID CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio ruff
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short -x 2>&1 | tee test-report.txt
+        env:
+          BLOCKID_USE_DUMMY_DATA: "1"
+          DB_PATH: blockid_ci.db
+
+      - name: Run pipeline test (TEST_MODE)
+        run: |
+          export BLOCKID_TEST_MODE=1
+          export BLOCKID_USE_DUMMY_DATA=1
+          export DB_PATH=blockid_ci.db
+          python -m backend_blockid.tools.run_full_pipeline 2>&1 | tee pipeline-test.log
+        continue-on-error: true
+
+      - name: Lint code
+        run: |
+          ruff check backend_blockid tests/
+          ruff format --check backend_blockid tests/
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-artifacts-${{ github.run_id }}
+          path: |
+            test-report.txt
+            pipeline-test.log
+          retention-days: 7
+
+  build:
+    name: Build Docker
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set version tag
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=$VERSION" >> $GITHUB_ENV
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build -t blockid:${{ env.IMAGE_TAG }} -t blockid:latest .
+          docker images blockid
+
+      - name: Log in to Docker Hub
+        if: success()
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Tag and push to Docker Hub
+        if: success()
+        run: |
+          IMAGE="${{ secrets.DOCKER_USER }}/blockid"
+          docker tag blockid:${{ env.IMAGE_TAG }} ${IMAGE}:${{ env.IMAGE_TAG }}
+          docker tag blockid:latest ${IMAGE}:latest
+          docker push ${IMAGE}:${{ env.IMAGE_TAG }}
+          docker push ${IMAGE}:latest
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && !contains(github.event.head_commit.message, '[canary]')
+    steps:
+      - name: Deploy to server
+        id: deploy
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          envs: DEPLOY_PATH
+          script: |
+            cd ${DEPLOY_PATH:-$HOME/blockid}
+            docker compose pull
+            docker compose up -d
+
+      - name: Rollback on deploy failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          envs: DEPLOY_PATH
+          script: |
+            if command -v kubectl >/dev/null 2>&1; then
+              kubectl rollout undo deployment/blockid-api -n blockid || true
+            fi
+            echo "[rollback] triggered version=previous"
+
+  deploy-canary:
+    name: Deploy Canary
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && contains(github.event.head_commit.message, '[canary]')
+    uses: ./.github/workflows/blockid_canary.yml
+    secrets: inherit
+    with:
+      image_tag: ${{ needs.build.outputs.image_tag }}
+      image_repo: ${{ secrets.DOCKER_USER }}/blockid
+      wait_minutes: 30
+      auto_promote: false
+
+  notify-failure:
+    name: Notify on failure
+    runs-on: ubuntu-latest
+    needs: [ci, build, deploy, deploy-canary]
+    if: always() && !cancelled() && github.ref == 'refs/heads/main' && (needs.ci.result == 'failure' || needs.build.result == 'failure' || needs.deploy.result == 'failure' || needs.deploy-canary.result == 'failure')
+    steps:
+      - name: Log failure
+        run: |
+          echo "CI/CD failed. Future: Telegram/email notification."
+          echo "Workflow: ${{ github.workflow }}"
+          echo "Run: ${{ github.run_id }}"

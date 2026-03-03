@@ -26,10 +26,20 @@ Usage:
 
 from __future__ import annotations
 
+import csv
+import io
+import os
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
+
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+except Exception:
+    pass
 
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.config.env import (
@@ -37,8 +47,25 @@ from backend_blockid.config.env import (
     load_blockid_env,
     use_devnet_dummy_data,
 )
+from backend_blockid.database.repositories import get_all_active_clusters
+from backend_blockid.oracle.incremental_wallet_meta_scanner import scan_wallet, scan_cluster
+from backend_blockid.ai_engine.priority_wallets import (
+    age_priorities,
+    boost_active_wallets,
+    get_wallets_with_budget,
+    populate_priority_wallets,
+    remove_old_wallets,
+)
+from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score
+from backend_blockid.tools.blockid_logger import log_event
+from backend_blockid.tools.telegram_alert import send_pipeline_summary
+from backend_blockid.api_server.monitoring_api import record_pipeline_run
+from backend_blockid.api_server.metrics import record_pipeline_run as metrics_record_pipeline_run
 
 logger = get_logger(__name__)
+
+BLOCKID_TEST_MODE = os.getenv("BLOCKID_TEST_MODE", "0") == "1"
+print(f"[run_full_pipeline] TEST_MODE = {BLOCKID_TEST_MODE}")
 
 _TOOLS_DIR = Path(__file__).resolve().parent
 _BACKEND_DIR = _TOOLS_DIR.parent
@@ -67,12 +94,16 @@ REQUIRED_FILES: list[Path] = [
 
 STEPS: list[tuple[str, str, str]] = [
     ("graph_clustering", "backend_blockid.oracle.graph_clustering", "graph_cluster_features.csv"),
+    ("build_wallet_graph", "backend_blockid.tools.build_wallet_graph", "wallet_graph_clusters"),
+    ("propagation_engine_v1", "backend_blockid.tools.propagation_engine_v1", ""),
     ("flow_features", "backend_blockid.oracle.flow_features", "flow_features.csv"),
     ("drainer_detection", "backend_blockid.oracle.drainer_detection", "drainer_features.csv"),
     ("auto_evidence_collector", "backend_blockid.oracle.auto_evidence_collector", ""),
     ("reason_aggregator", "backend_blockid.oracle.reason_aggregator", "reason_codes.csv"),
     ("reason_weight_engine", "backend_blockid.oracle.reason_weight_engine", "reason_penalties.csv"),
     ("predict_wallet_score", "backend_blockid.ml.predict_wallet_score", "wallet_scores.csv"),
+    ("aggregate_reason_codes", "backend_blockid.tools.aggregate_reason_codes", ""),
+    ("save_score_history", "backend_blockid.tools.save_score_history", ""),
     ("batch_publish", "backend_blockid.oracle.batch_publish", ""),
 ]
 
@@ -83,6 +114,19 @@ _SEP_THIN = "-" * 60
 
 def _log(msg: str) -> None:
     print(f"[run_full_pipeline] {msg}")
+
+
+def should_skip_step(step_name: str) -> bool:
+    if BLOCKID_TEST_MODE and step_name in ["batch_publish"]:
+        print(f"[run_full_pipeline] SKIP {step_name} (TEST_MODE)")
+        return True
+    return False
+
+
+def test_wallet_limit() -> None:
+    if BLOCKID_TEST_MODE:
+        print("[run_full_pipeline] Using TEST wallets only")
+        os.environ["BLOCKID_MAX_WALLETS"] = "50"
 
 
 def ensure_cluster_features() -> bool:
@@ -148,6 +192,25 @@ def check_required_files() -> bool:
     return False
 
 
+def _load_wallet_list() -> list[str]:
+    """Aggregate unique wallets from configured wallet source CSVs."""
+    wallets: set[str] = set()
+    for path in WALLET_SOURCES:
+        if not path.exists():
+            continue
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    w = (row.get("wallet") or "").strip()
+                    if w:
+                        wallets.add(w)
+        except Exception as e:
+            _log(f"WARNING: failed to read {path.name}: {e}")
+            continue
+    return sorted(wallets)
+
+
 def run_step(step_name: str, module: str, *args: str) -> tuple[bool, str]:
     """Run a pipeline step via subprocess. Return (success, message)."""
     cmd = [sys.executable, "-m", module] + list(args)
@@ -163,6 +226,7 @@ def run_step(step_name: str, module: str, *args: str) -> tuple[bool, str]:
             text=True,
             timeout=900,
         )
+        print("Return code:", result.returncode)
         out = (result.stdout or "").strip()
         err = (result.stderr or "").strip()
 
@@ -195,10 +259,17 @@ def run_step(step_name: str, module: str, *args: str) -> tuple[bool, str]:
 
 def main() -> int:
     load_blockid_env()
+    run_start_ts = int(time.time())
     _log(_SEP)
     _log("BlockID full pipeline")
     _log(_SEP)
     _log(f"project root: {_ROOT}")
+    from backend_blockid.tools.generate_cluster_features import generate_cluster_features
+    print("[run_full_pipeline] cluster_features auto-generated if missing")
+    generate_cluster_features()
+    from backend_blockid.tools.generate_wallet_reason_codes import generate_wallet_reason_codes
+    print("[run_full_pipeline] wallet_reason_codes auto-generated if missing")
+    generate_wallet_reason_codes()
     _log("")
     _print_dataset_info()
     _log("")
@@ -207,27 +278,81 @@ def main() -> int:
 
     if not ensure_cluster_features():
         _log("ERROR: Could not generate cluster_features.csv. Ensure transactions.csv exists.")
+        record_pipeline_run(run_start_ts, int(time.time()), False, 0, 1, 0, "cluster_features failed")
+        metrics_record_pipeline_run(success=False, wallets_scanned=0)
         return 1
 
     if not check_required_files():
+        record_pipeline_run(run_start_ts, int(time.time()), False, 0, 1, 0, "missing required files")
+        metrics_record_pipeline_run(success=False, wallets_scanned=0)
         return 1
 
     _log("All required files present.")
     _log("")
+
+    # Priority wallet selection (top 100) before Helius fetch
+    remove_old_wallets(days=30)
+    populate_priority_wallets()
+    aged = age_priorities()
+    boosted = boost_active_wallets()
+    wallet_list = get_wallets_with_budget()
+    _log(f"Aging applied to {aged} wallets")
+    _log(f"Boosted active wallets: {boosted}")
+    _log(f"Selected wallets for run: {len(wallet_list)}")
+    logger.info(
+        "wallet_selection",
+        selected=len(wallet_list),
+        limit=100,
+        test_mode=BLOCKID_TEST_MODE,
+    )
+    _log(f"wallet_meta incremental scan: {len(wallet_list)} wallets (prioritized)")
+    scan_latency_ms: int | None = None
+    scan_start = time.time()
+    try:
+        for wallet in wallet_list:
+            scan_wallet(wallet)
+        scan_latency_ms = int((time.time() - scan_start) * 1000)
+        log_event("helius_fetch", "ok", f"scanned_wallets={len(wallet_list)}", latency_ms=scan_latency_ms)
+    except Exception as e:
+        scan_latency_ms = int((time.time() - scan_start) * 1000)
+        log_event("helius_fetch", "error", str(e), latency_ms=scan_latency_ms)
+        raise
+
+    clusters = get_all_active_clusters()
+    _log(f"[SCHEDULER] scanning {len(clusters)} clusters")
+    log_event("graph_cluster", "ok", f"clusters_scanned={len(clusters)}")
+    for cid in clusters:
+        scan_cluster(cid)
+
+    test_wallet_limit()
+
     results: list[tuple[str, bool, str]] = []
 
     for i, (step_name, module, _) in enumerate(STEPS, start=1):
+        if should_skip_step(step_name):
+            continue
         _log(_SEP_THIN)
         _log(f"Step {i}/{len(STEPS)}: {step_name}")
         _log(_SEP_THIN)
         ok, msg = run_step(step_name, module)
         if ok:
             results.append((step_name, True, "OK"))
+            if step_name == "predict_wallet_score":
+                for wallet in wallet_list:
+                    update_wallet_score(wallet)
+                wallet_list = get_wallets_with_budget(limit=100)
+                _log(f"Selected wallets for run: {len(wallet_list)}")
+                log_event("ml_scoring", "ok", f"wallets_scored={len(wallet_list)}")
+                log_event("dynamic_risk", "ok", f"wallets_updated={len(wallet_list)}")
+            if step_name == "batch_publish":
+                log_event("pda_publish", "ok", f"wallets_published={len(wallet_list)}")
         else:
             results.append((step_name, False, msg))
             _log(f"  {msg}")
             _log("")
             _log("Pipeline stopped on first failure.")
+            if step_name == "batch_publish":
+                log_event("pda_publish", "error", msg)
             break
         _log("")
 
@@ -238,6 +363,43 @@ def main() -> int:
             _log("[verify] WARNING: pipeline verification failed")
     except Exception as e:
         _log(f"[verify] WARNING: verification error: {e}")
+
+    # Helius cost monitor (report + budget guard)
+    _log(_SEP_THIN)
+    _log("Helius cost monitor")
+    _log(_SEP_THIN)
+    try:
+        code = subprocess.run(
+            [sys.executable, "-m", "backend_blockid.tools.helius_cost_monitor"],
+            cwd=str(_ROOT),
+            capture_output=False,
+            timeout=60,
+        ).returncode
+        if code != 0:
+            results.append(("helius_cost_monitor", False, "Over daily budget limit"))
+            _log("WARNING: Helius cost exceeds DAILY_LIMIT. Pipeline marked failed.")
+            failed = sum(1 for _, ok, _ in results if not ok)
+            _log(_SEP)
+            _log("SUMMARY")
+            _log(_SEP)
+            for step_name, ok, detail in results:
+                status = "OK" if ok else "FAIL"
+                _log(f"  {status}: {step_name}")
+            _log(_SEP)
+            _log("RESULT: FAILED (Helius budget exceeded)")
+            logger.warning("run_full_pipeline_helius_over_budget")
+            record_pipeline_run(
+                run_start_ts, int(time.time()), False,
+                len(wallet_list), 1, len(results), "Helius budget exceeded",
+            )
+            metrics_record_pipeline_run(success=False, wallets_scanned=len(wallet_list))
+            return 1
+        results.append(("helius_cost_monitor", True, "OK"))
+        _log("OK: helius_cost_monitor")
+    except Exception as e:
+        _log(f"[helius_cost] WARNING: {e}")
+        results.append(("helius_cost_monitor", True, "OK"))  # don't fail pipeline on monitor error
+    _log("")
 
     # Final summary
     _log("")
@@ -253,13 +415,46 @@ def main() -> int:
     _log(_SEP)
 
     failed = sum(1 for _, ok, _ in results if not ok)
+    pda_failures = sum(1 for step_name, ok, _ in results if step_name == "batch_publish" and not ok)
     if failed > 0:
         _log(f"RESULT: FAILED ({failed} step(s))")
         logger.warning("run_full_pipeline_failed", failed_steps=failed, steps=[r[0] for r in results])
+        log_event("pipeline", "error", f"failed_steps={failed}")
+        record_pipeline_run(
+            run_start_ts, int(time.time()), False,
+            len(wallet_list), failed, len(results), "pipeline step failed",
+        )
+        metrics_record_pipeline_run(success=False, wallets_scanned=len(wallet_list))
+        send_pipeline_summary(
+            {
+                "wallets_scored": len(wallet_list),
+                "rpc_latency_avg": scan_latency_ms,
+                "pda_failures": pda_failures,
+                "errors": failed,
+            }
+        )
+        print("[run_full_pipeline] Pipeline finished")
+        print(f"[run_full_pipeline] TEST_MODE={BLOCKID_TEST_MODE}")
         return 1
 
     _log("RESULT: PASS (all steps completed)")
     logger.info("run_full_pipeline_done", steps=len(results))
+    log_event("pipeline", "ok", f"steps_completed={len(results)}")
+    record_pipeline_run(
+        run_start_ts, int(time.time()), True,
+        len(wallet_list), 0, len(results), None,
+    )
+    metrics_record_pipeline_run(success=True, wallets_scanned=len(wallet_list))
+    send_pipeline_summary(
+        {
+            "wallets_scored": len(wallet_list),
+            "rpc_latency_avg": scan_latency_ms,
+            "pda_failures": pda_failures,
+            "errors": 0,
+        }
+    )
+    print("[run_full_pipeline] Pipeline finished")
+    print(f"[run_full_pipeline] TEST_MODE={BLOCKID_TEST_MODE}")
     return 0
 
 

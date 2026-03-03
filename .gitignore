@@ -1,9 +1,14 @@
-# Bytecode and caches
+# ==============================
+# PYTHON
+# ==============================
+
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# Distribution / packaging
 build/
 develop-eggs/
 dist/
@@ -19,14 +24,51 @@ wheels/
 *.egg-info/
 *.egg
 
-# Virtual envs
+# Virtual environments
 venv/
 .venv/
 env/
-.env.local
 .env
+.env.local
+production.env
 
-# IDE and OS
+# Testing / coverage
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+
+# ==============================
+# DATABASE / LOCAL DATA
+# ==============================
+
+*.db
+*.db-shm
+*.db-wal
+trust.db
+blockid.db
+
+# ==============================
+# ANCHOR / RUST / SOLANA
+# ==============================
+
+# Rust build artifacts
+target/
+**/target/
+
+# Anchor deploy artifacts
+*.so
+*.json
+
+# Temporary files
+tmp.json
+w1.json
+
+# ==============================
+# IDE / OS
+# ==============================
+
 .idea/
 .vscode/
 *.swp
@@ -34,18 +76,14 @@ env/
 .DS_Store
 Thumbs.db
 
-# Testing and coverage
-.coverage
-.pytest_cache/
-htmlcov/
-.tox/
-.nox/
+# ==============================
+# SECRETS / INFRA
+# ==============================
 
-# DB and local data
-*.db
-*.db-shm
-*.db-wal
-trust.db
+k8s/secret.yaml
 
-# Other project folder (separate repo)
+# ==============================
+# OTHER PROJECT FOLDERS
+# ==============================
+
 BACKEND-BLOCK-ID/

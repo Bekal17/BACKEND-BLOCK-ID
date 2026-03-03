@@ -1,0 +1,45 @@
+# BlockID Pipeline CronJob
+# Schedule: 00:00 Jakarta (17:00 UTC) daily
+# Future: Horizontal Pod Autoscaler, multi-region RPC, canary, blue/green
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: blockid-pipeline
+  namespace: blockid
+  labels:
+    app: blockid-pipeline
+spec:
+  schedule: "0 17 * * *"  # 17:00 UTC = 00:00 Jakarta
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pipeline
+              image: blockid:latest
+              imagePullPolicy: Always
+              command:
+                - python
+                - -m
+                - backend_blockid.tools.run_full_pipeline
+              envFrom:
+                - configMapRef:
+                    name: blockid-config
+                - secretRef:
+                    name: blockid-secrets
+                    optional: true
+              env:
+                - name: DB_PATH
+                  value: "/app/data/blockid.db"
+              volumeMounts:
+                - name: data
+                  mountPath: /app/data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: blockid-data

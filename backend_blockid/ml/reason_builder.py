@@ -16,6 +16,9 @@ from typing import Any
 import pandas as pd
 
 from backend_blockid.blockid_logging import get_logger
+from backend_blockid.database.repositories import get_wallet_cluster_id
+from backend_blockid.oracle.incremental_wallet_meta_scanner import scan_cluster
+from backend_blockid.ml.graph_distance import compute_graph_distance
 
 logger = get_logger(__name__)
 
@@ -43,6 +46,16 @@ REASON_RUGPULL_DEPLOYER = "RUGPULL_DEPLOYER"
 REASON_LARGE_OUTFLOW_TO_NEW_WALLET = "LARGE_OUTFLOW_TO_NEW_WALLET"
 REASON_RAPID_TOKEN_DUMP = "RAPID_TOKEN_DUMP"
 REASON_WASH_TRADE_PATTERN = "WASH_TRADE_PATTERN"
+REASON_AGE_1Y = "AGE_1Y"
+REASON_AGE_3Y = "AGE_3Y"
+REASON_AGE_5Y = "AGE_5Y"
+REASON_AGE_7Y = "AGE_7Y"
+REASON_AGE_10Y = "AGE_10Y"
+REASON_CLEAN_HISTORY = "CLEAN_HISTORY"
+REASON_LONG_HISTORY = "LONG_HISTORY"
+REASON_NO_SCAM_HISTORY = "NO_SCAM_HISTORY"
+REASON_LOW_RISK_CLUSTER = "LOW_RISK_CLUSTER"
+REASON_FAR_FROM_SCAM_CLUSTER = "FAR_FROM_SCAM_CLUSTER"
 
 # Thresholds for rule-based mapping
 THRESHOLD_RAPID_TX = 5
@@ -55,6 +68,12 @@ THRESHOLD_PERCENT_SAME_CLUSTER = 50.0
 THRESHOLD_PERCENT_TO_NEW_WALLETS = 70.0
 THRESHOLD_RAPID_OUTFLOW_DUMP = 3
 THRESHOLD_WASH_TRADE = 1
+
+AGE_1Y_DAYS = 365
+AGE_3Y_DAYS = 3 * 365
+AGE_5Y_DAYS = 5 * 365
+AGE_7Y_DAYS = 7 * 365
+AGE_10Y_DAYS = 10 * 365
 
 
 def _rule_neighbor_scam(row: pd.Series) -> list[str]:
@@ -140,11 +159,67 @@ def _rule_drainer(row: pd.Series) -> list[str]:
     return codes
 
 
+def _rule_wallet_age(row: pd.Series) -> list[str]:
+    """
+    Age-based positive signals from first transaction age.
+    Prefer account_age_days (feature_extractor) or wallet_age_days if present.
+    """
+    codes = []
+    age_days = 0
+    if "account_age_days" in row.index:
+        age_days = pd.to_numeric(row.get("account_age_days", 0), errors="coerce") or 0
+    if "wallet_age_days" in row.index:
+        age_days = max(age_days, pd.to_numeric(row.get("wallet_age_days", 0), errors="coerce") or 0)
+
+    if age_days >= AGE_10Y_DAYS:
+        codes.append(REASON_AGE_10Y)
+    elif age_days >= AGE_7Y_DAYS:
+        codes.append(REASON_AGE_7Y)
+    elif age_days >= AGE_5Y_DAYS:
+        codes.append(REASON_AGE_5Y)
+    elif age_days >= AGE_3Y_DAYS:
+        codes.append(REASON_AGE_3Y)
+    elif age_days >= AGE_1Y_DAYS:
+        codes.append(REASON_AGE_1Y)
+
+    return codes
+
+
+def _rule_positive(row: pd.Series) -> list[str]:
+    codes: list[str] = []
+
+    # If wallet NOT in scam cluster
+    if row.get("is_scam_cluster_member", 0) == 0:
+        codes.append(REASON_NO_SCAM_HISTORY)
+        codes.append(REASON_LOW_RISK_CLUSTER)
+
+    # If far from scam cluster
+    dist = pd.to_numeric(row.get("distance_to_scam", 999), errors="coerce") or 999
+    if dist >= 3:
+        codes.append(REASON_FAR_FROM_SCAM_CLUSTER)
+
+    # Long history
+    age = pd.to_numeric(row.get("wallet_age_days", 0), errors="coerce") or 0
+    if age >= 365:
+        codes.append(REASON_LONG_HISTORY)
+
+    if not codes:
+        codes.append(REASON_CLEAN_HISTORY)
+
+    return codes
+
+
 def _reasons_for_row(row: pd.Series) -> list[str]:
     """Aggregate all rule outputs for one wallet row."""
     seen: set[str] = set()
     codes: list[str] = []
-    for rule in (_rule_neighbor_scam, _rule_flow, _rule_drainer):
+    for rule in (
+        _rule_neighbor_scam,
+        _rule_flow,
+        _rule_drainer,
+        _rule_wallet_age,
+        _rule_positive,
+    ):
         for c in rule(row):
             if c not in seen:
                 seen.add(c)
@@ -268,14 +343,30 @@ def build_reason_codes(
             pass
 
     wallet_reasons: dict[str, list[str]] = {}
+    scanned_clusters: set[str] = set()
     for _, row in df.iterrows():
         w = str(row.get("wallet", "")).strip()
         if not w or w.lower() == "nan":
             continue
         codes = _reasons_for_row(row)
+        if REASON_SCAM_CLUSTER_MEMBER in codes:
+            cluster_id = get_wallet_cluster_id(w)
+            if cluster_id:
+                if cluster_id not in scanned_clusters:
+                    print(f"[AUTO SCAN] Scam wallet detected, scanning cluster {cluster_id}")
+                    scan_cluster(cluster_id)
+                    scanned_clusters.add(cluster_id)
+            else:
+                print(f"[WARN] cluster_id missing for scam wallet {w}")
+
         if w not in wallet_reasons:
             wallet_reasons[w] = []
         wallet_reasons[w].extend(codes)
+
+    # Attach graph_distance to SCAM_CLUSTER_MEMBER reasons via precomputed distance map (optional)
+    # NOTE: This assumes an external `graph` and `scam_wallets` would be wired in when available.
+    # For now, distance_map is left empty and dynamic_risk will fall back to default distance.
+    distance_map: dict[str, int] = {}
 
     rows = []
     for wallet, codes in wallet_reasons.items():
@@ -362,6 +453,14 @@ def load_reason_cache(
                     codes = []
             else:
                 codes = []
+
+            # Deduplicate by reason_code (preserve first occurrence)
+            unique = {}
+            for code in codes:
+                if code not in unique:
+                    unique[code] = 1
+            codes = list(unique.keys())
+
             cache[w] = codes
         logger.debug("reason_builder_cache_loaded", path=str(p), wallets=len(cache))
     except Exception as e:

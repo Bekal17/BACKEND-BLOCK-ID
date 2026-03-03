@@ -1,0 +1,12 @@
+# Prometheus config for BlockID Docker Compose
+# Scrapes blockid-api service
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "blockid"
+    static_configs:
+      - targets: ["blockid-api:8000"]
+    metrics_path: /metrics

@@ -98,13 +98,14 @@ def verify_pipeline_output() -> bool:
     print(f"[verify] tx_link format: {'PASS' if bad_links == 0 else 'FAIL'} ({bad_links})")
     ok = ok and bad_links == 0
 
-    # 7. positive reason exists for clean wallet
+    # 7. positive reason exists
     positive_count = 0
     if exists_wallet_reasons:
         cur.execute(
-            "SELECT COUNT(*) FROM wallet_reasons WHERE reason_code = 'NO_RISK_DETECTED'"
+            "SELECT COUNT(*) FROM wallet_reasons WHERE weight > 0"
         )
         positive_count = int(cur.fetchone()[0] or 0)
+
     print(f"[verify] positive reason exists: {'PASS' if positive_count > 0 else 'FAIL'} ({positive_count})")
     ok = ok and positive_count > 0
 

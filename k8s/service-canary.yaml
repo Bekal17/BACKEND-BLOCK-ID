@@ -1,0 +1,49 @@
+# BlockID Services: main (routes to both) + stable/canary (for metrics/ingress split)
+# Main service selects app=blockid-api → traffic splits by replica ratio (9 stable : 1 canary)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blockid-api
+  namespace: blockid
+  labels:
+    app: blockid-api
+spec:
+  type: ClusterIP
+  selector:
+    app: blockid-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blockid-api-stable
+  namespace: blockid
+spec:
+  type: ClusterIP
+  selector:
+    app: blockid-api
+    version: stable
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blockid-api-canary
+  namespace: blockid
+spec:
+  type: ClusterIP
+  selector:
+    app: blockid-api
+    version: canary
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

@@ -20,12 +20,6 @@ DB_PATH = Path(r"D:/BACKENDBLOCKID/blockid.db")
 app = FastAPI()
 
 
-def _split_reason_codes(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
 @app.get("/wallet/{address}")
 def get_wallet(address: str) -> dict:
     conn = sqlite3.connect(DB_PATH)
@@ -41,20 +35,15 @@ def get_wallet(address: str) -> dict:
         conn.close()
         raise HTTPException(status_code=404, detail="Wallet not found")
 
-    cur.execute("SELECT reason_code FROM wallet_reasons WHERE wallet = ?", (address,))
-    reason_rows = [r[0] for r in cur.fetchall()]
-
-    reason_codes = _split_reason_codes(row["reason_codes"])
-    for code in reason_rows:
-        if code and code not in reason_codes:
-            reason_codes.append(code)
-
     conn.close()
 
+    score_val = row["score"]
+    if score_val is not None:
+        score_val = round(float(score_val), 2)
     return {
         "wallet": row["wallet"],
-        "score": row["score"],
+        "score": score_val,
         "risk_level": row["risk_level"],
-        "reason_codes": ",".join(reason_codes),
+        "reason_codes": row["reason_codes"] or "",
         "updated_at": row["updated_at"],
     }

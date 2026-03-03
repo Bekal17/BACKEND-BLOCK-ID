@@ -207,12 +207,31 @@ def build_update_trust_score_instruction(
     risk = int(risk_level)
     if not 0 <= score <= 100:
         raise ValueError(f"score must be 0–100, got {score}")
-    if not 0 <= risk <= 3:
-        raise ValueError(f"risk must be 0–3, got {risk}")
+    if not 0 <= risk <= 5:
+        raise ValueError(f"risk must be 0–5, got {risk}")
 
     return _build_update_trust_score_instruction(
         program_id, oracle_pubkey, wallet_pubkey, score & 0xFF, risk & 0xFF, sys_program_id
     )
+
+
+# NOTE: Seeds changed on 2026-02 for mainnet readiness. lib.rs: seeds = [b"trust_score", wallet.key().as_ref()]
+
+
+def derive_trust_score_pda(wallet_pubkey: Any, program_id: Any) -> tuple[Any, int]:
+    """
+    Derive trust_score_account PDA. Matches Anchor lib.rs seeds: [b"trust_score", wallet.key().as_ref()].
+    Returns (pda, bump).
+    """
+    from solders.pubkey import Pubkey
+
+    pda, bump = Pubkey.find_program_address(
+        [b"trust_score", bytes(wallet_pubkey)],
+        program_id,
+    )
+    print("[PDA DEBUG] seeds:", wallet_pubkey)
+    print("[PDA DEBUG] PDA:", pda)
+    return pda, bump
 
 
 def _build_update_trust_score_instruction(
@@ -224,42 +243,42 @@ def _build_update_trust_score_instruction(
     sys_program_id: Any,
 ) -> tuple[Any, Any]:
     """
-    Build update_trust_score instruction for Anchor (wallet: Pubkey, score: u8, risk: u8).
-    Data: 8-byte discriminator (from IDL) + 32-byte wallet + 1-byte score + 1-byte risk.
-    AccountMeta order must match Anchor IDL exactly; Anchor derives signer from AccountMeta.is_signer,
-    not from the transaction's signer list, so oracle must have is_signer=True here to avoid 3010 AccountNotSigner.
+    Build update_trust_score instruction for Anchor. Instruction args: score (u8), risk (u8) only.
+    Wallet is an account, NOT an instruction argument. Data: 8-byte discriminator + 1-byte score + 1-byte risk.
     """
+    import struct
+
     from solders.instruction import Instruction, AccountMeta
     from solders.pubkey import Pubkey
 
-    seeds = [b"trust_score", bytes(oracle_pubkey), bytes(wallet_pubkey)]
-    trust_score_account, _ = Pubkey.find_program_address(seeds, program_id)
+    if wallet_pubkey == oracle_pubkey:
+        raise ValueError("Wallet cannot equal oracle pubkey")
 
-    wallet_bytes = bytes(wallet_pubkey)
-    if len(wallet_bytes) != 32:
-        raise ValueError(f"Wallet pubkey must be 32 bytes, got {len(wallet_bytes)}")
+    trust_score_account, _ = derive_trust_score_pda(wallet_pubkey, program_id)
+
+    # Validate types and ranges before packing ( Anchor: score 0-100, risk 0-5 )
+    score = int(trust_score)
+    risk = int(risk_level)
+    assert 0 <= score <= 100, f"score must be 0-100, got {score}"
+    assert 0 <= risk <= 5, f"risk must be 0-5, got {risk}"
 
     discriminator = _get_update_trust_score_discriminator()
-    score_byte = trust_score & 0xFF
-    risk_byte = risk_level & 0xFF
-    data_bytes = (
-        discriminator
-        + wallet_bytes
-        + bytes([score_byte, risk_byte])
-    )
+    args = struct.pack("<BB", score, risk)
+    data_bytes = discriminator + args
     logger.debug(
         "oracle_instruction_data",
         length=len(data_bytes),
         hex=data_bytes.hex(),
     )
+    print("RAW INSTRUCTION BYTES:", list(data_bytes))
+    print("Score:", score, "Risk:", risk)
 
-    # Order must match Anchor IDL: 1 oracle (signer + writable), 2 wallet (readonly),
-    # 3 trust_score_account (writable), 4 system_program (readonly).
-    # Anchor checks signer from AccountMeta.is_signer, not from the tx signer list; oracle must be True here.
+    # NOTE: wallet must NOT be oracle pubkey, or PDA seeds will fail.
+    # Order must match Anchor IDL: 1 trust_score_account (PDA), 2 oracle (signer), 3 wallet, 4 system_program.
     accounts = [
+        AccountMeta(pubkey=trust_score_account, is_signer=False, is_writable=True),
         AccountMeta(pubkey=oracle_pubkey, is_signer=True, is_writable=True),
         AccountMeta(pubkey=wallet_pubkey, is_signer=False, is_writable=False),
-        AccountMeta(pubkey=trust_score_account, is_signer=False, is_writable=True),
         AccountMeta(pubkey=sys_program_id, is_signer=False, is_writable=False),
     ]
     print("=== DEBUG ACCOUNTS ===")
@@ -271,11 +290,12 @@ def _build_update_trust_score_instruction(
     return ix, trust_score_account
 
 
-def get_trust_score_pda(program_id: Any, oracle_pubkey: Any, wallet_pubkey: Any) -> Any:
-    """Derive trust score PDA. Seeds: [b'trust_score', oracle, wallet]."""
-    from solders.pubkey import Pubkey
-    seeds = [b"trust_score", bytes(oracle_pubkey), bytes(wallet_pubkey)]
-    pda, _ = Pubkey.find_program_address(seeds, program_id)
+def get_trust_score_pda(program_id: Any, wallet_pubkey: Any) -> Any:
+    """
+    Derive trust score PDA. Matches Anchor lib.rs: seeds = [b"trust_score", wallet.key().as_ref()].
+    Do NOT pass oracle_pubkey — it is not in the seeds.
+    """
+    pda, _ = derive_trust_score_pda(wallet_pubkey, program_id)
     return pda
 
 
@@ -307,8 +327,12 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
 
 
 def _default_rpc_url() -> str:
-    from backend_blockid.config.env import get_solana_rpc_url
-    return get_solana_rpc_url()
+    from backend_blockid.oracle.rpc_manager import get_rpc_manager
+    url = get_rpc_manager().get_url()
+    if not url:
+        from backend_blockid.config.env import get_solana_rpc_url
+        return get_solana_rpc_url()
+    return url
 
 
 def _default_program_id() -> str:
@@ -366,8 +390,8 @@ class SolanaTrustOraclePublisher:
 
     def _client_ensure(self) -> Any:
         if self._client is None:
-            from solana.rpc.api import Client
-            self._client = Client(self._config.solana_rpc_url)
+            from backend_blockid.oracle.rpc_manager import get_rpc_manager
+            self._client = get_rpc_manager().get_client()
         return self._client
 
     def _fetch_pending_updates(self, limit: int) -> list[tuple[str, float]]:
@@ -553,6 +577,9 @@ class SolanaTrustOraclePublisher:
                         raise RuntimeError(str(err))
                     break
                 except Exception as e:
+                    from backend_blockid.oracle.rpc_manager import get_rpc_manager
+                    get_rpc_manager().invalidate_cache()
+                    self._client = None
                     backoff = cfg.retry_backoff_sec * (2 ** attempt)
                     logger.warning(
                         "oracle_tx_failed",
@@ -608,3 +635,11 @@ def run_solana_publisher_loop(
     cfg = config or SolanaPublisherConfig()
     pub = SolanaTrustOraclePublisher(db, config=cfg)
     pub.run_loop(stop_event=stop_event)
+
+
+if __name__ == "__main__":
+    from solders.pubkey import Pubkey
+
+    PROGRAM_ID = Pubkey.from_string(os.getenv("ORACLE_PROGRAM_ID", "9ZP3uKj28ridPZbrC9xh7x7eoBaa54PMEp9itmQkwKNW"))
+    test_wallet = Pubkey.from_string("9QCfNuQuxct1Xk9ytFYgxc5fThmTzL4pHQnSjjrVUrka")
+    print(derive_trust_score_pda(test_wallet, PROGRAM_ID))

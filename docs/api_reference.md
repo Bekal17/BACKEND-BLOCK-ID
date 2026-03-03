@@ -1,5 +1,7 @@
 # BlockID API Reference
 
+> **UI integration:** For a stable contract for app.blockidscore.fun, see [UI API Spec (ui_api_spec.md)](ui_api_spec.md).
+
 ## Overview
 
 The BlockID API provides trust scores for Solana wallets and manages wallet tracking. It serves read-only data from the local database (populated by the publish pipeline and trust-score sync worker) and exposes endpoints for wallet registration, CSV import, analytics reports, and debug status. No API keys or authentication are required.

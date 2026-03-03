@@ -21,7 +21,8 @@ import sqlite3
 from dotenv import load_dotenv
 
 from backend_blockid.blockid_logging import get_logger
-from backend_blockid.ml.reason_codes import REASON_WEIGHTS, DEFAULT_WEIGHT
+from backend_blockid.ml.reason_codes import get_reason_weights, DEFAULT_WEIGHT
+from backend_blockid.tools.time_utils import extract_tx_timestamp
 
 logger = get_logger(__name__)
 
@@ -169,11 +170,14 @@ def _existing_tx_hashes(cur: sqlite3.Cursor, wallet: str) -> set[str]:
         return set()
 
 
-def _insert_reason(cur: sqlite3.Cursor, wallet: str, code: str, tx_hash: str) -> None:
-    weight = REASON_WEIGHTS.get(code, DEFAULT_WEIGHT)
+def _insert_reason(cur: sqlite3.Cursor, wallet: str, code: str, tx_hash: str, tx: dict[str, Any] | None = None) -> None:
+    weight = get_reason_weights().get(code, DEFAULT_WEIGHT)
+    created_at = extract_tx_timestamp(tx) if tx else None
+    if created_at is None:
+        created_at = int(time.time())
     cur.execute(
         "INSERT OR IGNORE INTO wallet_reasons(wallet, reason_code, weight, created_at, tx_hash, tx_link) VALUES (?, ?, ?, ?, ?, ?)",
-        (wallet, code, int(weight), int(time.time()), tx_hash, solscan_link(tx_hash)),
+        (wallet, code, int(weight), created_at, tx_hash, solscan_link(tx_hash)),
     )
 
 
@@ -194,7 +198,7 @@ def scan_wallet(wallet: str, api_key: str, cur: sqlite3.Cursor, scam_wallets: se
         if not reasons:
             continue
         for code in reasons:
-            _insert_reason(cur, wallet, code, sig)
+            _insert_reason(cur, wallet, code, sig, tx)
             inserted += 1
         existing.add(sig)
 

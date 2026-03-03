@@ -2,11 +2,11 @@
 """
 Generate test wallets with labels for BlockID testing.
 
-Produces 20 wallets with labels:
-  - 5 NEW_WALLET
-  - 5 HIGH_OUTFLOW
-  - 5 DRAINER_INTERACTION
-  - 5 SCAM_CLUSTER_MEMBER
+Produces 100 wallets with labels:
+  - 25 NEW_WALLET
+  - 25 HIGH_OUTFLOW
+  - 25 DRAINER_INTERACTION
+  - 25 SCAM_CLUSTER_MEMBER
 
 Usage:
   python backend_blockid/tools/generate_test_wallets.py
@@ -27,10 +27,10 @@ _DATA_DIR = _BACKEND_DIR / "data"
 _OUTPUT_PATH = _DATA_DIR / "test_wallets.csv"
 
 LABELS = [
-    ("NEW_WALLET", 5),
-    ("HIGH_OUTFLOW", 5),
-    ("DRAINER_INTERACTION", 5),
-    ("SCAM_CLUSTER_MEMBER", 5),
+    ("NEW_WALLET", 25),
+    ("HIGH_OUTFLOW", 25),
+    ("DRAINER_INTERACTION", 25),
+    ("SCAM_CLUSTER_MEMBER", 25),
 ]
 
 

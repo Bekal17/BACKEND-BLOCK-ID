@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ if __name__ == "__main__" and not __package__:
         sys.path.insert(0, _root)
 
 from backend_blockid.database import get_database
+from backend_blockid.database.repositories import add_wallet, update_wallet_score
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.ml.reason_builder import (
     get_reason_codes_for_wallet,
@@ -54,91 +56,8 @@ from backend_blockid.oracle.solana_publisher import (
 
 logger = get_logger(__name__)
 
-# Anchor PDA seeds for trust_score_account (lib.rs: seeds = [b"trust_score", oracle.key(), wallet.key()]).
-# If IDL contains accounts[].pda.seeds we use those; otherwise this matches Anchor exactly.
-TRUST_SCORE_PDA_SEED_PREFIX = b"trust_score"
-
-
-def _load_idl_for_pda() -> dict[str, Any] | None:
-    """Load Anchor IDL from env or target/idl/blockid_oracle.json. Returns None if not found."""
-    import json
-    path = (os.getenv("ANCHOR_IDL_PATH") or "").strip()
-    if path and os.path.isfile(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    for base in [os.getcwd(), os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))]:
-        candidate = os.path.join(base, "target", "idl", "blockid_oracle.json")
-        if os.path.isfile(candidate):
-            try:
-                with open(candidate, encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-    return None
-
-
-def derive_trust_score_pda(
-    program_id: Any,
-    oracle_pubkey: Any,
-    wallet_pubkey: Any,
-) -> Any:
-    """
-    Derive trust_score_account PDA to match Anchor exactly.
-    Reads PDA seeds from IDL when present (accounts[].pda.seeds); otherwise uses
-    [b"trust_score", oracle.to_bytes(), wallet.to_bytes()] per Anchor lib.rs.
-    """
-    from solders.pubkey import Pubkey
-
-    idl = _load_idl_for_pda()
-    seeds_list: list[bytes] = []
-
-    if idl:
-        instructions = idl.get("instructions") or idl.get("instruction") or []
-        for ix in instructions:
-            if ix.get("name") != "update_trust_score":
-                continue
-            accounts = ix.get("accounts") or []
-            for acc in accounts:
-                if acc.get("name") != "trust_score_account":
-                    continue
-                pda = acc.get("pda") or acc.get("seeds")
-                if not pda:
-                    break
-                raw_seeds = pda.get("seeds") if isinstance(pda, dict) else pda
-                if not raw_seeds:
-                    break
-                for s in raw_seeds:
-                    if not isinstance(s, dict):
-                        continue
-                    kind = s.get("kind") or s.get("type")
-                    if kind == "const":
-                        val = s.get("value")
-                        if isinstance(val, list):
-                            seeds_list.append(bytes(val))
-                        elif isinstance(val, str):
-                            seeds_list.append(val.encode("utf-8"))
-                    elif kind == "account":
-                        path = (s.get("path") or s.get("account") or "").strip()
-                        if path == "oracle":
-                            seeds_list.append(bytes(oracle_pubkey))
-                        elif path == "wallet":
-                            seeds_list.append(bytes(wallet_pubkey))
-                break
-            break
-
-    if not seeds_list:
-        # Match Anchor lib.rs: seeds = [b"trust_score", oracle.key().as_ref(), wallet.key().as_ref()]
-        oracle_bytes = bytes(oracle_pubkey)
-        wallet_bytes = bytes(wallet_pubkey)
-        if len(oracle_bytes) != 32 or len(wallet_bytes) != 32:
-            raise ValueError("Oracle and wallet pubkeys must be 32 bytes for PDA derivation")
-        seeds_list = [TRUST_SCORE_PDA_SEED_PREFIX, oracle_bytes, wallet_bytes]
-
-    pda, _ = Pubkey.find_program_address(seeds_list, program_id)
-    return pda
+# NOTE: Seeds changed on 2026-02 for mainnet readiness. lib.rs: seeds = [b"trust_score", wallet.key().as_ref()]
+# NOTE: wallet must NOT be oracle pubkey, or PDA seeds will fail.
 
 
 def verify_pda_exists(client: Any, pda_pubkey: Any) -> bool:
@@ -166,6 +85,10 @@ DEFAULT_COMMITMENT = "confirmed"
 
 
 def _rpc_url() -> str:
+    from backend_blockid.oracle.rpc_manager import get_rpc_manager
+    url = get_rpc_manager().get_url()
+    if url:
+        return url
     u = (os.getenv("SOLANA_RPC_URL") or "").strip()
     if u:
         return u
@@ -311,8 +234,8 @@ def _send_with_retry(client: Any, tx: Any, keypair: Any) -> str | None:
     return None
 
 
-def _read_on_chain_score(client: Any, program_id: Any, oracle_pubkey: Any, wallet_pubkey: Any) -> tuple[int, int] | None:
-    pda = get_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
+def _read_on_chain_score(client: Any, program_id: Any, wallet_pubkey: Any) -> tuple[int, int] | None:
+    pda = get_trust_score_pda(program_id, wallet_pubkey)
     resp = client.get_account_info(pda, encoding="base64")
     acc = getattr(resp, "value", None) or (getattr(resp.result, "value", None) if hasattr(resp, "result") else None)
     if not acc or not getattr(acc, "data", None):
@@ -402,16 +325,26 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
         logger.error("ORACLE_PROGRAM_ID required")
         return 1
 
-    client = Client(rpc_url)
+    from backend_blockid.oracle.rpc_manager import get_rpc_manager
+    try:
+        client = get_rpc_manager().get_client()
+    except RuntimeError:
+        client = Client(rpc_url)
     keypair = _load_keypair(oracle_key)
     oracle_pubkey = keypair.pubkey()
     program_id = Pubkey.from_string(program_id_str)
     wallet_pubkey = Pubkey.from_string(wallet_str)
     sys_program_id = Pubkey.from_string("11111111111111111111111111111111")
 
-    pda_pubkey = derive_trust_score_pda(program_id, oracle_pubkey, wallet_pubkey)
-    print("PDA:", pda_pubkey)
+    if wallet_pubkey == oracle_pubkey:
+        raise ValueError("Wallet cannot equal oracle pubkey")
+
+    pda_pubkey = get_trust_score_pda(program_id, wallet_pubkey)
     logger.debug("oracle_pda_derived", pda=str(pda_pubkey))
+
+    # BLOCKID_DEBUG
+    print(f"[DEBUG] SCORE SENT TO ANCHOR = {final_score} ({type(final_score)})")
+    print(f"[DEBUG] RISK SENT TO ANCHOR  = {risk_level} ({type(risk_level)})")
 
     ix, ix_pda = build_update_trust_score_instruction(
         program_id, oracle_pubkey, wallet_pubkey, final_score, risk_level, sys_program_id
@@ -426,7 +359,9 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
         return 1
     blockhash = getattr(blockhash_value, "blockhash", blockhash_value)
 
-    print("program_id=%s PDA=%s (before sending tx)" % (program_id, pda_pubkey))
+    print("[DEBUG] ORACLE:", oracle_pubkey)
+    print("[DEBUG] WALLET:", wallet_pubkey)
+    print("[DEBUG] PDA:", pda_pubkey)
     tx = Transaction(recent_blockhash=blockhash, fee_payer=oracle_pubkey)
     tx.add(ix)
 
@@ -448,7 +383,7 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
     if not verify_pda_exists(client, pda_pubkey):
         pass  # Error already printed in verify_pda_exists
 
-    parsed = _read_on_chain_score(client, program_id, oracle_pubkey, wallet_pubkey)
+    parsed = _read_on_chain_score(client, program_id, wallet_pubkey)
     if parsed is None:
         logger.warning("publish_one_wallet_read_back_missing", signature=signature)
         print("read_back=account_not_found")
@@ -458,52 +393,23 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
     logger.info("publish_one_wallet_read_back", signature=signature, stored_score=stored_score, stored_risk=stored_risk)
     print(f"stored_score={stored_score} stored_risk={stored_risk}")
 
-    # Add wallet to tracked_wallets after transaction confirmation and read-back success
     wallet_addr = str(wallet_pubkey)
-    print("DEBUG: before add_wallet wallet=", wallet_addr[:20] + "...")
     try:
-        added = add_wallet(wallet_addr, label="auto_added")
-        print("DEBUG: after add_wallet added=", added)
-        if added:
-            logger.info("wallet_auto_tracked", wallet=wallet_addr[:16] + "...")
-    except Exception as e:
-        logger.warning("wallet_auto_track_failed", wallet=wallet_addr[:16] + "...", error=str(e))
-        print("DEBUG: add_wallet exception=", e)
+        metadata = json.dumps({
+            "oracle_pubkey": str(oracle_pubkey),
+            "pda": str(pda_pubkey),
+        })
 
-    try:
-        db_path = Path((os.getenv("DB_PATH") or "blockid.db").strip() or "blockid.db")
-        db = get_database(db_path)
-        metadata: dict = {"risk": stored_risk}
-        weighted_risk = get_weighted_risk_for_wallet(wallet_addr)
-        if weighted_risk > 0:
-            metadata["weighted_risk_score"] = round(weighted_risk, 2)
-        db.insert_trust_score(
-            wallet_str,
-            float(stored_score),
-            computed_at=int(time.time()),
-            metadata=metadata,
-        )
-        logger.info("publish_one_wallet_db_saved", wallet=wallet_str[:16] + "...")
-    except Exception as e:
-        logger.warning("publish_one_wallet_db_save_failed", error=str(e))
+        add_wallet(wallet_addr)
+        update_wallet_score(wallet_addr, stored_score, _score_to_risk_level(stored_score), metadata)
 
-    # Persist score, risk, and reason_codes to wallet tracking DB
-    risk_str = _risk_u8_to_str(stored_risk)
-    reason_codes: list[str] = []
-    try:
-        reason_cache = load_reason_cache()
-        reason_codes = get_reason_codes_for_wallet(wallet_addr, cache=reason_cache)
+        logger.info("publish_one_wallet_db_saved", wallet=wallet_addr, score=stored_score)
     except Exception as e:
-        logger.debug("reason_builder_lookup_skipped", wallet=wallet_str[:16] + "...", error=str(e))
-    try:
-        update_wallet_score(wallet_addr, int(stored_score), risk=risk_str, reason_codes=reason_codes if reason_codes else None)
-        if reason_codes:
-            logger.debug("wallet_reason_codes_persisted", wallet=wallet_addr[:16] + "...", n=len(reason_codes))
-    except Exception as e:
-        logger.warning("update_wallet_score_failed", wallet=wallet_addr[:16] + "...", error=str(e))
+        logger.warning("publish_one_wallet_db_save_failed", wallet=wallet_addr, error=str(e))
 
     return 0
 
+    print("USING DB PATH:", db_path)
 
 if __name__ == "__main__":
     sys.exit(main())

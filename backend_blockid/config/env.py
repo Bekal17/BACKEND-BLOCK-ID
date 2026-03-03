@@ -103,6 +103,11 @@ def use_devnet_dummy_data() -> bool:
     return False
 
 
+def get_wallet_limit() -> int:
+    import os
+    return int(os.getenv("BLOCKID_MAX_WALLETS", "1000"))
+
+
 def get_devnet_dummy_dir() -> Path:
     """Return path to devnet dummy dataset directory."""
     return _BACKEND_DIR / "data" / "devnet_dummy"

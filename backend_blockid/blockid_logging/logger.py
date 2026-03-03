@@ -60,12 +60,8 @@ def configure_structlog() -> None:
         _add_timestamp,
         _normalize_event,
     ]
-    if LOG_FORMAT == "json":
-        shared_processors.append(structlog.processors.JSONRenderer())
-    else:
-        shared_processors.append(
-            structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
-        )
+    # Always safe JSON renderer to avoid Windows ConsoleRenderer emoji crashes.
+    shared_processors.append(structlog.processors.JSONRenderer())
     structlog.configure(
         processors=shared_processors,
         wrapper_class=structlog.make_filtering_bound_logger(LOG_LEVEL_VALUE),
@@ -78,6 +74,15 @@ def configure_structlog() -> None:
 # One-time configuration on first import
 if not structlog.is_configured():
     configure_structlog()
+
+
+def log_event(logger: structlog.BoundLogger, name: str, **kwargs: Any) -> None:
+    """
+    Log an event with the given name and keyword arguments.
+    structlog: the first positional argument to info()/error() etc. is the event name;
+    do NOT also pass event= as a kwarg, or you get "got multiple values for argument 'event'".
+    """
+    logger.info(name, **kwargs)
 
 
 def get_logger(name: str) -> structlog.BoundLogger:

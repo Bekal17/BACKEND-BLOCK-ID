@@ -89,6 +89,27 @@ def create_tables(conn):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_history_wallet ON wallet_history(wallet)")
 
+    # 6️⃣ WALLET LAST UPDATE (rate limit for realtime risk engine)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS wallet_last_update (
+        wallet TEXT PRIMARY KEY,
+        timestamp INTEGER NOT NULL
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_wallet_last_update_ts ON wallet_last_update(timestamp)")
+
+    # 7️⃣ WALLET BADGES (badge evolution for UI and Phantom plugin)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS wallet_badges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wallet TEXT NOT NULL,
+        badge TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_wallet_badges_wallet ON wallet_badges(wallet)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_wallet_badges_ts ON wallet_badges(timestamp)")
+
     conn.commit()
 
 

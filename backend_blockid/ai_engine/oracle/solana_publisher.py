@@ -64,6 +64,25 @@ def _load_keypair(private_key: str) -> Any:
         raise ValueError("Invalid ORACLE_PRIVATE_KEY") from e
 
 
+# NOTE: Seeds changed on 2026-02 for mainnet readiness. lib.rs: seeds = [b"trust_score", wallet.key().as_ref()]
+
+
+def derive_trust_score_pda(wallet_pubkey: Any, program_id: Any) -> tuple[Any, int]:
+    """
+    Derive trust_score_account PDA. Matches Anchor lib.rs seeds: [b"trust_score", wallet.key().as_ref()].
+    Returns (pda, bump).
+    """
+    from solders.pubkey import Pubkey
+
+    pda, bump = Pubkey.find_program_address(
+        [b"trust_score", bytes(wallet_pubkey)],
+        program_id,
+    )
+    print("[PDA DEBUG] seeds:", wallet_pubkey)
+    print("[PDA DEBUG] PDA:", pda)
+    return pda, bump
+
+
 def _build_update_trust_score_instruction(
     program_id: Any,
     oracle_pubkey: Any,
@@ -79,8 +98,7 @@ def _build_update_trust_score_instruction(
     from solders.instruction import Instruction, AccountMeta
     from solders.pubkey import Pubkey
 
-    seeds = [b"trust_score", bytes(oracle_pubkey), bytes(wallet_pubkey)]
-    trust_score_account, _ = Pubkey.find_program_address(seeds, program_id)
+    trust_score_account, _ = derive_trust_score_pda(wallet_pubkey, program_id)
 
     # Data: 8-byte discriminator + u8 trust_score + u8 risk_level
     data = bytearray(UPDATE_TRUST_SCORE_DISCRIMINATOR)
