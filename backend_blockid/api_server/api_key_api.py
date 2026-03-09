@@ -23,7 +23,7 @@ router = APIRouter(prefix="/keys", tags=["API Keys"])
 class CreateKeyRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=256, description="Key display name")
     environment: str = Field(default="live", description="live | test")
-    quota_limit: int = Field(default=1000, ge=1, le=1_000_000, description="Monthly quota limit")
+    quota_limit: int = Field(default=100, ge=1, le=1_000_000, description="Monthly quota limit")
 
 
 class CreateKeyResponse(BaseModel):

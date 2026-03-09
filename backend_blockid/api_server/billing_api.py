@@ -1,155 +1,152 @@
 """
-BlockID Billing API — Stripe checkout, webhooks, usage.
+BlockID Billing API — Paddle billing integration.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Header
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Header, Request
 
-from backend_blockid.blockid_logging import get_logger
-from backend_blockid.config.stripe_settings import (
-    STRIPE_SECRET_KEY,
-    STRIPE_WEBHOOK_SECRET,
-    BILLING_SUCCESS_URL,
-    BILLING_CANCEL_URL,
-)
-from backend_blockid.api_server.billing_service import (
-    get_customer,
-    get_or_create_usage,
-    get_plan_limits,
-    increment_usage,
-    update_customer_plan,
-    upsert_customer,
-)
+from backend_blockid.database.pg_connection import get_conn, release_conn
 
-logger = get_logger(__name__)
+router = APIRouter(tags=["billing"])
 
-router = APIRouter(prefix="/billing", tags=["billing"])
+PLANS = {
+    "free": {"quota": 100, "price": 0, "paddle_price_id": None},
+    "pro": {"quota": 50000, "price": 29, "paddle_price_id": "pri_XXXXX"},
+    "enterprise": {"quota": 999999, "price": 199, "paddle_price_id": "pri_XXXXX"},
+}
 
 
-class CreateCheckoutRequest(BaseModel):
-    plan: str = Field(..., description="starter | growth | enterprise")
-    api_key: str = Field(..., description="API key to associate with subscription")
-    success_url: str | None = None
-    cancel_url: str | None = None
+def _get_user_id(x_user_id: str | None) -> str:
+    user_id = (x_user_id or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="X-User-ID header is required")
+    return user_id
 
 
-@router.post("/create_checkout_session")
-def create_checkout_session(req: CreateCheckoutRequest) -> dict:
+@router.get("/subscription")
+async def get_subscription(
+    x_user_id: str | None = Header(None, alias="X-User-ID"),
+):
     """
-    Create Stripe Checkout session. Returns checkout URL.
+    Get user's current subscription.
+    Returns default free plan (quota: 1000) if no row found.
     """
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=503, detail="Stripe not configured")
+    user_id = _get_user_id(x_user_id)
 
-    plan = (req.plan or "").strip().lower()
-    if plan not in ("starter", "growth", "enterprise"):
-        raise HTTPException(status_code=400, detail="Invalid plan. Use starter, growth, or enterprise.")
-
-    limits = get_plan_limits(plan)
-    price_id = limits.get("stripe_price_id")
-    if plan == "starter" or not price_id:
-        raise HTTPException(status_code=400, detail="Starter is free. Use growth or enterprise for checkout.")
-
+    conn = await get_conn()
     try:
-        import stripe
-        stripe.api_key = STRIPE_SECRET_KEY
-
-        customer = get_customer(req.api_key)
-        stripe_customer_id = customer.get("stripe_customer_id") if customer else None
-
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            customer=stripe_customer_id,
-            line_items=[{"price": price_id, "quantity": 1}],
-            success_url=req.success_url or BILLING_SUCCESS_URL,
-            cancel_url=req.cancel_url or BILLING_CANCEL_URL,
-            metadata={"api_key": req.api_key, "plan": plan},
+        row = await conn.fetchrow(
+            """
+            SELECT plan, status, quota, paddle_subscription_id,
+                   current_period_end, cancel_at_period_end
+            FROM subscriptions
+            WHERE user_id = $1
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            user_id,
         )
+        if not row:
+            return {
+                "plan": "free",
+                "status": "active",
+                "quota": 1000,
+                "paddle_subscription_id": None,
+                "current_period_end": None,
+                "cancel_at_period_end": False,
+            }
         return {
-            "checkout_url": session.url,
-            "session_id": session.id,
+            "plan": row["plan"] or "free",
+            "status": row["status"] or "active",
+            "quota": int(row["quota"] or 1000),
+            "paddle_subscription_id": row["paddle_subscription_id"],
+            "current_period_end": row["current_period_end"].isoformat() if row["current_period_end"] else None,
+            "cancel_at_period_end": bool(row["cancel_at_period_end"]),
         }
-    except Exception as e:
-        logger.warning("billing_checkout_error", plan=plan, error=str(e))
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    finally:
+        await release_conn(conn)
 
 
-@router.post("/webhook")
-async def stripe_webhook(request: Request, stripe_signature: str | None = Header(None)) -> dict:
+@router.get("/plans")
+async def get_plans(
+    x_user_id: str | None = Header(None, alias="X-User-ID"),
+):
+    """Return list of all plans: free, pro, enterprise."""
+    _get_user_id(x_user_id)
+    return [
+        {"name": "free", "price": 0, "quota": 1000},
+        {"name": "pro", "price": 29, "quota": 50000},
+        {"name": "enterprise", "price": 199, "quota": 999999},
+    ]
+
+
+@router.post("/webhook/paddle")
+async def paddle_webhook(request: Request):
     """
-    Stripe webhook. Handles checkout.session.completed, invoice.paid, customer.subscription.deleted.
+    Handle Paddle webhook events. No auth required.
+    Events: subscription.created, subscription.cancelled, subscription.updated
     """
-    if not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=503, detail="Webhook secret not configured")
+    body = await request.json()
+    event_type = body.get("event_type") or ""
+    data = body.get("data") or {}
+    custom_data = data.get("custom_data") or {}
+    user_id = (custom_data.get("user_id") or "").strip()
+    plan = (custom_data.get("plan") or "free").strip().lower()
+    if plan not in PLANS:
+        plan = "free"
 
-    payload = await request.body()
-    sig = stripe_signature or ""
-
+    conn = await get_conn()
     try:
-        import stripe
-        stripe.api_key = STRIPE_SECRET_KEY
-        event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
-    except Exception as e:
-        logger.warning("billing_webhook_signature_error", error=str(e))
-        raise HTTPException(status_code=400, detail="Invalid signature") from e
+        if event_type == "subscription.created" and user_id:
+            paddle_sub_id = str(data.get("subscription_id") or data.get("id") or "")
+            quota = PLANS[plan]["quota"]
+            await conn.execute(
+                """
+                INSERT INTO subscriptions (user_id, plan, status, quota, paddle_subscription_id, updated_at)
+                VALUES ($1, $2, 'active', $3, $4, NOW())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    plan = EXCLUDED.plan,
+                    status = 'active',
+                    quota = EXCLUDED.quota,
+                    paddle_subscription_id = EXCLUDED.paddle_subscription_id,
+                    updated_at = NOW()
+                """,
+                user_id,
+                plan,
+                quota,
+                paddle_sub_id or None,
+            )
+            if user_id:
+                await conn.execute(
+                    "UPDATE api_keys SET quota_limit = $1, updated_at = NOW() WHERE user_id = $2",
+                    quota,
+                    user_id,
+                )
 
-    if event.type == "checkout.session.completed":
-        sess = event.data.object
-        meta = getattr(sess, "metadata", None) or {}
-        api_key = meta.get("api_key") or ""
-        plan = meta.get("plan") or "growth"
-        cust_id = getattr(sess, "customer", None)
-        if api_key:
-            upsert_customer(api_key, cust_id, plan)
-            logger.info("billing_subscription_created", api_key=api_key[:16] + "...", plan=plan)
+        elif event_type == "subscription.cancelled":
+            if user_id:
+                await conn.execute(
+                    """
+                    UPDATE subscriptions
+                    SET status = 'cancelled', cancel_at_period_end = true, updated_at = NOW()
+                    WHERE user_id = $1
+                    """,
+                    user_id,
+                )
 
-    elif event.type == "invoice.paid":
-        inv = event.data.object
-        cust_id = getattr(inv, "customer", None)
-        if cust_id:
-            update_customer_plan(None, cust_id, "growth")
-            logger.info("billing_invoice_paid", customer=cust_id[:20] if cust_id else "")
+        elif event_type == "subscription.updated":
+            if user_id:
+                status = str(data.get("status") or "active")
+                await conn.execute(
+                    """
+                    UPDATE subscriptions
+                    SET status = $1, updated_at = NOW()
+                    WHERE user_id = $2
+                    """,
+                    status,
+                    user_id,
+                )
 
-    elif event.type == "customer.subscription.deleted":
-        sub = event.data.object
-        cust_id = getattr(sub, "customer", None)
-        if cust_id:
-            update_customer_plan(None, cust_id, "starter")
-            logger.info("billing_subscription_deleted", customer=cust_id[:20] if cust_id else "")
-
-    return {"received": True}
-
-
-@router.get("/usage/{api_key}")
-def get_usage(api_key: str) -> dict:
-    """
-    Admin dashboard: plan, usage, remaining.
-    """
-    customer = get_customer(api_key)
-    plan = (customer.get("plan") or "starter") if customer else "starter"
-    usage = get_or_create_usage(api_key)
-    limits = get_plan_limits(plan)
-
-    wallet_limit = limits.get("wallet_checks_limit", 10000)
-    reports_limit = limits.get("reports_limit", 0)
-
-    wallet_remaining = -1 if wallet_limit < 0 else max(0, wallet_limit - (usage.get("wallet_checks") or 0))
-    reports_remaining = -1 if reports_limit < 0 else max(0, reports_limit - (usage.get("reports_generated") or 0))
-
-    return {
-        "plan": plan,
-        "usage": {
-            "wallet_checks": usage.get("wallet_checks", 0),
-            "batch_checks": usage.get("batch_checks", 0),
-            "reports_generated": usage.get("reports_generated", 0),
-        },
-        "remaining": {
-            "wallet_checks": wallet_remaining,
-            "reports": reports_remaining,
-        },
-        "limits": {
-            "wallet_checks": wallet_limit,
-            "reports": reports_limit,
-        },
-    }
+        return {"status": "ok"}
+    finally:
+        await release_conn(conn)
