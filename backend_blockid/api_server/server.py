@@ -172,6 +172,8 @@ async def preflight_handler(rest_of_path: str):
     )
 
 
+app.add_middleware(BillingMiddleware)
+app.add_middleware(ApiKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -184,8 +186,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(ApiKeyMiddleware)
-app.add_middleware(BillingMiddleware)
 
 
 @app.middleware("http")
