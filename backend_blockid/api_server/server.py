@@ -176,13 +176,8 @@ app.add_middleware(BillingMiddleware)
 app.add_middleware(ApiKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://172.22.80.1:8080",
-        "https://api.blockidscore.fun",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
