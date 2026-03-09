@@ -29,7 +29,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from backend_blockid.blockid_logging import get_logger
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.tools.helius_cost_monitor import get_today_stats, get_top_wallets_today, DAILY_LIMIT
 from backend_blockid.tools.review_queue_engine import list_pending
 
@@ -44,99 +44,140 @@ def _today_start_ts() -> int:
     return int(time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, 0)))
 
 
-def _check_db() -> bool:
+async def _table_exists(conn, table: str) -> bool:
+    row = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)",
+        table,
+    )
+    return bool(row)
+
+
+async def _get_table_columns(conn, table: str) -> set[str]:
+    rows = await conn.fetch(
+        "SELECT column_name FROM information_schema.columns WHERE table_name=$1",
+        table,
+    )
+    return {r["column_name"] for r in rows}
+
+
+async def _check_db() -> bool:
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        conn.close()
-        return True
+        conn = await get_conn()
+        try:
+            await conn.fetchrow("SELECT 1")
+            return True
+        finally:
+            await release_conn(conn)
     except Exception:
         return False
 
 
-def _blockid_logs_exists() -> bool:
+async def _blockid_logs_exists() -> bool:
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='blockid_logs'")
-        exists = cur.fetchone() is not None
-        conn.close()
-        return exists
+        conn = await get_conn()
+        try:
+            return await _table_exists(conn, "blockid_logs")
+        finally:
+            await release_conn(conn)
     except Exception:
         return False
 
 
-def _table_has_column(table: str, column: str) -> bool:
+async def _table_has_column(table: str, column: str) -> bool:
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(f"PRAGMA table_info({table})")
-        cols = {row[1] for row in cur.fetchall()}
-        conn.close()
-        return column in cols
+        conn = await get_conn()
+        try:
+            cols = await _get_table_columns(conn, table)
+            return column in cols
+        finally:
+            await release_conn(conn)
     except Exception:
         return False
 
 
-def _wallets_scored_today() -> int:
+async def _wallets_scored_today() -> int:
     try:
         cutoff = _today_start_ts()
-        conn = get_connection()
-        cur = conn.cursor()
-        if _table_has_column("trust_scores", "last_updated"):
-            cur.execute("SELECT COUNT(*) FROM trust_scores WHERE last_updated >= ?", (cutoff,))
-        else:
-            cur.execute("SELECT COUNT(*) FROM trust_scores WHERE score IS NOT NULL")
-        count = cur.fetchone()[0] or 0
-        conn.close()
-        return count
+        conn = await get_conn()
+        try:
+            if await _table_has_column("trust_scores", "last_updated"):
+                row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM trust_scores WHERE last_updated >= $1", cutoff)
+            else:
+                row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM trust_scores WHERE score IS NOT NULL")
+            return row["cnt"] or 0
+        finally:
+            await release_conn(conn)
     except Exception:
         return 0
 
 
-def _pda_success_rate_24h() -> dict:
-    if not _blockid_logs_exists():
+async def _pda_success_rate_24h() -> dict:
+    if not await _blockid_logs_exists():
         return {"ok": 0, "error": 0, "success_rate": None}
     cutoff = int(time.time()) - 86400
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT status, COUNT(*) FROM blockid_logs
-        WHERE stage = 'pda_publish' AND timestamp >= ?
-        GROUP BY status
-        """,
-        (cutoff,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    counts = {status: cnt for status, cnt in rows}
-    ok = int(counts.get("ok", 0))
-    err = int(counts.get("error", 0))
-    total = ok + err
-    rate = round(ok / total, 4) if total > 0 else None
-    return {"ok": ok, "error": err, "success_rate": rate}
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT status, COUNT(*) as cnt FROM blockid_logs
+            WHERE stage = 'pda_publish' AND timestamp >= $1
+            GROUP BY status
+            """,
+            cutoff,
+        )
+        counts = {row["status"]: row["cnt"] for row in rows}
+        ok = int(counts.get("ok", 0))
+        err = int(counts.get("error", 0))
+        total = ok + err
+        rate = round(ok / total, 4) if total > 0 else None
+        return {"ok": ok, "error": err, "success_rate": rate}
+    finally:
+        await release_conn(conn)
 
 
-def _avg_latency_24h(stage: str) -> int | None:
-    if not _blockid_logs_exists():
+async def _avg_latency_24h(stage: str) -> int | None:
+    if not await _blockid_logs_exists():
         return None
     cutoff = int(time.time()) - 86400
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT AVG(latency_ms) FROM blockid_logs
-        WHERE stage = ? AND latency_ms IS NOT NULL AND timestamp >= ?
-        """,
-        (stage, cutoff),
-    )
-    row = cur.fetchone()
-    conn.close()
-    if row and row[0] is not None:
-        return int(row[0])
-    return None
+    conn = await get_conn()
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT AVG(latency_ms) as avg_latency FROM blockid_logs
+            WHERE stage = $1 AND latency_ms IS NOT NULL AND timestamp >= $2
+            """,
+            stage, cutoff,
+        )
+        if row and row["avg_latency"] is not None:
+            return int(row["avg_latency"])
+        return None
+    finally:
+        await release_conn(conn)
+
+
+async def record_pipeline_run_async(
+    run_start_ts: int,
+    run_end_ts: int | None,
+    success: bool,
+    wallets_scanned: int = 0,
+    errors_count: int = 0,
+    steps_completed: int = 0,
+    message: str | None = None,
+) -> None:
+    """Record a pipeline run for monitoring (call from run_full_pipeline)."""
+    try:
+        conn = await get_conn()
+        try:
+            await conn.execute(
+                """INSERT INTO pipeline_run_log
+                   (run_start_ts, run_end_ts, success, wallets_scanned, errors_count, steps_completed, message)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                run_start_ts, run_end_ts, 1 if success else 0, wallets_scanned, errors_count, steps_completed, message,
+            )
+        finally:
+            await release_conn(conn)
+    except Exception as e:
+        logger.warning("monitor_record_pipeline_run_failed", error=str(e))
 
 
 def record_pipeline_run(
@@ -148,58 +189,47 @@ def record_pipeline_run(
     steps_completed: int = 0,
     message: str | None = None,
 ) -> None:
-    """Record a pipeline run for monitoring (call from run_full_pipeline)."""
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO pipeline_run_log
-               (run_start_ts, run_end_ts, success, wallets_scanned, errors_count, steps_completed, message)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (run_start_ts, run_end_ts, 1 if success else 0, wallets_scanned, errors_count, steps_completed, message),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning("monitor_record_pipeline_run_failed", error=str(e))
+    """Sync wrapper for record_pipeline_run_async."""
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        record_pipeline_run_async(run_start_ts, run_end_ts, success, wallets_scanned, errors_count, steps_completed, message)
+    )
 
 
-def _get_last_pipeline_run() -> dict | None:
+async def _get_last_pipeline_run() -> dict | None:
     """Return last pipeline run from pipeline_run_log."""
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pipeline_run_log'")
-        if not cur.fetchone():
-            conn.close()
-            return None
-        cur.execute(
-            """SELECT run_start_ts, run_end_ts, success, wallets_scanned, errors_count, steps_completed
-               FROM pipeline_run_log ORDER BY run_start_ts DESC LIMIT 1"""
-        )
-        row = cur.fetchone()
-        conn.close()
-        if not row:
-            return None
-        return {
-            "run_start_ts": row[0],
-            "run_end_ts": row[1],
-            "success": bool(row[2]),
-            "wallets_scanned": row[3] or 0,
-            "errors_count": row[4] or 0,
-            "steps_completed": row[5] or 0,
-        }
+        conn = await get_conn()
+        try:
+            if not await _table_exists(conn, "pipeline_run_log"):
+                return None
+            row = await conn.fetchrow(
+                """SELECT run_start_ts, run_end_ts, success, wallets_scanned, errors_count, steps_completed
+                   FROM pipeline_run_log ORDER BY run_start_ts DESC LIMIT 1"""
+            )
+            if not row:
+                return None
+            return {
+                "run_start_ts": row["run_start_ts"],
+                "run_end_ts": row["run_end_ts"],
+                "success": bool(row["success"]),
+                "wallets_scanned": row["wallets_scanned"] or 0,
+                "errors_count": row["errors_count"] or 0,
+                "steps_completed": row["steps_completed"] or 0,
+            }
+        finally:
+            await release_conn(conn)
     except Exception:
         return None
 
 
 @router.get("/health")
-def get_health() -> dict:
+async def get_health() -> dict:
     """
     System health: database_connection_ok, last_pipeline_run, api_status.
     """
-    db_ok = _check_db()
-    last_run = _get_last_pipeline_run()
+    db_ok = await _check_db()
+    last_run = await _get_last_pipeline_run()
     return {
         "database_connection_ok": db_ok,
         "last_pipeline_run": last_run,
@@ -208,11 +238,11 @@ def get_health() -> dict:
 
 
 @router.get("/pipeline_status")
-def get_pipeline_status() -> dict:
+async def get_pipeline_status() -> dict:
     """
     Pipeline status: last_run_time, wallets_scanned, errors_count.
     """
-    last = _get_last_pipeline_run()
+    last = await _get_last_pipeline_run()
     if not last:
         return {
             "last_run_time": None,
@@ -231,24 +261,25 @@ def get_pipeline_status() -> dict:
 
 
 @router.get("/status")
-def get_monitor_status() -> dict:
+async def get_monitor_status() -> dict:
     """
     Monitoring status summary.
     """
-    last = _get_last_pipeline_run()
+    last = await _get_last_pipeline_run()
     error_count = 0
-    if _blockid_logs_exists():
+    if await _blockid_logs_exists():
         cutoff = int(time.time()) - 86400
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM blockid_logs WHERE status='error' AND timestamp >= ?",
-            (cutoff,),
-        )
-        error_count = cur.fetchone()[0] or 0
-        conn.close()
-    pda = _pda_success_rate_24h()
-    avg_rpc = _avg_latency_24h("helius_fetch")
+        conn = await get_conn()
+        try:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM blockid_logs WHERE status='error' AND timestamp >= $1",
+                cutoff,
+            )
+            error_count = row["cnt"] or 0
+        finally:
+            await release_conn(conn)
+    pda = await _pda_success_rate_24h()
+    avg_rpc = await _avg_latency_24h("helius_fetch")
     return {
         "pipeline_ok": last["success"] if last else None,
         "errors_last_24h": error_count,
@@ -258,73 +289,74 @@ def get_monitor_status() -> dict:
 
 
 @router.get("/errors")
-def get_monitor_errors() -> dict:
+async def get_monitor_errors() -> dict:
     """
     Recent error logs from blockid_logs (last 24h, max 200).
     """
-    if not _blockid_logs_exists():
+    if not await _blockid_logs_exists():
         return {"errors": [], "count": 0}
     cutoff = int(time.time()) - 86400
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT timestamp, stage, status, message, wallet
-        FROM blockid_logs
-        WHERE status = 'error' AND timestamp >= ?
-        ORDER BY timestamp DESC
-        LIMIT 200
-        """,
-        (cutoff,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    items = [
-        {"timestamp": ts, "stage": stage, "status": status, "message": msg, "wallet": wallet}
-        for (ts, stage, status, msg, wallet) in rows
-    ]
-    return {"errors": items, "count": len(items)}
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT timestamp, stage, status, message, wallet
+            FROM blockid_logs
+            WHERE status = 'error' AND timestamp >= $1
+            ORDER BY timestamp DESC
+            LIMIT 200
+            """,
+            cutoff,
+        )
+        items = [
+            {"timestamp": r["timestamp"], "stage": r["stage"], "status": r["status"], "message": r["message"], "wallet": r["wallet"]}
+            for r in rows
+        ]
+        return {"errors": items, "count": len(items)}
+    finally:
+        await release_conn(conn)
 
 
 @router.get("/latency")
-def get_monitor_latency() -> dict:
+async def get_monitor_latency() -> dict:
     """
     Average latency by stage (last 24h).
     """
-    if not _blockid_logs_exists():
+    if not await _blockid_logs_exists():
         return {"avg_latency_ms": {}}
     cutoff = int(time.time()) - 86400
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT stage, AVG(latency_ms)
-        FROM blockid_logs
-        WHERE latency_ms IS NOT NULL AND timestamp >= ?
-        GROUP BY stage
-        """,
-        (cutoff,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return {"avg_latency_ms": {stage: int(avg or 0) for stage, avg in rows}}
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT stage, AVG(latency_ms) as avg_latency
+            FROM blockid_logs
+            WHERE latency_ms IS NOT NULL AND timestamp >= $1
+            GROUP BY stage
+            """,
+            cutoff,
+        )
+        return {"avg_latency_ms": {r["stage"]: int(r["avg_latency"] or 0) for r in rows}}
+    finally:
+        await release_conn(conn)
 
 
 @router.get("/pipeline-summary")
-def get_monitor_pipeline_summary() -> dict:
+async def get_monitor_pipeline_summary() -> dict:
     """
     Pipeline summary for dashboard.
     """
-    last = _get_last_pipeline_run()
-    pda = _pda_success_rate_24h()
-    avg_rpc = _avg_latency_24h("helius_fetch")
+    last = await _get_last_pipeline_run()
+    pda = await _pda_success_rate_24h()
+    avg_rpc = await _avg_latency_24h("helius_fetch")
+    errors = await get_monitor_errors()
     return {
         "pipeline_ok": last["success"] if last else None,
-        "wallets_scored_today": _wallets_scored_today(),
+        "wallets_scored_today": await _wallets_scored_today(),
         "avg_rpc_latency_ms": avg_rpc,
         "pda_failures_24h": pda["error"],
         "pda_success_rate": pda["success_rate"],
-        "errors_last_24h": get_monitor_errors().get("count", 0),
+        "errors_last_24h": errors.get("count", 0),
     }
 
 
@@ -359,46 +391,40 @@ def get_helius_usage() -> dict:
 
 
 @router.get("/trust_stats")
-def get_trust_stats() -> dict:
+async def get_trust_stats() -> dict:
     """
     Trust score stats: average_score, number_high_risk_wallets, new_scam_wallets_today.
     """
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cutoff = _today_start_ts()
+        conn = await get_conn()
+        try:
+            cutoff = _today_start_ts()
 
-        # Average score
-        cur.execute("SELECT AVG(score) FROM trust_scores WHERE score IS NOT NULL")
-        row = cur.fetchone()
-        avg = float(row[0] or 0)
+            row = await conn.fetchrow("SELECT AVG(score) as avg_score FROM trust_scores WHERE score IS NOT NULL")
+            avg = float(row["avg_score"] or 0)
 
-        # High risk (score < 40)
-        cur.execute("SELECT COUNT(*) FROM trust_scores WHERE score < 40 AND score IS NOT NULL")
-        high_risk = cur.fetchone()[0] or 0
+            row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM trust_scores WHERE score < 40 AND score IS NOT NULL")
+            high_risk = row["cnt"] or 0
 
-        # New scam wallets today (scam_wallets.detected_at)
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scam_wallets'")
-        if cur.fetchone():
-            cur.execute(
-                "SELECT COUNT(*) FROM scam_wallets WHERE detected_at >= ?",
-                (cutoff,),
-            )
-            new_scam = cur.fetchone()[0] or 0
-        else:
             new_scam = 0
+            if await _table_exists(conn, "scam_wallets"):
+                row = await conn.fetchrow(
+                    "SELECT COUNT(*) as cnt FROM scam_wallets WHERE detected_at >= $1",
+                    cutoff,
+                )
+                new_scam = row["cnt"] or 0
 
-        total_scored = 0
-        cur.execute("SELECT COUNT(*) FROM trust_scores WHERE score IS NOT NULL")
-        total_scored = cur.fetchone()[0] or 0
+            row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM trust_scores WHERE score IS NOT NULL")
+            total_scored = row["cnt"] or 0
 
-        conn.close()
-        return {
-            "average_score": round(avg, 2),
-            "total_wallets_scored": total_scored,
-            "number_high_risk_wallets": high_risk,
-            "new_scam_wallets_today": new_scam,
-        }
+            return {
+                "average_score": round(avg, 2),
+                "total_wallets_scored": total_scored,
+                "number_high_risk_wallets": high_risk,
+                "new_scam_wallets_today": new_scam,
+            }
+        finally:
+            await release_conn(conn)
     except Exception as e:
         logger.warning("monitor_trust_stats_error", error=str(e))
         return {
@@ -433,7 +459,7 @@ def get_review_queue() -> dict:
         }
 
 
-def _get_alerts() -> list[dict]:
+async def _get_alerts() -> list[dict]:
     """Return active alerts based on thresholds."""
     alerts: list[dict] = []
     try:
@@ -445,7 +471,7 @@ def _get_alerts() -> list[dict]:
                 "severity": "high",
             })
 
-        last = _get_last_pipeline_run()
+        last = await _get_last_pipeline_run()
         if last and not last["success"]:
             alerts.append({
                 "type": "pipeline_failed",
@@ -466,9 +492,10 @@ def _get_alerts() -> list[dict]:
 
 
 @router.get("/alerts")
-def get_alerts() -> dict:
+async def get_alerts() -> dict:
     """Active alerts (helius_cost > limit, pipeline_failed, review_queue > 100)."""
-    return {"alerts": _get_alerts(), "count": len(_get_alerts())}
+    alerts = await _get_alerts()
+    return {"alerts": alerts, "count": len(alerts)}
 
 
 def _load_dashboard_html() -> str:

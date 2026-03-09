@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
 from backend_blockid.blockid_logging import get_logger
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.ai_engine.priority_wallets import update_priority
 from backend_blockid.utils.risk import score_to_risk
 
@@ -13,47 +14,44 @@ logger = get_logger(__name__)
 DYNAMIC_RISK_THRESHOLD = 70
 
 
-def _get_ml_score(cur: Any, wallet: str) -> float:
-    cur.execute(
-        "SELECT ml_score, score FROM trust_scores WHERE wallet = ? LIMIT 1",
-        (wallet,),
+async def _get_ml_score(conn: Any, wallet: str) -> float:
+    row = await conn.fetchrow(
+        "SELECT ml_score, score FROM trust_scores WHERE wallet = $1 LIMIT 1",
+        wallet,
     )
-    row = cur.fetchone()
     if not row:
         return 50.0
-    ml_score = row[0] if row[0] is not None else None
-    score = row[1] if row[1] is not None else None
+    ml_score = row["ml_score"] if row["ml_score"] is not None else None
+    score = row["score"] if row["score"] is not None else None
     return float(ml_score if ml_score is not None else (score if score is not None else 50.0))
 
 
-def _get_prior_risk(cur: Any, wallet: str) -> float:
-    cur.execute(
-        "SELECT dynamic_risk FROM trust_scores WHERE wallet = ? LIMIT 1",
-        (wallet,),
+async def _get_prior_risk(conn: Any, wallet: str) -> float:
+    row = await conn.fetchrow(
+        "SELECT dynamic_risk FROM trust_scores WHERE wallet = $1 LIMIT 1",
+        wallet,
     )
-    row = cur.fetchone()
-    if not row or row[0] is None:
+    if not row or row["dynamic_risk"] is None:
         return 0.0
-    return float(row[0])
+    return float(row["dynamic_risk"])
 
 
-def _get_reason_penalty(cur: Any, wallet: str) -> float:
-    cur.execute(
-        "SELECT weight, confidence_score FROM wallet_reasons WHERE wallet = ?",
-        (wallet,),
+async def _get_reason_penalty(conn: Any, wallet: str) -> float:
+    rows = await conn.fetch(
+        "SELECT weight, confidence_score FROM wallet_reasons WHERE wallet = $1",
+        wallet,
     )
-    rows = cur.fetchall()
     if not rows:
         return 0.0
     total = 0.0
-    for weight, confidence in rows:
-        w = float(weight or 0)
-        c = float(confidence if confidence is not None else 1.0)
+    for row in rows:
+        w = float(row["weight"] or 0)
+        c = float(row["confidence_score"] if row["confidence_score"] is not None else 1.0)
         total += w * c
     return total
 
 
-def _get_neighbors(wallet: str, max_hop: int = 2) -> dict[str, int]:
+async def _get_neighbors(wallet: str, max_hop: int = 2) -> dict[str, int]:
     """
     BFS neighbors up to max_hop using transactions table (sender -> receiver).
     Returns {wallet: hop_distance}.
@@ -61,25 +59,24 @@ def _get_neighbors(wallet: str, max_hop: int = 2) -> dict[str, int]:
     neighbors: dict[str, int] = {}
     visited = {wallet}
     frontier = {wallet}
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = await get_conn()
     try:
         for hop in range(1, max_hop + 1):
             if not frontier:
                 break
             next_frontier: set[str] = set()
             for w in frontier:
-                cur.execute(
+                rows = await conn.fetch(
                     """
                     SELECT sender, receiver
                     FROM transactions
-                    WHERE sender = ? OR receiver = ?
+                    WHERE sender = $1 OR receiver = $1
                     """,
-                    (w, w),
+                    w,
                 )
-                for row in cur.fetchall():
-                    sender = (row[0] if row else "") or ""
-                    receiver = (row[1] if row else "") or ""
+                for row in rows:
+                    sender = (row["sender"] if row else "") or ""
+                    receiver = (row["receiver"] if row else "") or ""
                     for candidate in (sender, receiver):
                         candidate = str(candidate).strip()
                         if not candidate or candidate == wallet or candidate in visited:
@@ -90,68 +87,89 @@ def _get_neighbors(wallet: str, max_hop: int = 2) -> dict[str, int]:
             visited |= next_frontier
             frontier = next_frontier
     finally:
-        conn.close()
+        await release_conn(conn)
     return neighbors
 
 
-def _has_scam_neighbor(wallet: str) -> tuple[bool, bool]:
-    neighbors = _get_neighbors(wallet, max_hop=2)
+async def _has_scam_neighbor(wallet: str) -> tuple[bool, bool]:
+    neighbors = await _get_neighbors(wallet, max_hop=2)
     if not neighbors:
         return False, False
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = await get_conn()
     scam_set: set[str] = set()
     try:
-        cur.execute("SELECT wallet FROM scam_wallets")
-        scam_set = {str(r[0]).strip() for r in cur.fetchall() if r and r[0]}
+        rows = await conn.fetch("SELECT wallet FROM scam_wallets")
+        scam_set = {str(r["wallet"]).strip() for r in rows if r and r.get("wallet")}
     finally:
-        conn.close()
+        await release_conn(conn)
     hop1 = any(w in scam_set and hop == 1 for w, hop in neighbors.items())
     hop2 = any(w in scam_set and hop == 2 for w, hop in neighbors.items())
     return hop1, hop2
 
 
-def _get_last_tx_time_and_count(cur: Any, wallet: str) -> tuple[int, int]:
-    cur.execute(
+async def _get_last_tx_time_and_count(conn: Any, wallet: str) -> tuple[int, int]:
+    row = await conn.fetchrow(
         """
-        SELECT MAX(timestamp) FROM transactions
-        WHERE sender = ? OR receiver = ?
+        SELECT MAX(timestamp) as max_ts FROM transactions
+        WHERE sender = $1 OR receiver = $1
         """,
-        (wallet, wallet),
+        wallet,
     )
-    row = cur.fetchone()
-    last_tx_time = int(row[0] if row and row[0] is not None else 0)
+    last_tx_time = int(row["max_ts"] if row and row["max_ts"] is not None else 0)
 
     cutoff = int(time.time()) - 86400
-    cur.execute(
+    row = await conn.fetchrow(
         """
-        SELECT COUNT(*) FROM transactions
-        WHERE (sender = ? OR receiver = ?)
-          AND timestamp > ?
+        SELECT COUNT(*) as cnt FROM transactions
+        WHERE (sender = $1 OR receiver = $1)
+          AND timestamp > $2
         """,
-        (wallet, wallet, cutoff),
+        wallet, cutoff,
     )
-    row = cur.fetchone()
-    tx_count = int(row[0] if row and row[0] is not None else 0)
+    tx_count = int(row["cnt"] if row and row["cnt"] is not None else 0)
     return last_tx_time, tx_count
 
 
-def compute_dynamic_risk(wallet: str) -> dict[str, float]:
-    conn = get_connection()
-    cur = conn.cursor()
+async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
+    conn = await get_conn()
     try:
-        ml_score = _get_ml_score(cur, wallet)
-        prior = _get_prior_risk(cur, wallet)
-        # Bayesian update (weighted average)
-        updated = (0.6 * prior) + (0.4 * ml_score)
+        ml_score = await _get_ml_score(conn, wallet)
+        prior = await _get_prior_risk(conn, wallet)
+        last_tx_time, tx_count_24h = await _get_last_tx_time_and_count(conn, wallet)
 
-        hop1, hop2 = _has_scam_neighbor(wallet)
+        if prior == 0 and last_tx_time == 0:
+            # New wallet with no transactions: neutral score, do not inherit ml_score
+            updated = 50.0
+            logger.info("dynamic_risk_new_wallet_neutral", wallet=wallet[:16])
+        elif prior == 0:
+            updated = ml_score
+        else:
+            updated = (0.6 * prior) + (0.4 * ml_score)
+
+        logger.debug(
+            "dynamic_risk_update",
+            wallet=wallet[:16] + "...",
+            ml_score=ml_score,
+            prior=prior,
+            updated=updated,
+        )
+
+        hop1, hop2 = await _has_scam_neighbor(wallet)
         graph_penalty = -30.0 if hop1 else (-15.0 if hop2 else 0.0)
 
-        last_tx_time, tx_count_24h = _get_last_tx_time_and_count(cur, wallet)
-        days_inactive = 0
-        if last_tx_time:
+        # Guard: wallets with no transactions should not be penalized
+        if last_tx_time == 0:
+            days_inactive = 0
+        else:
             days_inactive = max(0, (int(time.time()) - last_tx_time) // 86400)
+
+        logger.debug(
+            "dynamic_risk_inactivity",
+            wallet=wallet[:16] + "...",
+            last_tx_time=last_tx_time,
+            days_inactive=days_inactive,
+        )
+
         decay = -2.0 * days_inactive
 
         activity_boost = 2.0 * tx_count_24h
@@ -171,59 +189,73 @@ def compute_dynamic_risk(wallet: str) -> dict[str, float]:
             "days_inactive": float(days_inactive),
         }
     finally:
-        conn.close()
+        await release_conn(conn)
 
 
-def update_wallet_score(wallet: str) -> dict[str, float]:
-    conn = get_connection()
-    cur = conn.cursor()
+async def update_wallet_score_async(wallet: str) -> dict[str, float]:
+    conn = await get_conn()
     now = int(time.time())
     try:
-        details = compute_dynamic_risk(wallet)
+        details = await compute_dynamic_risk(wallet)
         ml_score = details["ml_score"]
         dynamic_risk = details["dynamic_risk"]
-        reason_penalty = _get_reason_penalty(cur, wallet)
-        final_score = (dynamic_risk - reason_penalty)
+        reason_penalty = await _get_reason_penalty(conn, wallet)
+        final_score = (dynamic_risk + reason_penalty)
         final_score = max(0.0, min(100.0, final_score))
         risk_level = score_to_risk(int(round(final_score)))
 
-        cur.execute(
-            """
-            INSERT INTO trust_scores (
-                wallet, score, risk_level, ml_score, dynamic_risk, final_score, last_updated, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(wallet) DO UPDATE SET
-                score=excluded.score,
-                risk_level=excluded.risk_level,
-                ml_score=excluded.ml_score,
-                dynamic_risk=excluded.dynamic_risk,
-                final_score=excluded.final_score,
-                last_updated=excluded.last_updated,
-                updated_at=excluded.updated_at
-            """,
-            (
+        exists = await conn.fetchval("SELECT 1 FROM trust_scores WHERE wallet = $1", wallet)
+        if exists:
+            await conn.execute(
+                """
+                UPDATE trust_scores SET
+                    score = $2,
+                    risk_level = $3,
+                    ml_score = $4,
+                    dynamic_risk = $5,
+                    final_score = $6,
+                    last_updated = $7,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE wallet = $1
+                """,
                 wallet,
                 float(final_score),
-                int(risk_level),
+                str(risk_level),
                 float(ml_score),
                 float(dynamic_risk),
                 float(final_score),
                 now,
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO trust_scores (
+                    wallet, score, risk_level, ml_score, dynamic_risk, final_score, last_updated, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+                """,
+                wallet,
+                float(final_score),
+                str(risk_level),
+                float(ml_score),
+                float(dynamic_risk),
+                float(final_score),
                 now,
-            ),
-        )
-        conn.commit()
+            )
 
-        # Priority updates based on dynamic risk and inactivity
         if dynamic_risk > DYNAMIC_RISK_THRESHOLD:
-            update_priority(wallet, +20)
+            await update_priority(wallet, +20)
         if details["days_inactive"] >= 30:
-            update_priority(wallet, -10)
+            await update_priority(wallet, -10)
 
         details["final_score"] = float(final_score)
         details["reason_penalty"] = float(reason_penalty)
         details["risk_level"] = float(risk_level)
         return details
     finally:
-        conn.close()
+        await release_conn(conn)
+
+
+def update_wallet_score(wallet: str) -> dict[str, float]:
+    """Sync wrapper for update_wallet_score_async."""
+    return asyncio.get_event_loop().run_until_complete(update_wallet_score_async(wallet))

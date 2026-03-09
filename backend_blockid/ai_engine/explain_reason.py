@@ -5,12 +5,14 @@ Converts reason_codes into human-readable explanations. Rule-based, no ML.
 """
 from __future__ import annotations
 
+import asyncio
+
 from backend_blockid.ai_engine.reason_templates import DEFAULT_LANG, get_template
 
 NO_RISK_CODE = "NO_RISK_DETECTED"
 
 
-def generate_explanation(
+async def generate_explanation_async(
     wallet: str,
     lang: str = DEFAULT_LANG,
     *,
@@ -22,49 +24,48 @@ def generate_explanation(
     Returns:
         wallet, score, risk, explanations: [{code, text, confidence}]
     """
-    from backend_blockid.database.connection import get_connection
+    from backend_blockid.database.pg_connection import get_conn, release_conn
 
-    conn = _conn or get_connection()
-    cur = conn.cursor()
+    own_conn = _conn is None
+    conn = _conn if _conn else await get_conn()
 
     try:
-        cur.execute(
-            """
-            SELECT reason_code, weight, confidence_score
-            FROM wallet_reasons
-            WHERE wallet = ? AND reason_code IS NOT NULL
-            """,
-            (wallet.strip(),),
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT reason_code, weight, confidence_score
+                FROM wallet_reasons
+                WHERE wallet = $1 AND reason_code IS NOT NULL
+                """,
+                wallet.strip(),
+            )
+        except Exception:
+            rows = await conn.fetch(
+                """
+                SELECT reason_code, weight
+                FROM wallet_reasons
+                WHERE wallet = $1 AND reason_code IS NOT NULL
+                """,
+                wallet.strip(),
+            )
+            rows = [{"reason_code": r["reason_code"], "weight": r["weight"], "confidence_score": 0.8} for r in rows]
+
+        ts_row = await conn.fetchrow(
+            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1 LIMIT 1",
+            wallet.strip(),
         )
-        rows = cur.fetchall()
-    except Exception:
-        cur.execute(
-            """
-            SELECT reason_code, weight
-            FROM wallet_reasons
-            WHERE wallet = ? AND reason_code IS NOT NULL
-            """,
-            (wallet.strip(),),
-        )
-        rows = [(*r, 0.8) for r in cur.fetchall()]
+        score = round(float(ts_row["score"] or 50), 2) if ts_row else 50.0
+        risk = str(ts_row["risk_level"] or "1") if ts_row else "1"
 
-    cur.execute(
-        "SELECT score, risk_level FROM trust_scores WHERE wallet = ? LIMIT 1",
-        (wallet.strip(),),
-    )
-    ts_row = cur.fetchone()
-    score = round(float((ts_row["score"] if hasattr(ts_row, "keys") else ts_row[0]) or 50), 2) if ts_row else 50.0
-    risk = str((ts_row["risk_level"] if hasattr(ts_row, "keys") else ts_row[1]) or "1") if ts_row else "1"
-
-    reasons: list[dict] = []
-    for r in rows:
-        code = (r["reason_code"] if hasattr(r, "keys") else r[0] or "").strip()
-        weight = int(r["weight"] if hasattr(r, "keys") else r[1] or 0)
-        conf = float(r["confidence_score"] if hasattr(r, "keys") else r[2] or 0)
-        reasons.append({"code": code, "weight": weight, "confidence": conf})
-
-    if not _conn:
-        conn.close()
+        reasons: list[dict] = []
+        for r in rows:
+            code = (r["reason_code"] or "").strip()
+            weight = int(r["weight"] or 0)
+            conf = float(r["confidence_score"] or 0)
+            reasons.append({"code": code, "weight": weight, "confidence": conf})
+    finally:
+        if own_conn:
+            await release_conn(conn)
 
     if not reasons:
         reasons = [{"code": NO_RISK_CODE, "weight": 0, "confidence": 1.0}]
@@ -91,6 +92,18 @@ def generate_explanation(
         "risk": risk,
         "explanations": explanations,
     }
+
+
+def generate_explanation(
+    wallet: str,
+    lang: str = DEFAULT_LANG,
+    *,
+    _conn=None,
+) -> dict:
+    """Sync wrapper for generate_explanation_async."""
+    return asyncio.get_event_loop().run_until_complete(
+        generate_explanation_async(wallet, lang, _conn=_conn)
+    )
 
 
 def generate_summary(explanations: list[dict], top_n: int = 2) -> str:

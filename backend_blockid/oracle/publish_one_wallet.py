@@ -256,13 +256,13 @@ def _read_on_chain_score(client: Any, program_id: Any, wallet_pubkey: Any) -> tu
     return parse_trust_score_account_data(data)
 
 
-def main(wallet: str | None = None, score: int | None = None, risk: int | None = None) -> int:
+async def publish_one_async(wallet: str | None = None, score: int | None = None, risk: int | None = None) -> int:
     """
-    Publish trust score for one wallet. Call from CLI or import.
+    Publish trust score for one wallet. Async version for use from async context (e.g. batch_publish).
 
     Args:
-        wallet: Wallet pubkey (or from WALLET env / argparse when None)
-        score: Score 0-100 (or from SCORE env / argparse when None)
+        wallet: Wallet pubkey
+        score: Score 0-100
         risk: Risk level 0-3 (or derived from score when None)
 
     Returns:
@@ -273,7 +273,6 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
     from solana.transaction import Transaction
 
     if wallet is not None:
-        # Called programmatically (e.g. from batch_publish)
         wallet_str = str(wallet).strip()
         if not wallet_str:
             logger.error("wallet is required when called programmatically")
@@ -291,29 +290,8 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
         else:
             risk_level = _score_to_risk_level(float(final_score))
     else:
-        # CLI mode: parse argparse
-        parser = argparse.ArgumentParser(description="Publish trust score for one wallet and read it back.")
-        parser.add_argument("wallet", nargs="?", default=os.getenv("WALLET", ""), help="Wallet pubkey (or set WALLET)")
-        parser.add_argument("score", nargs="?", type=int, default=None, help="Score 0-100 (default from SCORE env or 75)")
-        parser.add_argument("risk", nargs="?", type=int, default=None, help="Risk level 0-3 (optional; else derived from score)")
-        args = parser.parse_args()
-
-        wallet_str = (args.wallet or "").strip()
-        if not wallet_str:
-            logger.error("WALLET is required. Set WALLET in .env or pass wallet pubkey as the first argument.")
-            return 1
-        final_score = args.score
-        if final_score is None:
-            try:
-                final_score = int(os.getenv("SCORE", str(DEFAULT_SCORE)))
-            except ValueError:
-                final_score = DEFAULT_SCORE
-        final_score = max(0, min(100, final_score))
-        risk_level = args.risk
-        if risk_level is not None:
-            risk_level = max(0, min(3, int(risk_level)))
-        else:
-            risk_level = _score_to_risk_level(float(final_score))
+        logger.error("wallet is required for publish_one_async")
+        return 1
 
     rpc_url = _rpc_url()
     oracle_key = (os.getenv("ORACLE_PRIVATE_KEY") or "").strip()
@@ -359,9 +337,7 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
         return 1
     blockhash = getattr(blockhash_value, "blockhash", blockhash_value)
 
-    print("[DEBUG] ORACLE:", oracle_pubkey)
-    print("[DEBUG] WALLET:", wallet_pubkey)
-    print("[DEBUG] PDA:", pda_pubkey)
+
     tx = Transaction(recent_blockhash=blockhash, fee_payer=oracle_pubkey)
     tx.add(ix)
 
@@ -400,8 +376,8 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
             "pda": str(pda_pubkey),
         })
 
-        add_wallet(wallet_addr)
-        update_wallet_score(wallet_addr, stored_score, _score_to_risk_level(stored_score), metadata)
+        await add_wallet(wallet_addr)
+        await update_wallet_score(wallet_addr, stored_score, _score_to_risk_level(stored_score), metadata)
 
         logger.info("publish_one_wallet_db_saved", wallet=wallet_addr, score=stored_score)
     except Exception as e:
@@ -409,7 +385,35 @@ def main(wallet: str | None = None, score: int | None = None, risk: int | None =
 
     return 0
 
-    print("USING DB PATH:", db_path)
+
+def main(wallet: str | None = None, score: int | None = None, risk: int | None = None) -> int:
+    """
+    Publish trust score for one wallet. CLI entry point; uses asyncio.run for standalone execution.
+    For async context (e.g. batch_publish), use publish_one_async instead.
+    """
+    import asyncio
+
+    if wallet is None:
+        parser = argparse.ArgumentParser(description="Publish trust score for one wallet and read it back.")
+        parser.add_argument("wallet", nargs="?", default=os.getenv("WALLET", ""), help="Wallet pubkey (or set WALLET)")
+        parser.add_argument("score", nargs="?", type=int, default=None, help="Score 0-100 (default from SCORE env or 75)")
+        parser.add_argument("risk", nargs="?", type=int, default=None, help="Risk level 0-3 (optional; else derived from score)")
+        args = parser.parse_args()
+
+        wallet = (args.wallet or "").strip()
+        if not wallet:
+            logger.error("WALLET is required. Set WALLET in .env or pass wallet pubkey as the first argument.")
+            return 1
+        score = args.score
+        if score is None:
+            try:
+                score = int(os.getenv("SCORE", str(DEFAULT_SCORE)))
+            except ValueError:
+                score = DEFAULT_SCORE
+        risk = args.risk
+
+    return asyncio.run(publish_one_async(wallet=wallet, score=score, risk=risk))
+
 
 if __name__ == "__main__":
     sys.exit(main())

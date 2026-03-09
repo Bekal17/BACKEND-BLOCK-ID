@@ -275,7 +275,8 @@ def main() -> int:
             total_new += new_count
             total_skipped += skip_count
             try:
-                update_scan_timestamp(wallet)
+                import asyncio
+                asyncio.run(update_scan_timestamp(wallet))
             except Exception:
                 pass
             print(f"[helius_fetch] wallet={wallet[:8]}... new_tx={new_count} skipped={skip_count}")

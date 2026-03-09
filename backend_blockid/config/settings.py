@@ -20,12 +20,21 @@ _PROD_ENV_EXAMPLE = _CONFIG_DIR / "production.env.example"
 
 
 def _load_dotenv() -> None:
-    """Load .env from project root."""
+    """Load environment configuration safely."""
+
     try:
         from dotenv import load_dotenv
+
+        # Always load main .env first
         load_dotenv(_ENV_PATH)
-        if _PROD_ENV_EXAMPLE.exists():
+
+        # Determine environment AFTER loading .env
+        env_mode = (os.getenv("BLOCKID_ENV") or "DEV").upper()
+
+        # Only load production example if explicitly PROD
+        if env_mode == "PROD" and _PROD_ENV_EXAMPLE.exists():
             load_dotenv(_PROD_ENV_EXAMPLE, override=False)
+
     except ImportError:
         pass
 

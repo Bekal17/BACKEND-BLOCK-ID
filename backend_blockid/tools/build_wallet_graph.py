@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -22,58 +23,58 @@ if __name__ == "__main__":
 
 import networkx as nx
 
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 
 
-def main() -> int:
+async def _get_table_columns(conn, table: str) -> set[str]:
+    rows = await conn.fetch(
+        "SELECT column_name FROM information_schema.columns WHERE table_name=$1",
+        table,
+    )
+    return {r["column_name"] for r in rows}
+
+
+async def main_async() -> int:
     ap = argparse.ArgumentParser(description="Build wallet graph and clusters from transactions.")
     ap.add_argument("--days-back", type=int, default=30, help="Include txs within last N days")
     ap.add_argument("--min-amount", type=float, default=0.001, help="Skip transfers below this SOL")
     args = ap.parse_args()
 
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = await get_conn()
+    try:
+        cols = await _get_table_columns(conn, "transactions")
 
-    # Schema detection: new (from_wallet/to_wallet/amount) vs old (sender/receiver/amount_lamports)
-    cur.execute("PRAGMA table_info(transactions)")
-    cols = {row[1] for row in cur.fetchall()}
+        cutoff_ts = int(time.time()) - (args.days_back * 86400)
 
-    cutoff_ts = int(time.time()) - (args.days_back * 86400)
+        if "from_wallet" in cols and "to_wallet" in cols:
+            rows = await conn.fetch(
+                """
+                SELECT from_wallet, to_wallet, amount
+                FROM transactions
+                WHERE timestamp >= $1 AND from_wallet IS NOT NULL AND to_wallet IS NOT NULL
+                """,
+                cutoff_ts,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT sender AS from_wallet, receiver AS to_wallet,
+                       amount_lamports / 1e9 AS amount
+                FROM transactions
+                WHERE timestamp >= $1 AND sender IS NOT NULL AND receiver IS NOT NULL
+                """,
+                cutoff_ts,
+            )
+    finally:
+        await release_conn(conn)
 
-    def _amt(r):
-        return float(r["amount"] or 0) if hasattr(r, "keys") else float(r[2] or 0)
-
-    if "from_wallet" in cols and "to_wallet" in cols:
-        cur.execute(
-            """
-            SELECT from_wallet, to_wallet, amount
-            FROM transactions
-            WHERE timestamp >= ? AND from_wallet IS NOT NULL AND to_wallet IS NOT NULL
-            """,
-            (cutoff_ts,),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT sender AS from_wallet, receiver AS to_wallet,
-                   amount_lamports / 1e9 AS amount
-            FROM transactions
-            WHERE timestamp >= ? AND sender IS NOT NULL AND receiver IS NOT NULL
-            """,
-            (cutoff_ts,),
-        )
-
-    rows = cur.fetchall()
-    conn.close()
-
-    # Build graph
     G = nx.Graph()
     for r in rows:
-        amt = _amt(r)
+        amt = float(r["amount"] or 0)
         if amt < args.min_amount:
             continue
-        frm = (r["from_wallet"] if hasattr(r, "keys") else r[0]).strip()
-        to = (r["to_wallet"] if hasattr(r, "keys") else r[1]).strip()
+        frm = (r["from_wallet"] or "").strip()
+        to = (r["to_wallet"] or "").strip()
         if not frm or not to or frm == to:
             continue
         if G.has_edge(frm, to):
@@ -86,7 +87,6 @@ def main() -> int:
     clusters_list = list(nx.connected_components(G))
     num_clusters = len(clusters_list)
 
-    # Per-wallet stats
     interaction_count = {w: 0 for w in wallets}
     total_volume = {w: 0.0 for w in wallets}
     for u, v, d in G.edges(data=True):
@@ -96,28 +96,42 @@ def main() -> int:
         total_volume[u] += w_amt
         total_volume[v] += w_amt
 
-    # Assign cluster_id sequentially and persist
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cluster_id = 0
-    for comp in clusters_list:
-        cluster_id += 1
-        for w in comp:
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO wallet_graph_clusters
-                (wallet, cluster_id, interaction_count, total_volume)
-                VALUES (?, ?, ?, ?)
-                """,
-                (w, cluster_id, interaction_count.get(w, 0), total_volume.get(w, 0.0)),
+    conn = await get_conn()
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_graph_clusters (
+                wallet TEXT PRIMARY KEY,
+                cluster_id INTEGER,
+                interaction_count INTEGER,
+                total_volume DOUBLE PRECISION
             )
+        """)
 
-    conn.commit()
-    conn.close()
+        cluster_id = 0
+        for comp in clusters_list:
+            cluster_id += 1
+            for w in comp:
+                await conn.execute(
+                    """
+                    INSERT INTO wallet_graph_clusters
+                    (wallet, cluster_id, interaction_count, total_volume)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT(wallet) DO UPDATE SET
+                        cluster_id = EXCLUDED.cluster_id,
+                        interaction_count = EXCLUDED.interaction_count,
+                        total_volume = EXCLUDED.total_volume
+                    """,
+                    w, cluster_id, interaction_count.get(w, 0), total_volume.get(w, 0.0),
+                )
+    finally:
+        await release_conn(conn)
 
     print(f"[graph] wallets={len(wallets)} edges={edges} clusters={num_clusters}")
     return 0
+
+
+def main() -> int:
+    return asyncio.run(main_async())
 
 
 if __name__ == "__main__":

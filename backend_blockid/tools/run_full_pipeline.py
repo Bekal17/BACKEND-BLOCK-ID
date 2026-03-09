@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import os
@@ -56,10 +57,10 @@ from backend_blockid.ai_engine.priority_wallets import (
     populate_priority_wallets,
     remove_old_wallets,
 )
-from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score
+from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score_async
 from backend_blockid.tools.blockid_logger import log_event
 from backend_blockid.tools.telegram_alert import send_pipeline_summary
-from backend_blockid.api_server.monitoring_api import record_pipeline_run
+from backend_blockid.api_server.monitoring_api import record_pipeline_run_async
 from backend_blockid.api_server.metrics import record_pipeline_run as metrics_record_pipeline_run
 
 logger = get_logger(__name__)
@@ -257,7 +258,7 @@ def run_step(step_name: str, module: str, *args: str) -> tuple[bool, str]:
         return False, f"{e}\n{tb}"
 
 
-def main() -> int:
+async def main() -> int:
     load_blockid_env()
     run_start_ts = int(time.time())
     _log(_SEP)
@@ -278,12 +279,12 @@ def main() -> int:
 
     if not ensure_cluster_features():
         _log("ERROR: Could not generate cluster_features.csv. Ensure transactions.csv exists.")
-        record_pipeline_run(run_start_ts, int(time.time()), False, 0, 1, 0, "cluster_features failed")
+        await record_pipeline_run_async(run_start_ts, int(time.time()), False, 0, 1, 0, "cluster_features failed")
         metrics_record_pipeline_run(success=False, wallets_scanned=0)
         return 1
 
     if not check_required_files():
-        record_pipeline_run(run_start_ts, int(time.time()), False, 0, 1, 0, "missing required files")
+        await record_pipeline_run_async(run_start_ts, int(time.time()), False, 0, 1, 0, "missing required files")
         metrics_record_pipeline_run(success=False, wallets_scanned=0)
         return 1
 
@@ -291,11 +292,11 @@ def main() -> int:
     _log("")
 
     # Priority wallet selection (top 100) before Helius fetch
-    remove_old_wallets(days=30)
-    populate_priority_wallets()
-    aged = age_priorities()
-    boosted = boost_active_wallets()
-    wallet_list = get_wallets_with_budget()
+    await remove_old_wallets(days=30)
+    await populate_priority_wallets()
+    aged = await age_priorities()
+    boosted = await boost_active_wallets()
+    wallet_list = await get_wallets_with_budget()
     _log(f"Aging applied to {aged} wallets")
     _log(f"Boosted active wallets: {boosted}")
     _log(f"Selected wallets for run: {len(wallet_list)}")
@@ -310,19 +311,19 @@ def main() -> int:
     scan_start = time.time()
     try:
         for wallet in wallet_list:
-            scan_wallet(wallet)
+            await scan_wallet(wallet)
         scan_latency_ms = int((time.time() - scan_start) * 1000)
-        log_event("helius_fetch", "ok", f"scanned_wallets={len(wallet_list)}", latency_ms=scan_latency_ms)
+        await log_event("helius_fetch", "ok", f"scanned_wallets={len(wallet_list)}", latency_ms=scan_latency_ms)
     except Exception as e:
         scan_latency_ms = int((time.time() - scan_start) * 1000)
-        log_event("helius_fetch", "error", str(e), latency_ms=scan_latency_ms)
+        await log_event("helius_fetch", "error", str(e), latency_ms=scan_latency_ms)
         raise
 
-    clusters = get_all_active_clusters()
+    clusters = await get_all_active_clusters()
     _log(f"[SCHEDULER] scanning {len(clusters)} clusters")
-    log_event("graph_cluster", "ok", f"clusters_scanned={len(clusters)}")
+    await log_event("graph_cluster", "ok", f"clusters_scanned={len(clusters)}")
     for cid in clusters:
-        scan_cluster(cid)
+        await scan_cluster(cid)
 
     test_wallet_limit()
 
@@ -339,20 +340,20 @@ def main() -> int:
             results.append((step_name, True, "OK"))
             if step_name == "predict_wallet_score":
                 for wallet in wallet_list:
-                    update_wallet_score(wallet)
-                wallet_list = get_wallets_with_budget(limit=100)
+                    await update_wallet_score_async(wallet)
+                wallet_list = await get_wallets_with_budget(limit=100)
                 _log(f"Selected wallets for run: {len(wallet_list)}")
-                log_event("ml_scoring", "ok", f"wallets_scored={len(wallet_list)}")
-                log_event("dynamic_risk", "ok", f"wallets_updated={len(wallet_list)}")
+                await log_event("ml_scoring", "ok", f"wallets_scored={len(wallet_list)}")
+                await log_event("dynamic_risk", "ok", f"wallets_updated={len(wallet_list)}")
             if step_name == "batch_publish":
-                log_event("pda_publish", "ok", f"wallets_published={len(wallet_list)}")
+                await log_event("pda_publish", "ok", f"wallets_published={len(wallet_list)}")
         else:
             results.append((step_name, False, msg))
             _log(f"  {msg}")
             _log("")
             _log("Pipeline stopped on first failure.")
             if step_name == "batch_publish":
-                log_event("pda_publish", "error", msg)
+                await log_event("pda_publish", "error", msg)
             break
         _log("")
 
@@ -388,7 +389,7 @@ def main() -> int:
             _log(_SEP)
             _log("RESULT: FAILED (Helius budget exceeded)")
             logger.warning("run_full_pipeline_helius_over_budget")
-            record_pipeline_run(
+            await record_pipeline_run_async(
                 run_start_ts, int(time.time()), False,
                 len(wallet_list), 1, len(results), "Helius budget exceeded",
             )
@@ -419,8 +420,8 @@ def main() -> int:
     if failed > 0:
         _log(f"RESULT: FAILED ({failed} step(s))")
         logger.warning("run_full_pipeline_failed", failed_steps=failed, steps=[r[0] for r in results])
-        log_event("pipeline", "error", f"failed_steps={failed}")
-        record_pipeline_run(
+        await log_event("pipeline", "error", f"failed_steps={failed}")
+        await record_pipeline_run_async(
             run_start_ts, int(time.time()), False,
             len(wallet_list), failed, len(results), "pipeline step failed",
         )
@@ -439,8 +440,8 @@ def main() -> int:
 
     _log("RESULT: PASS (all steps completed)")
     logger.info("run_full_pipeline_done", steps=len(results))
-    log_event("pipeline", "ok", f"steps_completed={len(results)}")
-    record_pipeline_run(
+    await log_event("pipeline", "ok", f"steps_completed={len(results)}")
+    await record_pipeline_run_async(
         run_start_ts, int(time.time()), True,
         len(wallet_list), 0, len(results), None,
     )
@@ -459,4 +460,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

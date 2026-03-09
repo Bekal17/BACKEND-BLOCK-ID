@@ -5,6 +5,8 @@ Converts trust_scores and wallet_reasons into badge info for frontend.
 """
 from __future__ import annotations
 
+import asyncio
+
 from backend_blockid.ai_engine.badge_rules import (
     RISK_LEVEL_TEXT,
     get_badge_for_score,
@@ -12,49 +14,49 @@ from backend_blockid.ai_engine.badge_rules import (
 from backend_blockid.ai_engine.reason_templates import get_template
 
 
-def generate_badge(wallet: str, *, _conn=None) -> dict:
+async def generate_badge_async(wallet: str, *, _conn=None) -> dict:
     """
     Load score/risk from trust_scores, pick badge, load top reasons.
     Does NOT recompute score. Uses trust_scores table only.
     """
-    from backend_blockid.database.connection import get_connection
+    from backend_blockid.database.pg_connection import get_conn, release_conn
 
-    conn = _conn or get_connection()
-    cur = conn.cursor()
+    own_conn = _conn is None
+    conn = _conn if _conn else await get_conn()
 
-    cur.execute(
-        "SELECT score, risk_level FROM trust_scores WHERE wallet = ? LIMIT 1",
-        (wallet.strip(),),
-    )
-    row = cur.fetchone()
-    if not row:
-        score = 50.0
-        risk = "1"
-    else:
-        score = round(float((row["score"] if hasattr(row, "keys") else row[0]) or 50), 2)
-        risk = str((row["risk_level"] if hasattr(row, "keys") else row[1]) or "1")
+    try:
+        row = await conn.fetchrow(
+            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1 LIMIT 1",
+            wallet.strip(),
+        )
+        if not row:
+            score = 50.0
+            risk = "1"
+        else:
+            score = round(float(row["score"] or 50), 2)
+            risk = str(row["risk_level"] or "1")
 
-    badge = get_badge_for_score(score)
-    risk_level_text = RISK_LEVEL_TEXT.get(risk, "Unknown")
+        badge = get_badge_for_score(score)
+        risk_level_text = RISK_LEVEL_TEXT.get(risk, "Unknown")
 
-    cur.execute(
-        """
-        SELECT reason_code, weight
-        FROM wallet_reasons
-        WHERE wallet = ? AND reason_code IS NOT NULL
-        ORDER BY ABS(weight) DESC
-        LIMIT 3
-        """,
-        (wallet.strip(),),
-    )
-    reason_rows = cur.fetchall()
-    if not _conn:
-        conn.close()
+        reason_rows = await conn.fetch(
+            """
+            SELECT reason_code, weight
+            FROM wallet_reasons
+            WHERE wallet = $1 AND reason_code IS NOT NULL
+            ORDER BY ABS(weight) DESC
+            LIMIT 3
+            """,
+            wallet.strip(),
+        )
+    finally:
+        if own_conn:
+            await release_conn(conn)
 
     top_reasons: list[str] = []
     reason_texts: list[str] = []
     for r in reason_rows:
-        code = (r["reason_code"] if hasattr(r, "keys") else r[0] or "").strip()
+        code = (r["reason_code"] or "").strip()
         if code and code != "NO_RISK_DETECTED":
             top_reasons.append(code)
             placeholders = {"distance": "1-3"} if code == "SCAM_DISTANCE" else {}
@@ -86,6 +88,13 @@ def generate_badge(wallet: str, *, _conn=None) -> dict:
         "message": message,
         "summary": summary,
     }
+
+
+def generate_badge(wallet: str, *, _conn=None) -> dict:
+    """Sync wrapper for generate_badge_async."""
+    return asyncio.get_event_loop().run_until_complete(
+        generate_badge_async(wallet, _conn=_conn)
+    )
 
 
 def generate_svg_badge(score: float, badge_name: str, color: str, size: str = "medium") -> str:

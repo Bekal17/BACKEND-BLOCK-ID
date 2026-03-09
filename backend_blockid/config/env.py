@@ -1,10 +1,13 @@
 """
 Environment variable loading and validation for BlockID.
 
+- DATABASE_URL: PostgreSQL connection string
 - SOLANA_NETWORK: devnet | mainnet (default: devnet)
 - SOLANA_RPC_URL: RPC endpoint (read from .env)
 - HELIUS_API_KEY: Helius API key (fallback for RPC URL when network=mainnet)
+- RPC_ENDPOINT: Alternative RPC endpoint config
 - ORACLE_PROGRAM_ID: Deployed trust oracle program ID
+- BLOCKID_TEST_MODE: Enable test mode (default: false)
 - Loads .env from project root when available.
 """
 
@@ -12,12 +15,26 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Project root: config is backend_blockid/config/, root is 2 levels up
 _CONFIG_DIR = Path(__file__).resolve().parent
 _BACKEND_DIR = _CONFIG_DIR.parent
 _ROOT = _BACKEND_DIR.parent
 _ENV_PATH = _ROOT / ".env"
+
+# Load environment variables at module import
+load_dotenv(_ENV_PATH)
+
+# Database configuration
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# API keys and endpoints
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+RPC_ENDPOINT = os.getenv("RPC_ENDPOINT")
+
+# Runtime configuration
+BLOCKID_TEST_MODE = os.getenv("BLOCKID_TEST_MODE", "false").lower() in ("1", "true", "yes")
 
 # Anchor.toml devnet program ID (programs.devnet.blockid_oracle)
 DEFAULT_DEVNET_PROGRAM_ID = "55iMY3uHQadPv4PXwqF1uYWdyie3wqKCwJHs97eWPE6B"

@@ -13,17 +13,13 @@ Future upgrades:
 """
 from __future__ import annotations
 
-import time
+import asyncio
 
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram, generate_latest
 
 from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# In-process metrics (updated by app code)
-# ---------------------------------------------------------------------------
 
 http_request_duration_seconds = Histogram(
     "blockid_http_request_duration_seconds",
@@ -32,10 +28,6 @@ http_request_duration_seconds = Histogram(
     buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
     registry=REGISTRY,
 )
-
-# ---------------------------------------------------------------------------
-# DB-sourced metrics (Gauges, updated on each /metrics scrape)
-# ---------------------------------------------------------------------------
 
 pipeline_runs_total = Gauge(
     "blockid_pipeline_runs_total",
@@ -69,56 +61,64 @@ review_queue_size = Gauge(
 )
 
 
-def _update_db_metrics() -> None:
+async def _table_exists(conn, table: str) -> bool:
+    row = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)",
+        table,
+    )
+    return bool(row)
+
+
+async def _update_db_metrics_async() -> None:
     """Query DB and update gauges. Call before generate_latest()."""
     try:
-        from backend_blockid.database.connection import get_connection
+        from backend_blockid.database.pg_connection import get_conn, release_conn
 
-        conn = get_connection()
-        cur = conn.cursor()
+        conn = await get_conn()
+        try:
+            if await _table_exists(conn, "pipeline_run_log"):
+                row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM pipeline_run_log")
+                pipeline_runs_total.set(row["cnt"] or 0)
+                row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM pipeline_run_log WHERE success = 0")
+                pipeline_failures_total.set(row["cnt"] or 0)
+                row = await conn.fetchrow("SELECT COALESCE(SUM(wallets_scanned), 0) as total FROM pipeline_run_log")
+                wallets_scanned_total.set(row["total"] or 0)
+            else:
+                pipeline_runs_total.set(0)
+                pipeline_failures_total.set(0)
+                wallets_scanned_total.set(0)
 
-        # pipeline_run_log
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pipeline_run_log'")
-        if cur.fetchone():
-            cur.execute("SELECT COUNT(*) FROM pipeline_run_log")
-            pipeline_runs_total.set(cur.fetchone()[0] or 0)
-            cur.execute("SELECT COUNT(*) FROM pipeline_run_log WHERE success = 0")
-            pipeline_failures_total.set(cur.fetchone()[0] or 0)
-            cur.execute("SELECT COALESCE(SUM(wallets_scanned), 0) FROM pipeline_run_log")
-            wallets_scanned_total.set(cur.fetchone()[0] or 0)
-        else:
-            pipeline_runs_total.set(0)
-            pipeline_failures_total.set(0)
-            wallets_scanned_total.set(0)
+            if await _table_exists(conn, "helius_usage"):
+                row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(request_count), 0) as calls, COALESCE(SUM(estimated_cost), 0) as cost FROM helius_usage"
+                )
+                helius_api_calls_total.set(int(row["calls"] or 0))
+                helius_cost_total.set(float(row["cost"] or 0.0))
+            else:
+                helius_api_calls_total.set(0)
+                helius_cost_total.set(0.0)
 
-        # helius_usage
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='helius_usage'")
-        if cur.fetchone():
-            cur.execute(
-                "SELECT COALESCE(SUM(request_count), 0), COALESCE(SUM(estimated_cost), 0) FROM helius_usage"
-            )
-            row = cur.fetchone()
-            helius_api_calls_total.set(int(row[0] or 0))
-            helius_cost_total.set(float(row[1] or 0.0))
-        else:
-            helius_api_calls_total.set(0)
-            helius_cost_total.set(0.0)
-
-        # review_queue
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='review_queue'")
-        if cur.fetchone():
-            cur.execute("SELECT COUNT(*) FROM review_queue WHERE status = 'pending'")
-            review_queue_size.set(cur.fetchone()[0] or 0)
-        else:
-            review_queue_size.set(0)
-
-        conn.close()
+            if await _table_exists(conn, "review_queue"):
+                row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM review_queue WHERE status = 'pending'")
+                review_queue_size.set(row["cnt"] or 0)
+            else:
+                review_queue_size.set(0)
+        finally:
+            await release_conn(conn)
     except Exception as e:
         logger.warning("metrics_db_update_error", error=str(e))
 
 
-# structlog event rule: the first positional arg to logger.info() IS the event name.
-# Do NOT pass event= as kwarg—that causes "got multiple values for argument 'event'" TypeError.
+def _update_db_metrics() -> None:
+    """Sync wrapper for _update_db_metrics_async."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_update_db_metrics_async())
+        else:
+            loop.run_until_complete(_update_db_metrics_async())
+    except Exception:
+        pass
 
 
 def record_pipeline_run(success: bool, wallets_scanned: int) -> None:

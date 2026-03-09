@@ -7,12 +7,13 @@ For UI (app.blockidscore.fun) and Phantom plugin overlay.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.config.badge_rules import BADGES
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 
 logger = get_logger(__name__)
 
@@ -26,29 +27,26 @@ def get_badge(score: float) -> str:
     return BADGES[-1][0]  # fallback
 
 
-def _ensure_wallet_badges_table(conn) -> None:
-    cur = conn.cursor()
-    cur.execute(
+async def _ensure_wallet_badges_table_async(conn) -> None:
+    await conn.execute(
         """
         CREATE TABLE IF NOT EXISTS wallet_badges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             wallet TEXT NOT NULL,
             badge TEXT NOT NULL,
-            timestamp INTEGER NOT NULL
+            timestamp BIGINT NOT NULL
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_wallet_badges_wallet ON wallet_badges(wallet)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_wallet_badges_timestamp ON wallet_badges(timestamp)")
-    conn.commit()
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_badges_wallet ON wallet_badges(wallet)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_badges_timestamp ON wallet_badges(timestamp)")
 
 
-def record_badge_if_changed(
+async def record_badge_if_changed_async(
     wallet: str,
     old_score: float | None,
     new_score: float,
     timestamp: int | None = None,
-    conn=None,
 ) -> bool:
     """
     Insert into wallet_badges when badge changes.
@@ -62,82 +60,97 @@ def record_badge_if_changed(
         return False
 
     ts = timestamp if timestamp is not None else int(time.time())
-    own_conn = conn is None
-    if own_conn:
-        conn = get_connection()
-
+    conn = await get_conn()
     try:
-        _ensure_wallet_badges_table(conn)
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO wallet_badges (wallet, badge, timestamp) VALUES (?, ?, ?)",
-            (wallet.strip(), new_badge, ts),
+        await _ensure_wallet_badges_table_async(conn)
+        await conn.execute(
+            "INSERT INTO wallet_badges (wallet, badge, timestamp) VALUES ($1, $2, $3)",
+            wallet.strip(), new_badge, ts,
         )
-        conn.commit()
-
         old_str = old_badge or "NONE"
-        msg = f"[badge_change] wallet={wallet[:16]}... old={old_str} new={new_badge}"
         logger.info("badge_change", wallet=wallet[:16], old=old_str, new=new_badge)
-        print(msg)
+        print(f"[badge_change] wallet={wallet[:16]}... old={old_str} new={new_badge}")
         return True
     finally:
-        if own_conn:
-            conn.close()
+        await release_conn(conn)
 
 
-def get_badge_timeline(wallet: str, conn=None) -> list[dict[str, Any]]:
+def record_badge_if_changed(
+    wallet: str,
+    old_score: float | None,
+    new_score: float,
+    timestamp: int | None = None,
+    conn=None,  # deprecated parameter, kept for compatibility
+) -> bool:
+    """Sync wrapper for record_badge_if_changed_async."""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(
+        record_badge_if_changed_async(wallet, old_score, new_score, timestamp)
+    )
+
+
+async def _table_exists_async(conn, table: str) -> bool:
+    row = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)",
+        table,
+    )
+    return bool(row)
+
+
+async def _get_table_columns_async(conn, table: str) -> set[str]:
+    rows = await conn.fetch(
+        "SELECT column_name FROM information_schema.columns WHERE table_name=$1",
+        table,
+    )
+    return {r["column_name"] for r in rows}
+
+
+async def get_badge_timeline_async(wallet: str) -> list[dict[str, Any]]:
     """
     Load wallet_history scores, compute badge per timestamp.
     Returns list of {"date": "YYYY-MM-DD HH:MM", "badge": "TRUSTED", "score": 65}.
     """
-    own_conn = conn is None
-    if own_conn:
-        conn = get_connection()
-
+    conn = await get_conn()
     try:
-        cur = conn.cursor()
-        # wallet_history may have score or (prior, posterior) from Bayesian inserts
-        cur.execute("PRAGMA table_info(wallet_history)")
-        cols = {row[1] for row in cur.fetchall()}
-        if "posterior" in cols:
-            cur.execute(
-                """
-                SELECT COALESCE(score, (1.0 - COALESCE(posterior, 0.5)) * 100) AS score, snapshot_at
-                FROM wallet_history
-                WHERE wallet = ?
-                ORDER BY snapshot_at ASC
-                """,
-                (wallet.strip(),),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT COALESCE(score, 50) AS score, snapshot_at
-                FROM wallet_history
-                WHERE wallet = ?
-                ORDER BY snapshot_at ASC
-                """,
-                (wallet.strip(),),
-            )
-        rows = cur.fetchall()
+        rows = []
+        if await _table_exists_async(conn, "wallet_history"):
+            cols = await _get_table_columns_async(conn, "wallet_history")
+            if "posterior" in cols:
+                rows = await conn.fetch(
+                    """
+                    SELECT COALESCE(score, (1.0 - COALESCE(posterior, 0.5)) * 100) AS score, snapshot_at
+                    FROM wallet_history
+                    WHERE wallet = $1
+                    ORDER BY snapshot_at ASC
+                    """,
+                    wallet.strip(),
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT COALESCE(score, 50) AS score, snapshot_at
+                    FROM wallet_history
+                    WHERE wallet = $1
+                    ORDER BY snapshot_at ASC
+                    """,
+                    wallet.strip(),
+                )
 
         timeline: list[dict[str, Any]] = []
         for r in rows:
-            score = float(r["score"] if hasattr(r, "keys") else r[0] or 50)
-            ts = int(r["snapshot_at"] if hasattr(r, "keys") else r[1] or 0)
+            score = float(r["score"] or 50)
+            ts = int(r["snapshot_at"] or 0)
             dt = datetime.utcfromtimestamp(ts)
             date_str = dt.strftime("%Y-%m-%d %H:%M")
             badge = get_badge(score)
             timeline.append({"date": date_str, "badge": badge, "score": int(round(score))})
 
-        # Append current from trust_scores if different from last history
-        cur.execute(
-            "SELECT score FROM trust_scores WHERE wallet = ? LIMIT 1",
-            (wallet.strip(),),
+        row = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1 LIMIT 1",
+            wallet.strip(),
         )
-        row = cur.fetchone()
         if row:
-            score = float(row["score"] if hasattr(row, "keys") else row[0] or 50)
+            score = float(row["score"] or 50)
             if not timeline or abs(timeline[-1]["score"] - score) > 0.5:
                 import time
                 ts = int(time.time())
@@ -150,5 +163,10 @@ def get_badge_timeline(wallet: str, conn=None) -> list[dict[str, Any]]:
 
         return timeline
     finally:
-        if own_conn:
-            conn.close()
+        await release_conn(conn)
+
+
+def get_badge_timeline(wallet: str, conn=None) -> list[dict[str, Any]]:
+    """Sync wrapper for get_badge_timeline_async."""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(get_badge_timeline_async(wallet))

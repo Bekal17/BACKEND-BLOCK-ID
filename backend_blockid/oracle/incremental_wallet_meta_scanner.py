@@ -38,8 +38,8 @@ def compute_wallet_age_days(first_tx_ts):
     return (now - tx_time).days
 
 
-def scan_wallet(wallet):
-    meta = get_wallet_meta(wallet)
+async def scan_wallet(wallet):
+    meta = await get_wallet_meta(wallet)
 
     txs = fetch_wallet_txs(wallet)
     if not txs:
@@ -63,22 +63,22 @@ def scan_wallet(wallet):
 
     wallet_age_days = compute_wallet_age_days(first_tx)
 
-    save_wallet_meta({
+    await save_wallet_meta({
         "wallet": wallet,
         "first_tx_ts": first_tx,
         "last_tx_ts": last_tx,
         "wallet_age_days": wallet_age_days,
         "last_scan_time": int(time.time()),
     })
-    update_scan_timestamp(wallet)
+    await update_scan_timestamp(wallet)
 
     print(f"[UPDATED] {wallet} age={wallet_age_days}")
 
 
-def scan_cluster(cluster_id):
-    wallets = get_cluster_wallets(cluster_id)
+async def scan_cluster(cluster_id):
+    wallets = await get_cluster_wallets(cluster_id)
 
     print(f"Scanning cluster {cluster_id}, wallets={len(wallets)}")
 
     for w in wallets:
-        scan_wallet(w)
+        await scan_wallet(w)

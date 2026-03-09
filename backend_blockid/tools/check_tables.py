@@ -1,6 +1,6 @@
-import sqlite3
+from backend_blockid.database.connection import get_connection
 
-conn = sqlite3.connect("backend_blockid/blockid.db")
+conn = get_connection()
 cur = conn.cursor()
 
 tables = cur.execute(

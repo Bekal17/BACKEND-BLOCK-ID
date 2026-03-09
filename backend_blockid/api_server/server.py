@@ -7,6 +7,7 @@ Reads from database only; does not compute scores. Config via env (DB_PATH).
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from solders.pubkey import Pubkey
@@ -39,13 +41,25 @@ from backend_blockid.api_server.helius_api import router as helius_router
 from backend_blockid.api_server.monitoring_api import router as monitoring_router
 from backend_blockid.api_server.transaction_api import router as transaction_router
 from backend_blockid.api_server.billing_api import router as billing_router
+from backend_blockid.api_server.api_key_api import router as api_key_router
+from backend_blockid.api_server.b2b_api import router as b2b_router
+from backend_blockid.api_server.usage_api import router as usage_router
+from backend_blockid.api_server.explorer_api import router as explorer_router
+from backend_blockid.api.explorer_identity import router as explorer_identity_router
+from backend_blockid.api.wallet_overview import router as wallet_overview_router
+from backend_blockid.api.wallet_dashboard import router as wallet_dashboard_router
+from backend_blockid.api.realtime_investigator import router as investigator_router
 from backend_blockid.api_server.billing_middleware import BillingMiddleware
+from backend_blockid.api_server.api_key_middleware import ApiKeyMiddleware, start_hourly_flush
 from backend_blockid.api_server.metrics import generate_metrics, http_request_duration_seconds
 from backend_blockid.api_server.trust_score import router as trust_router
-from backend_blockid.database import get_database, Database
+from backend_blockid.database.pg_connection import init_db
 from backend_blockid.blockid_logging import get_logger
+from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
 
 logger = get_logger(__name__)
+
+print("API USING DATABASE: PostgreSQL (asyncpg)")
 
 # Periodic runner: interval and shutdown join timeout (seconds)
 PERIODIC_INTERVAL_SEC = float(os.getenv("PERIODIC_INTERVAL_SEC", "30").strip() or "30")
@@ -55,14 +69,6 @@ PERIODIC_SHUTDOWN_JOIN_SEC = 15.0
 # -----------------------------------------------------------------------------
 # Config and dependency
 # -----------------------------------------------------------------------------
-
-def get_db_path() -> Path:
-    return Path(os.getenv("DB_PATH", "blockid.db").strip() or "blockid.db")
-
-
-def get_db() -> Database:
-    """Dependency: single Database instance per request (or app-scoped in production)."""
-    return get_database(get_db_path())
 
 
 # -----------------------------------------------------------------------------
@@ -126,43 +132,13 @@ TRUST_SCORE_SYNC_INTERVAL_SEC = float(os.getenv("TRUST_SCORE_SYNC_INTERVAL_SEC",
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start periodic runner and trust-score sync worker in background threads; signal stop on shutdown."""
+    """Initialize PostgreSQL pool; start background workers when available."""
+    await init_db()
+    asyncio.create_task(start_hourly_flush(app))
+
     from backend_blockid.config import ensure_production_safe
 
     ensure_production_safe()
-
-    from backend_blockid.agent_worker.runner import (
-        PeriodicRunnerConfig,
-        run_periodic_worker,
-        SHUTDOWN_JOIN_TIMEOUT_SEC,
-    )
-    from backend_blockid.api_server.trust_score_sync import run_trust_score_sync_loop
-
-    stop_event = threading.Event()
-    config = PeriodicRunnerConfig(
-        db_path=get_db_path(),
-        interval_sec=PERIODIC_INTERVAL_SEC,
-        max_wallets_per_tick=int(os.getenv("PERIODIC_MAX_WALLETS", "2000").strip() or "2000"),
-        max_tx_history_per_wallet=500,
-    )
-    thread = threading.Thread(
-        target=run_periodic_worker,
-        args=(config, stop_event),
-        name="periodic-runner",
-        daemon=True,
-    )
-    thread.start()
-    logger.info("api_periodic_runner_started", interval_sec=config.interval_sec)
-
-    sync_stop = threading.Event()
-    sync_thread = threading.Thread(
-        target=run_trust_score_sync_loop,
-        args=(sync_stop, get_db_path(), TRUST_SCORE_SYNC_INTERVAL_SEC),
-        name="trust-score-sync",
-        daemon=True,
-    )
-    sync_thread.start()
-    logger.info("trust_score_sync_started", interval_sec=TRUST_SCORE_SYNC_INTERVAL_SEC)
 
     try:
         wallet_tracking_init_db()
@@ -170,22 +146,6 @@ async def lifespan(app: FastAPI):
         logger.warning("wallet_tracking_init_skip", error=str(e))
 
     yield
-
-    stop_event.set()
-    sync_stop.set()
-    thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT_SEC)
-    sync_thread.join(timeout=15.0)
-    if thread.is_alive():
-        logger.warning(
-            "api_periodic_runner_shutdown_timeout",
-            timeout_sec=SHUTDOWN_JOIN_TIMEOUT_SEC,
-        )
-    else:
-        logger.info("api_periodic_runner_stopped")
-    if sync_thread.is_alive():
-        logger.warning("trust_score_sync_shutdown_timeout", timeout_sec=15.0)
-    else:
-        logger.info("trust_score_sync_stopped")
 
 
 # -----------------------------------------------------------------------------
@@ -199,6 +159,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://172.22.80.1:8080",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(ApiKeyMiddleware)
 app.add_middleware(BillingMiddleware)
 
 
@@ -241,7 +213,57 @@ app.include_router(helius_router)
 app.include_router(monitoring_router)
 app.include_router(transaction_router)
 app.include_router(billing_router)
+app.include_router(api_key_router, prefix="/api")
+app.include_router(b2b_router)
+app.include_router(usage_router, prefix="/api")
+app.include_router(explorer_identity_router)
+app.include_router(explorer_router)
+app.include_router(wallet_overview_router)
+app.include_router(wallet_dashboard_router)
+app.include_router(investigator_router)
 
+
+
+@app.post("/wallet/recalculate/{wallet}")
+async def recalculate_wallet(wallet: str) -> dict[str, Any]:
+    """
+    Trigger realtime wallet pipeline to recalculate trust score for a single wallet.
+    Powers the 'Recalculate Score' button in the BlockID dashboard.
+    """
+    wallet = wallet.strip()
+    if len(wallet) < 32 or len(wallet) > 44:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "wallet": wallet,
+                "message": "invalid wallet address",
+            },
+        )
+    try:
+        print(f"[API] Recalculating wallet score: {wallet}")
+        logger.info("recalculate_wallet_start", wallet=wallet[:16])
+        print("[RealtimePipeline] Starting wallet analysis")
+        trust_inserted = await run_realtime_wallet_pipeline(wallet)
+        print("[RealtimePipeline] Updating wallet score")
+        print("[RealtimePipeline] Completed")
+        logger.info("recalculate_wallet_done", wallet=wallet[:16], trust_inserted=trust_inserted)
+        return {
+            "status": "ok",
+            "wallet": wallet,
+            "message": "Wallet analysis completed",
+        }
+    except Exception as e:
+        print(f"[API] ERROR recalculating wallet {wallet}: {e}")
+        logger.exception("recalculate_wallet_error", wallet=wallet[:16], error=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "wallet": wallet,
+                "message": str(e),
+            },
+        )
 
 
 @app.post("/track-wallet", response_model=TrackWalletResponse)
@@ -266,29 +288,51 @@ def track_wallet(body: TrackWalletRequest):
     )
 
 
+@app.get("/wallet/{pubkey}/cluster")
+async def get_wallet_cluster(pubkey: str):
+    """
+    Returns cluster graph data for a wallet.
+    Read-only endpoint for Explorer 2.0.
+    """
+    pubkey = pubkey.strip()
+    if not pubkey:
+        raise HTTPException(status_code=400, detail="pubkey must be non-empty")
+    try:
+        Pubkey.from_string(pubkey)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Solana wallet address")
+
+    from backend_blockid.database.repositories import get_wallet_cluster_data
+
+    result = await get_wallet_cluster_data(pubkey)
+    return result
+
+
 @app.get("/wallet/{address}", response_model=WalletResponse)
-def get_wallet(address: str, db: Database = Depends(get_db)) -> WalletResponse:
+async def get_wallet(address: str) -> WalletResponse:
     """
     Return the latest trust score and anomaly flags for a wallet.
 
-    Reads from database only. Returns 404 if the wallet has no trust score record.
+    Reads from PostgreSQL. Returns 404 if the wallet has no trust score record.
     """
     address = address.strip()
     if not address:
         raise HTTPException(status_code=400, detail="address must be non-empty")
 
-    timeline = db.get_trust_score_timeline(address, limit=1)
-    if not timeline:
+    from backend_blockid.database.repositories import get_trust_score_latest
+
+    latest = await get_trust_score_latest(address)
+    if not latest:
         raise HTTPException(
             status_code=404,
             detail=f"No trust score found for wallet {address[:8]}...",
         )
-    latest = timeline[0]
     flags: list[dict[str, Any]] = []
     reason_codes: list[str] = []
-    if latest.metadata_json:
+    meta_json = latest.get("metadata_json")
+    if meta_json:
         try:
-            meta = json.loads(latest.metadata_json)
+            meta = json.loads(meta_json)
             flags = meta.get("anomaly_flags") or []
             rc = meta.get("reason_codes")
             if isinstance(rc, list):
@@ -311,24 +355,24 @@ def get_wallet(address: str, db: Database = Depends(get_db)) -> WalletResponse:
 
     return WalletResponse(
         address=address,
-        trust_score=round(latest.score, 2),
-        computed_at=latest.computed_at,
+        trust_score=round(float(latest.get("score", 0)), 2),
+        computed_at=int(latest.get("computed_at", 0)),
         flags=flags,
         reason_codes=reason_codes,
     )
 
 
-def _health_checks() -> dict:
+async def _health_checks() -> dict:
     """Run health checks for database, Helius, pipeline, API."""
     import os
     db_ok = False
     helius_ok = False
     last_pipeline_success: bool | None = None
     try:
-        from backend_blockid.database.connection import get_connection
-        conn = get_connection()
-        conn.cursor().execute("SELECT 1")
-        conn.close()
+        from backend_blockid.database.pg_connection import get_conn, release_conn
+        conn = await get_conn()
+        await conn.fetchval("SELECT 1")
+        await release_conn(conn)
         db_ok = True
     except Exception:
         pass
@@ -360,9 +404,9 @@ def _health_checks() -> dict:
 
 
 @app.get("/health")
-def health() -> JSONResponse:
+async def health() -> JSONResponse:
     """Liveness/readiness probe: database, Helius, last pipeline, API status."""
-    data = _health_checks()
+    data = await _health_checks()
     status = 200 if data.get("database_ok", False) else 503
     return JSONResponse(status_code=status, content=data)
 

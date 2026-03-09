@@ -4,12 +4,12 @@ BlockID Reason Aggregator — minimal safe version.
 Collect wallet reasons and write reason_codes.csv.
 """
 
+import asyncio
 from pathlib import Path
 import csv
-import sqlite3
 
 from backend_blockid.blockid_logging import get_logger
-from backend_blockid.database.config import DB_PATH
+from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.ml.reason_codes import get_reason_weights
 from backend_blockid.tools.time_utils import days_since
 
@@ -19,56 +19,67 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 OUTPUT = DATA_DIR / "reason_codes.csv"
 
 
-def main():
+async def main_async():
     logger.info("reason_aggregator_start")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     reasons_by_wallet: dict[str, list[dict]] = {}
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    conn = await get_conn()
     try:
-        cur.execute("ALTER TABLE wallet_reasons ADD COLUMN created_at INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    cur.execute(
-        """
-        SELECT wallet, reason_code, confidence_score, tx_hash, created_at
-        FROM wallet_reasons
-        WHERE wallet IS NOT NULL AND reason_code IS NOT NULL
-        """
-    )
-    for row in cur.fetchall():
-        wallet = row[0]
-        reason_code = row[1]
-        confidence_score = row[2]
-        tx_hash = row[3]
-        created_at = row[4] if len(row) > 4 else None
-        days_old_val = days_since(created_at) if created_at is not None else 0
+        try:
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                        WHERE table_name='wallet_reasons' AND column_name='created_at') THEN
+                        ALTER TABLE wallet_reasons ADD COLUMN created_at INTEGER;
+                    END IF;
+                END $$;
+            """)
+        except Exception:
+            pass
 
-        if wallet not in reasons_by_wallet:
-            reasons_by_wallet[wallet] = []
-        reasons_by_wallet[wallet].append(
-            {
-                "code": reason_code,
-                "confidence": confidence_score,
-                "tx_hash": tx_hash,
-                "days_old": days_old_val,
-            }
+        rows = await conn.fetch(
+            """
+            SELECT wallet, reason_code, confidence_score, tx_hash, created_at
+            FROM wallet_reasons
+            WHERE wallet IS NOT NULL AND reason_code IS NOT NULL
+            """
         )
+        for row in rows:
+            wallet = row["wallet"]
+            reason_code = row["reason_code"]
+            confidence_score = row["confidence_score"]
+            tx_hash = row["tx_hash"]
+            created_at = row["created_at"]
+            days_old_val = days_since(created_at) if created_at is not None else 0
 
-    cur.execute(
-        """
-        SELECT wallet
-        FROM trust_scores
-        WHERE wallet IS NOT NULL
-        """
-    )
-    for (wallet,) in cur.fetchall():
-        if wallet not in reasons_by_wallet:
-            reasons_by_wallet[wallet] = []
-    conn.close()
+            if wallet not in reasons_by_wallet:
+                reasons_by_wallet[wallet] = []
+            reasons_by_wallet[wallet].append(
+                {
+                    "code": reason_code,
+                    "confidence": confidence_score,
+                    "tx_hash": tx_hash,
+                    "days_old": days_old_val,
+                }
+            )
+
+        trust_rows = await conn.fetch(
+            """
+            SELECT wallet
+            FROM trust_scores
+            WHERE wallet IS NOT NULL
+            """
+        )
+        for row in trust_rows:
+            wallet = row["wallet"]
+            if wallet not in reasons_by_wallet:
+                reasons_by_wallet[wallet] = []
+    finally:
+        await release_conn(conn)
 
     for wallet, reasons in reasons_by_wallet.items():
         has_negative = any(get_reason_weights().get(r.get("code"), 0) < 0 for r in reasons)
@@ -97,6 +108,10 @@ def main():
 
     logger.info("reason_aggregator_done", output=str(OUTPUT))
     return 0
+
+
+def main():
+    return asyncio.run(main_async())
 
 
 if __name__ == "__main__":

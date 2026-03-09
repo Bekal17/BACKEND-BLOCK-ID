@@ -13,6 +13,7 @@ Config: loads backend_blockid/models/propagation_config.json when present.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import json
 import math
@@ -28,7 +29,7 @@ if __name__ == "__main__":
 
 import networkx as nx
 
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "models" / "propagation_config.json"
@@ -63,20 +64,33 @@ def _load_config() -> dict:
     return cfg
 
 
-def _load_scam_wallets(conn) -> set[str]:
+async def _table_exists_async(conn, table: str) -> bool:
+    row = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)",
+        table,
+    )
+    return bool(row)
+
+
+async def _get_table_columns_async(conn, table: str) -> set[str]:
+    rows = await conn.fetch(
+        "SELECT column_name FROM information_schema.columns WHERE table_name=$1",
+        table,
+    )
+    return {r["column_name"] for r in rows}
+
+
+async def _load_scam_wallets_async(conn) -> set[str]:
     scams: set[str] = set()
-    cur = conn.cursor()
     try:
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scam_wallets'")
-        if cur.fetchone():
-            cur.execute("SELECT wallet FROM scam_wallets")
-            for r in cur.fetchall():
-                w = (r["wallet"] if hasattr(r, "keys") else r[0]).strip() if r else ""
+        if await _table_exists_async(conn, "scam_wallets"):
+            rows = await conn.fetch("SELECT wallet FROM scam_wallets")
+            for r in rows:
+                w = (r["wallet"] or "").strip()
                 if w:
                     scams.add(w)
     except Exception:
         pass
-    cur.close()
 
     if not scams and SCAM_WALLETS_CSV.exists():
         try:
@@ -91,44 +105,42 @@ def _load_scam_wallets(conn) -> set[str]:
     return scams
 
 
-def _load_transactions(conn, days_back: int, min_amount: float):
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(transactions)")
-    cols = {row[1] for row in cur.fetchall()}
+async def _load_transactions_async(conn, days_back: int, min_amount: float) -> list:
+    if not await _table_exists_async(conn, "transactions"):
+        return []
+
+    cols = await _get_table_columns_async(conn, "transactions")
     cutoff = int(time.time()) - (days_back * 86400)
 
     if "from_wallet" in cols and "to_wallet" in cols and "timestamp" in cols:
-        cur.execute(
+        rows = await conn.fetch(
             """
             SELECT from_wallet, to_wallet, amount, timestamp
             FROM transactions
-            WHERE timestamp >= ? AND from_wallet IS NOT NULL AND to_wallet IS NOT NULL
+            WHERE timestamp >= $1 AND from_wallet IS NOT NULL AND to_wallet IS NOT NULL
             """,
-            (cutoff,),
+            cutoff,
         )
     else:
-        cur.execute(
+        rows = await conn.fetch(
             """
             SELECT sender AS from_wallet, receiver AS to_wallet,
                    amount_lamports / 1e9 AS amount, timestamp
             FROM transactions
-            WHERE timestamp >= ? AND sender IS NOT NULL AND receiver IS NOT NULL
+            WHERE timestamp >= $1 AND sender IS NOT NULL AND receiver IS NOT NULL
             """,
-            (cutoff,),
+            cutoff,
         )
-
-    rows = cur.fetchall()
-    cur.close()
     return rows
 
 
 def _build_graph(rows, min_amount: float) -> nx.Graph:
     G = nx.Graph()
     for r in rows:
-        frm = (r["from_wallet"] if hasattr(r, "keys") else r[0]).strip()
-        to = (r["to_wallet"] if hasattr(r, "keys") else r[1]).strip()
-        amt = float(r["amount"] if hasattr(r, "keys") else r[2] or 0)
-        ts = int(r["timestamp"] or 0) if hasattr(r, "keys") else int(r[3] or 0)
+        frm = (r["from_wallet"] or "").strip()
+        to = (r["to_wallet"] or "").strip()
+        amt = float(r["amount"] or 0)
+        ts = int(r["timestamp"] or 0)
         if not frm or not to or frm == to or amt < min_amount:
             continue
         if G.has_edge(frm, to):
@@ -188,8 +200,7 @@ def _bfs_penalties(
     return total_penalty
 
 
-def run_propagation_simulation(
-    conn,
+async def run_propagation_simulation_async(
     days_back: int = 30,
     config: dict | None = None,
 ) -> dict[str, float]:
@@ -198,10 +209,15 @@ def run_propagation_simulation(
     Does NOT write to DB. Used by optimize_propagation_weights.
     """
     cfg = config or _load_config()
-    scam_wallets = _load_scam_wallets(conn)
-    if not scam_wallets:
-        return {}
-    rows = _load_transactions(conn, days_back, MIN_AMOUNT_SOL)
+    conn = await get_conn()
+    try:
+        scam_wallets = await _load_scam_wallets_async(conn)
+        if not scam_wallets:
+            return {}
+        rows = await _load_transactions_async(conn, days_back, MIN_AMOUNT_SOL)
+    finally:
+        await release_conn(conn)
+
     G = _build_graph(rows, MIN_AMOUNT_SOL)
     dist_pen = cfg.get("distance_penalty") or {}
     dist_pen = {int(k): int(v) for k, v in dist_pen.items()} if dist_pen else None
@@ -216,8 +232,17 @@ def run_propagation_simulation(
     return total_penalty
 
 
-def update_propagation_for_wallets(
-    conn,
+def run_propagation_simulation(
+    conn=None,  # deprecated parameter
+    days_back: int = 30,
+    config: dict | None = None,
+) -> dict[str, float]:
+    """Sync wrapper for run_propagation_simulation_async."""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(run_propagation_simulation_async(days_back, config))
+
+
+async def update_propagation_for_wallets_async(
     target_wallets: set[str],
     days_back: int = 30,
     config: dict | None = None,
@@ -227,79 +252,110 @@ def update_propagation_for_wallets(
     Returns {wallet: penalty} for wallets that were updated.
     Used by realtime risk engine.
     """
-    total_penalty = run_propagation_simulation(conn, days_back, config)
+    total_penalty = await run_propagation_simulation_async(days_back, config)
     affected = {w for w in target_wallets if w in total_penalty and total_penalty[w] != 0}
     if not affected:
         return {}
 
-    cfg = config or _load_config()
-    cur = conn.cursor()
-    now_ts = int(time.time())
+    conn = await get_conn()
+    try:
+        now_ts = int(time.time())
 
-    for col, typ in [
-        ("confidence_score", "REAL"),
-        ("tx_hash", "TEXT"),
-        ("tx_link", "TEXT"),
-        ("created_at", "INTEGER"),
-    ]:
-        try:
-            cur.execute(f"ALTER TABLE wallet_reasons ADD COLUMN {col} {typ}")
-        except Exception:
-            pass
+        for col, typ in [
+            ("confidence_score", "DOUBLE PRECISION"),
+            ("tx_hash", "TEXT"),
+            ("tx_link", "TEXT"),
+            ("created_at", "BIGINT"),
+        ]:
+            try:
+                await conn.execute(f"""
+                    DO $$ BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name='wallet_reasons' AND column_name='{col}'
+                        ) THEN
+                            ALTER TABLE wallet_reasons ADD COLUMN {col} {typ};
+                        END IF;
+                    END $$;
+                """)
+            except Exception:
+                pass
 
-    for wallet in affected:
-        pen = total_penalty[wallet]
-        try:
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO wallet_reasons
-                (wallet, reason_code, weight, confidence_score, tx_hash, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (wallet, "SCAM_CLUSTER_MEMBER", int(round(pen)), min(1.0, 0.5), None, now_ts),
-            )
-        except Exception as e:
-            print(f"[propagation] WARNING: wallet_reasons insert failed for {wallet[:8]}...: {e}")
-
-    cur.execute("SELECT wallet, score FROM trust_scores")
-    existing = {r["wallet"]: float(r["score"] or 50) for r in cur.fetchall()} if cur.description else {}
-    for wallet in affected:
-        base = existing.get(wallet, 50.0)
-        final = max(0.0, base + total_penalty[wallet])
-        try:
-            cur.execute(
-                "UPDATE trust_scores SET score = ?, updated_at = ? WHERE wallet = ?",
-                (final, now_ts, wallet),
-            )
-            if cur.rowcount == 0:
-                cur.execute(
-                    "INSERT INTO trust_scores (wallet, score, updated_at) VALUES (?, ?, ?)",
-                    (wallet, final, now_ts),
+        for wallet in affected:
+            pen = total_penalty[wallet]
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO wallet_reasons
+                    (wallet, reason_code, weight, confidence_score, tx_hash, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (wallet, reason_code) DO UPDATE SET
+                        weight = $3,
+                        confidence_score = $4,
+                        created_at = $6
+                    """,
+                    wallet, "SCAM_CLUSTER_MEMBER", int(round(pen)), min(1.0, 0.5), None, now_ts,
                 )
-        except Exception as e:
-            print(f"[propagation] WARNING: trust_scores update failed for {wallet[:8]}...: {e}")
+            except Exception as e:
+                print(f"[propagation] WARNING: wallet_reasons insert failed for {wallet[:8]}...: {e}")
 
-    conn.commit()
+        rows = await conn.fetch("SELECT wallet, score FROM trust_scores")
+        existing = {r["wallet"]: float(r["score"] or 50) for r in rows}
+        for wallet in affected:
+            base = existing.get(wallet, 50.0)
+            final = max(0.0, base + total_penalty[wallet])
+            try:
+                result = await conn.execute(
+                    "UPDATE trust_scores SET score = $1, updated_at = $2 WHERE wallet = $3",
+                    final, now_ts, wallet,
+                )
+                if "UPDATE 0" in result:
+                    await conn.execute(
+                        "INSERT INTO trust_scores (wallet, score, updated_at) VALUES ($1, $2, $3)",
+                        wallet, final, now_ts,
+                    )
+            except Exception as e:
+                print(f"[propagation] WARNING: trust_scores update failed for {wallet[:8]}...: {e}")
+    finally:
+        await release_conn(conn)
+
     return {w: total_penalty[w] for w in affected}
 
 
-def main() -> int:
+def update_propagation_for_wallets(
+    conn=None,  # deprecated parameter
+    target_wallets: set[str] | None = None,
+    days_back: int = 30,
+    config: dict | None = None,
+) -> dict[str, float]:
+    """Sync wrapper for update_propagation_for_wallets_async."""
+    if target_wallets is None:
+        target_wallets = set()
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(update_propagation_for_wallets_async(target_wallets, days_back, config))
+
+
+async def main_async() -> int:
     ap = argparse.ArgumentParser(description="Scam propagation scoring engine.")
     ap.add_argument("--days-back", type=int, default=30, help="Include txs within last N days")
     ap.add_argument("--max-depth", type=int, default=None, help="BFS max depth (default from config)")
     args = ap.parse_args()
 
-    conn = get_connection()
     cfg = _load_config()
     max_depth = args.max_depth if args.max_depth is not None else cfg["max_depth"]
+    cfg["max_depth"] = max_depth
 
-    scam_wallets = _load_scam_wallets(conn)
-    if not scam_wallets:
-        print("[propagation] No scam wallets (scam_wallets table or scam_wallets.csv)")
-        conn.close()
-        return 0
+    conn = await get_conn()
+    try:
+        scam_wallets = await _load_scam_wallets_async(conn)
+        if not scam_wallets:
+            print("[propagation] No scam wallets (scam_wallets table or scam_wallets.csv)")
+            return 0
 
-    rows = _load_transactions(conn, args.days_back, MIN_AMOUNT_SOL)
+        rows = await _load_transactions_async(conn, args.days_back, MIN_AMOUNT_SOL)
+    finally:
+        await release_conn(conn)
+
     G = _build_graph(rows, MIN_AMOUNT_SOL)
 
     total_penalty = _bfs_penalties(
@@ -313,65 +369,79 @@ def main() -> int:
     affected = {w for w in total_penalty if total_penalty[w] != 0}
     if not affected:
         print("[propagation] scam_wallets=", len(scam_wallets), " affected_wallets=0")
-        conn.close()
         return 0
 
     penalties_list = [total_penalty[w] for w in affected]
     avg_penalty = sum(penalties_list) / len(penalties_list)
 
-    cur = conn.cursor()
-    now_ts = int(time.time())
+    conn = await get_conn()
+    try:
+        now_ts = int(time.time())
 
-    # Ensure wallet_reasons has optional columns
-    for col, typ in [
-        ("confidence_score", "REAL"),
-        ("tx_hash", "TEXT"),
-        ("tx_link", "TEXT"),
-        ("created_at", "INTEGER"),
-    ]:
-        try:
-            cur.execute(f"ALTER TABLE wallet_reasons ADD COLUMN {col} {typ}")
-        except Exception:
-            pass
+        for col, typ in [
+            ("confidence_score", "DOUBLE PRECISION"),
+            ("tx_hash", "TEXT"),
+            ("tx_link", "TEXT"),
+            ("created_at", "BIGINT"),
+        ]:
+            try:
+                await conn.execute(f"""
+                    DO $$ BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name='wallet_reasons' AND column_name='{col}'
+                        ) THEN
+                            ALTER TABLE wallet_reasons ADD COLUMN {col} {typ};
+                        END IF;
+                    END $$;
+                """)
+            except Exception:
+                pass
 
-    for wallet in affected:
-        pen = total_penalty[wallet]
-        interaction_count = G.degree(wallet) if wallet in G else 0
-        confidence = min(1.0, interaction_count / 10.0)
-        try:
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO wallet_reasons
-                (wallet, reason_code, weight, confidence_score, tx_hash, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (wallet, "SCAM_CLUSTER_MEMBER", int(round(pen)), confidence, None, now_ts),
-            )
-        except Exception as e:
-            print(f"[propagation] WARNING: wallet_reasons insert failed for {wallet[:8]}...: {e}")
-            continue
+        for wallet in affected:
+            pen = total_penalty[wallet]
+            interaction_count = G.degree(wallet) if wallet in G else 0
+            confidence = min(1.0, interaction_count / 10.0)
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO wallet_reasons
+                    (wallet, reason_code, weight, confidence_score, tx_hash, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (wallet, reason_code) DO UPDATE SET
+                        weight = $3,
+                        confidence_score = $4,
+                        created_at = $6
+                    """,
+                    wallet, "SCAM_CLUSTER_MEMBER", int(round(pen)), confidence, None, now_ts,
+                )
+            except Exception as e:
+                print(f"[propagation] WARNING: wallet_reasons insert failed for {wallet[:8]}...: {e}")
+                continue
 
-    # Update trust_scores
-    cur.execute("SELECT wallet, score FROM trust_scores")
-    existing = {r["wallet"]: float(r["score"] or 50) for r in cur.fetchall()}
-    for wallet in affected:
-        base = existing.get(wallet, 50.0)
-        final = max(0.0, base + total_penalty[wallet])
-        try:
-            cur.execute(
-                "UPDATE trust_scores SET score = ?, updated_at = ? WHERE wallet = ?",
-                (final, now_ts, wallet),
-            )
-        except Exception as e:
-            print(f"[propagation] WARNING: trust_scores update failed for {wallet[:8]}...: {e}")
-
-    conn.commit()
-    conn.close()
+        rows = await conn.fetch("SELECT wallet, score FROM trust_scores")
+        existing = {r["wallet"]: float(r["score"] or 50) for r in rows}
+        for wallet in affected:
+            base = existing.get(wallet, 50.0)
+            final = max(0.0, base + total_penalty[wallet])
+            try:
+                await conn.execute(
+                    "UPDATE trust_scores SET score = $1, updated_at = $2 WHERE wallet = $3",
+                    final, now_ts, wallet,
+                )
+            except Exception as e:
+                print(f"[propagation] WARNING: trust_scores update failed for {wallet[:8]}...: {e}")
+    finally:
+        await release_conn(conn)
 
     print(f"[propagation] scam_wallets={len(scam_wallets)}")
     print(f"[propagation] affected_wallets={len(affected)}")
     print(f"[propagation] avg_penalty={avg_penalty:.1f}")
     return 0
+
+
+def main() -> int:
+    return asyncio.run(main_async())
 
 
 if __name__ == "__main__":

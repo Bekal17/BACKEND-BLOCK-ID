@@ -25,7 +25,7 @@ class UpdateWalletResponse(BaseModel):
 
 
 @router.post("/update_wallet/{wallet}", response_model=UpdateWalletResponse)
-def post_update_wallet(wallet: str) -> UpdateWalletResponse:
+async def post_update_wallet(wallet: str) -> UpdateWalletResponse:
     """
     Manual trigger: update risk score for a wallet.
     Rate-limited to once per 5 minutes per wallet.
@@ -39,7 +39,9 @@ def post_update_wallet(wallet: str) -> UpdateWalletResponse:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid Solana wallet address")
 
-    result = update_wallet_risk(wallet)
+    from backend_blockid.oracle.realtime_risk_engine import update_wallet_risk
+
+    result = await update_wallet_risk(wallet)
     if result is None:
         return UpdateWalletResponse(wallet=wallet, updated=False)
     return UpdateWalletResponse(

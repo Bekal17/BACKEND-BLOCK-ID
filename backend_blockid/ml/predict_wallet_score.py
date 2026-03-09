@@ -12,10 +12,10 @@ Reads wallets from cluster_features.csv (valid Solana addresses only); loads rea
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import os
-import sqlite3
 import time
 from pathlib import Path
 
@@ -26,7 +26,7 @@ from backend_blockid.blockid_logging import get_logger
 from backend_blockid.ml.reason_codes import get_reason_weights
 from backend_blockid.ai_engine.reason_summary import build_summary
 from backend_blockid.utils.wallet_utils import is_valid_wallet
-from backend_blockid.database.config import DB_PATH
+from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.database.repositories import save_wallet_scores_from_csv, update_wallet_score, save_wallet_risk_probability
 from backend_blockid.ml.bayesian_risk import (
     get_prior,
@@ -288,7 +288,68 @@ def _load_wallet_meta() -> dict[str, dict]:
     return out
 
 
-def main() -> int:
+async def predict_wallet_score_for_wallet(wallet: str) -> float:
+    """
+    Score a single wallet using the ML model and update trust_scores.
+    Does NOT read cluster_features.csv. For realtime use.
+    """
+    logger.info("predict_wallet_score_realtime_start", wallet=wallet)
+
+    if not MODEL_PATH.exists():
+        logger.warning("predict_wallet_score_realtime_model_missing", path=str(MODEL_PATH))
+        return 50.0  # Neutral fallback
+
+    model = joblib.load(MODEL_PATH)
+    scam_wallets = _load_scam_wallets(SCAM_WALLETS_CSV)
+
+    tokens = _get_token_history_mock(wallet)
+
+    if not tokens:
+        ml_score = 50.0
+        scam_prob = 0.5
+    else:
+        X = _feature_vector_from_tokens(tokens)
+        if wallet in scam_wallets:
+            scam_prob = 1.0
+        else:
+            scam_prob = float(model.predict_proba(X)[0, 1])
+        risk_score = round(scam_prob * 100)
+        ml_score = float(100 - risk_score)
+
+    # Guard: mock token always returns 0 risk for any wallet.
+    # New wallets with no real data must not receive inflated scores.
+    if scam_prob < 0.05 and len(tokens) <= 1:
+        ml_score = 50.0
+        logger.info("realtime_base_score_normalized_to_50", wallet=wallet)
+
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            """
+            UPDATE trust_scores
+            SET ml_score = $2
+            WHERE wallet = $1
+            """,
+            wallet,
+            ml_score,
+        )
+    finally:
+        await release_conn(conn)
+
+    logger.info(
+        "predict_wallet_score_realtime_done",
+        wallet=wallet,
+        ml_score=ml_score,
+    )
+
+    return ml_score
+
+
+def predict_wallet_score_batch() -> int:
+    """
+    Batch scoring used by run_full_pipeline.
+    Loads wallets from cluster_features.csv.
+    """
     print("[predict_wallet_score] loading wallets from", CLUSTER_FEATURES_CSV)
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -315,27 +376,56 @@ def main() -> int:
 
     rows: list[dict] = []
     for wallet in wallets:
+        logger.info("predict_wallet_score_processing", wallet=wallet)
         wallet_meta = wallet_meta_map.get(wallet, {})
         if wallet_meta.get("is_test_wallet"):
             continue
         if not is_valid_wallet(wallet):
             print("[predict_wallet_score] skip invalid wallet:", wallet)
             continue
-        logger.debug("predict_wallet_score_processing", wallet=wallet[:16] + "...")
         tokens = _get_token_history_mock(wallet)
-        X = _feature_vector_from_tokens(tokens)
 
-        # Known scam creator → override probability to 1.0
-        if wallet in scam_wallets:
-            scam_prob = 1.0
+        # If wallet has no token history, treat as neutral wallet
+        if not tokens:
+            logger.debug("predict_wallet_score_empty_wallet", wallet=wallet[:16] + "...")
+            scam_prob = 0.5
+            risk_score = 50
+            ml_score = 50
         else:
-            scam_prob = float(model.predict_proba(X)[0, 1])
+            X = _feature_vector_from_tokens(tokens)
 
-        risk_score = round(scam_prob * 100)
-        # ml_score: trust score 0–100 (higher = safer)
-        ml_score = 100 - risk_score
+            # Known scam creator override
+            if wallet in scam_wallets:
+                scam_prob = 1.0
+            else:
+                scam_prob = float(model.predict_proba(X)[0, 1])
+
+            risk_score = round(scam_prob * 100)
+            ml_score = 100 - risk_score
+
+        logger.debug(
+            "predict_wallet_score_result",
+            wallet=wallet[:16] + "...",
+            scam_prob=scam_prob,
+            ml_score=ml_score,
+        )
+
+        # ---------------------------------------------------------
+        # Guard: brand new wallets should not be scored by ML
+        # ---------------------------------------------------------
+        wallet_age_days = int(wallet_meta.get("wallet_age_days", 0) or 0)
+        cluster_size, flow_amount, tx_count = dynamic_features.get(wallet, (0, 0, 0))
+
+        if wallet_age_days == 0 and tx_count == 0:
+            ml_score = 50
+            logger.info(
+                "ml_score_override_new_wallet",
+                wallet=wallet,
+                wallet_age_days=wallet_age_days,
+                tx_count=tx_count,
+            )
         # If model uses mock data or low evidence, normalize base score
-        if scam_prob < 0.05 and len(tokens) <= 1:
+        elif scam_prob < 0.05 and len(tokens) <= 1:
             ml_score = 50
             logger.info("base_score_normalized_to_50", wallet=wallet)
         penalty = -penalty_map.get(wallet, 0)  # negative so base + penalty reduces score
@@ -415,7 +505,20 @@ def main() -> int:
         if prior is None and TEST_MODE:
             prior = 0.05
         prior = prior if prior is not None else 0.05
-        posterior = update_scam_probability(prior, reasons)
+        wallet_age_days = int(wallet_meta.get("wallet_age_days", 0) or 0)
+        cluster_size, flow_amount, tx_count = dynamic_features.get(wallet, (0, 0, 0))
+
+        # Guard: do NOT apply Bayesian risk to brand new wallets
+        if wallet_age_days == 0 and tx_count == 0:
+            posterior = 0.0
+            logger.info(
+                "bayesian_skip_new_wallet",
+                wallet=wallet,
+                wallet_age_days=wallet_age_days,
+                tx_count=tx_count,
+            )
+        else:
+            posterior = update_scam_probability(prior, reasons)
         reasons_for_log = [
             {
                 "code": r.get("code"),
@@ -453,8 +556,6 @@ def main() -> int:
         total_penalty = min(adjusted_base * risk_ratio, max_penalty)
         penalty_amt = -total_penalty  # negative so base + penalty reduces score
         final_score = int(adjusted_base + penalty_amt)
-
-        cluster_size, flow_amount, tx_count = dynamic_features.get(wallet, (0, 0, 0))
 
         if TEST_MODE and wallet.startswith("TEST_"):
             reasons = [
@@ -611,51 +712,43 @@ def main() -> int:
         logger.exception("predict_wallet_score_save_db_error", path=str(WALLET_SCORES_CSV), error=str(e))
         print("[predict_wallet_score] ERROR saving to DB:", e)
 
+    async def _fill_missing_scores():
+        conn = await get_conn()
+        try:
+            reason_rows = await conn.fetch("SELECT DISTINCT wallet FROM wallet_reasons WHERE wallet IS NOT NULL")
+            reason_wallets = {r["wallet"] for r in reason_rows}
+            score_rows = await conn.fetch("SELECT wallet FROM trust_scores WHERE wallet IS NOT NULL")
+            scored_wallets = {r["wallet"] for r in score_rows}
+            missing_wallets = sorted(reason_wallets - scored_wallets)
+            inserted_missing = 0
+            for wallet in missing_wallets:
+                computed_at = int(time.time())
+                await conn.execute(
+                    "INSERT INTO trust_scores(wallet, score, computed_at) VALUES ($1, $2, $3) ON CONFLICT (wallet) DO NOTHING",
+                    wallet, 50, computed_at,
+                )
+                inserted_missing += 1
+            if inserted_missing:
+                logger.info(
+                    "predict_wallet_score_missing_trust_scores_added",
+                    count=inserted_missing,
+                )
+        finally:
+            await release_conn(conn)
+
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT wallet FROM wallet_reasons WHERE wallet IS NOT NULL")
-        reason_wallets = {row[0] for row in cur.fetchall()}
-        cur.execute("SELECT wallet FROM trust_scores WHERE wallet IS NOT NULL")
-        scored_wallets = {row[0] for row in cur.fetchall()}
-        missing_wallets = sorted(reason_wallets - scored_wallets)
-        inserted_missing = 0
-        for wallet in missing_wallets:
-            computed_at = int(time.time())
-            cur.execute(
-                "INSERT OR IGNORE INTO trust_scores(wallet, score, computed_at) VALUES (?, ?, ?)",
-                (wallet, 50, computed_at),
-            )
-            inserted_missing += 1
-        conn.commit()
-        conn.close()
-        if inserted_missing:
-            logger.info(
-                "predict_wallet_score_missing_trust_scores_added",
-                count=inserted_missing,
-            )
+        asyncio.run(_fill_missing_scores())
     except Exception as e:
         logger.exception("predict_wallet_score_missing_scores_error", error=str(e))
 
     print("[predict_wallet_score] done")
     return 0
-    print("DEBUG WALLET:", wallet)
-    print("DEBUG REASON_CODES:", reason_codes)
-    print("DEBUG REASONS:", reasons)
-    print("DEBUG PENALTY:", penalty)
-    print("DEBUG WEIGHTS:", [r["weight"] for r in reasons])
-    print("DEBUG BASE_SCORE:", base_score)
-    print("DEBUG POSITIVE_SUM:", positive_sum)
-    print("DEBUG NEGATIVE_SUM:", negative_sum)
-    print("DEBUG FINAL_SCORE:", final_score)
-    print("DEBUG RISK_LEVEL:", risk_level)
-    print("DEBUG SUMMARY:", summary)
-    print("DEBUG ROWS:", rows)
-    print("DEBUG WALLET_SCORES_CSV:", WALLET_SCORES_CSV)
-    print("DEBUG DB_PATH:", DB_PATH)
-    #after scoring wallets
-    #insert missing wallets with score 100
 
-    
+
+def main() -> int:
+    """Entrypoint for run_full_pipeline. Invokes batch scoring."""
+    return predict_wallet_score_batch()
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

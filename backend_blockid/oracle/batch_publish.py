@@ -10,11 +10,11 @@ except Exception:
     pass
 
 from backend_blockid.database import get_database
-from backend_blockid.database.connection import get_connection
-from backend_blockid.ml.score_decay import run_decay_for_all_wallets
+from backend_blockid.database.pg_connection import get_conn, release_conn
+from backend_blockid.ml.score_decay import run_decay_for_all_wallets_async
 from backend_blockid.oracle.pre_publish_check import check_test_wallets
-from backend_blockid.oracle.publish_one_wallet import main as publish_one
-from backend_blockid.tools.review_queue_engine import is_pending_review
+from backend_blockid.oracle.publish_one_wallet import publish_one_async as publish_one
+from backend_blockid.tools.review_queue_engine import is_pending_review_async
 from backend_blockid.blockid_logging import get_logger
 from solders.pubkey import Pubkey
 
@@ -49,16 +49,15 @@ TEST_MODE = os.getenv("BLOCKID_TEST_MODE", "0") == "1"
 DRY_RUN = os.getenv("BLOCKID_DRY_RUN", "0") == "1"
 
 
-def run_batch():
+async def run_batch():
     print("[batch_publish] START")
     success = 0
     failed = 0
     db = get_database()
 
-    check_test_wallets()
+    await check_test_wallets()
 
-    # Score decay: recover wallet trust over time (run daily before publish)
-    decayed = run_decay_for_all_wallets()
+    decayed = await run_decay_for_all_wallets_async()
     if decayed > 0:
         print(f"[batch_publish] score_decay updated {decayed} wallet(s)")
 
@@ -91,23 +90,23 @@ def run_batch():
                 print(f"[SKIP] Invalid row: {e}")
                 continue
             wallet = str(wallet_pubkey)
-            conn = get_connection()
+            conn = await get_conn()
             try:
-                cur = conn.cursor()
-                cur.execute("SELECT is_test_wallet FROM trust_scores WHERE wallet = ? LIMIT 1", (wallet,))
-                row_ts = cur.fetchone()
-                is_test = (1 if row_ts[0] else 0) if row_ts is not None else (1 if wallet.startswith("TEST_") else 0)
+                row_ts = await conn.fetchrow(
+                    "SELECT is_test_wallet FROM trust_scores WHERE wallet = $1 LIMIT 1",
+                    wallet,
+                )
+                is_test = (1 if row_ts["is_test_wallet"] else 0) if row_ts is not None else (1 if wallet.startswith("TEST_") else 0)
             except Exception:
                 is_test = 1 if wallet.startswith("TEST_") else 0
             finally:
-                conn.close()
+                await release_conn(conn)
             wallet_meta = {"is_test_wallet": is_test}
 
             if wallet_meta.get("is_test_wallet"):
                 print(f"[SKIP TEST WALLET] {wallet}")
                 continue
 
-            # BLOCKID_TEST_MODE: load score/risk from CSV when TEST_MODE=1
             if TEST_MODE:
                 try:
                     score = int(row.get("score", 50))
@@ -142,11 +141,10 @@ def run_batch():
             if DRY_RUN:
                 print(f"[DRY RUN] Skip publish for {wallet}")
                 continue
-            if is_pending_review(wallet):
+            if await is_pending_review_async(wallet):
                 print(f"[publish] skipped due to manual review: {wallet}")
                 continue
             counter += 1
-            # BLOCKID_VALIDATION: strict validation before publish
             try:
                 score = int(score)
                 risk = int(risk)
@@ -159,13 +157,15 @@ def run_batch():
             if not (0 <= risk <= 5):
                 print(f"[SKIP] Invalid risk {risk} for {wallet}")
                 continue
-            # BLOCKID_DEBUG
             print(f"[DEBUG] wallet={wallet} score={score} risk={risk}")
             try:
-                publish_one(wallet=wallet, score=score, risk=risk)
+                await publish_one(wallet=wallet, score=score, risk=risk)
                 success += 1
+                print(f"[PUBLISH OK] {wallet}")
             except Exception as e:
-                print("FAILED:", wallet, e)
+                print(f"[PUBLISH ERROR] {wallet} -> {e}")
+                import traceback
+                traceback.print_exc()
                 failed += 1
 
     print("SUCCESS:", success)
@@ -176,8 +176,9 @@ def run_batch():
 
 
 if __name__ == "__main__":
+    import asyncio
     try:
-        run_batch()
+        asyncio.run(run_batch())
         print("[batch_publish] Completed successfully")
         sys.exit(0)
     except Exception as e:

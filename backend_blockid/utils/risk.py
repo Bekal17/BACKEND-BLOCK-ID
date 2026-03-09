@@ -19,12 +19,12 @@ def risk_level_from_reasons(reasons: list[dict]) -> str:
     return "low"
 
 
-def score_to_risk(score: int) -> int:
-    """Map trust score (0–100) to risk level (0=low, 3=high)."""
+def score_to_risk(score: int) -> str:
+    """Map trust score (0-100) to risk level string."""
     if score <= 25:
-        return 3
+        return "HIGH"
     if score <= 50:
-        return 2
+        return "MEDIUM"
     if score <= 75:
-        return 1
-    return 0
+        return "LOW"
+    return "SAFE"

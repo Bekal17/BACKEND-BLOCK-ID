@@ -12,16 +12,17 @@ Future upgrades:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-# Odds multipliers: evidence multiplies scam odds.
-# SCAM_CLUSTER_MEMBER: 5x more likely scam given this evidence
+import time
+
 LIKELIHOODS: dict[str, float] = {
     "SCAM_CLUSTER_MEMBER": 5.0,
     "SCAM_CLUSTER_MEMBER_SMALL": 3.0,
     "SCAM_CLUSTER_MEMBER_LARGE": 7.0,
     "DRAINER_INTERACTION": 8.0,
-    "HIGH_VOLUME_TO_SCAM": 8.0,  # alias
+    "HIGH_VOLUME_TO_SCAM": 8.0,
     "DRAINER_FLOW": 10.0,
     "DRAINER_FLOW_DETECTED": 6.0,
     "HIGH_VALUE_OUTFLOW": 4.0,
@@ -32,31 +33,35 @@ LIKELIHOODS: dict[str, float] = {
     "NO_RISK_DETECTED": 0.3,
 }
 
-# Legacy alias for predict_wallet_score save_wallet_risk_probability logging
 LIKELIHOOD_TABLE = dict(LIKELIHOODS)
 
 TEST_MODE = os.getenv("BLOCKID_TEST_MODE", "0") == "1"
 DEFAULT_PRIOR = 0.05
 
 
-def get_prior(wallet: str) -> float | None:
+async def get_prior_async(wallet: str) -> float | None:
     """Load prior scam probability from wallet_risk_probabilities (latest posterior)."""
     try:
-        from backend_blockid.database.connection import get_connection
+        from backend_blockid.database.pg_connection import get_conn, release_conn
 
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT posterior FROM wallet_risk_probabilities WHERE wallet = ? ORDER BY created_at DESC LIMIT 1",
-            (wallet,),
-        )
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0] is not None:
-            return float(row[0])
+        conn = await get_conn()
+        try:
+            row = await conn.fetchrow(
+                "SELECT posterior FROM wallet_risk_probabilities WHERE wallet = $1 ORDER BY created_at DESC LIMIT 1",
+                wallet,
+            )
+            if row and row["posterior"] is not None:
+                return float(row["posterior"])
+        finally:
+            await release_conn(conn)
     except Exception:
         pass
     return None
+
+
+def get_prior(wallet: str) -> float | None:
+    """Sync wrapper for get_prior_async."""
+    return asyncio.get_event_loop().run_until_complete(get_prior_async(wallet))
 
 
 def update_scam_probability(
@@ -83,6 +88,13 @@ def update_scam_probability(
         if c:
             codes.append(c)
 
+    # ---------------------------------------------------------
+    # Guard: ignore Bayesian update for weak signals only
+    # ---------------------------------------------------------
+    WEAK_SIGNALS = {"LOW_ACTIVITY", "NEW_WALLET", "CLEAN_HISTORY", "NO_RISK_DETECTED"}
+    if codes and all(c in WEAK_SIGNALS for c in codes):
+        return prior if prior is not None else DEFAULT_PRIOR
+
     odds = prior / (1.0 - prior)
     for code in codes:
         mult = LIKELIHOODS.get(code, 1.0)
@@ -98,7 +110,7 @@ def bayes_update_legacy(prior: float, likelihood: float) -> float:
     return numerator / denominator if denominator else prior
 
 
-def save_bayesian_history(
+async def save_bayesian_history_async(
     wallet: str,
     prior: float,
     posterior: float,
@@ -106,48 +118,77 @@ def save_bayesian_history(
 ) -> None:
     """Insert into wallet_history (or wallet_risk_probabilities). Adds prior, posterior if columns exist."""
     try:
-        from backend_blockid.database.connection import get_connection
+        from backend_blockid.database.pg_connection import get_conn, release_conn
 
-        conn = get_connection()
-        cur = conn.cursor()
-        now = int(__import__("time").time())
-        rc_json = json.dumps(reason_codes)
+        conn = await get_conn()
         try:
-            cur.execute(
-                "ALTER TABLE wallet_history ADD COLUMN prior REAL",
+            now = int(time.time())
+            rc_json = json.dumps(reason_codes)
+            
+            try:
+                await conn.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                            WHERE table_name='wallet_history' AND column_name='prior') THEN
+                            ALTER TABLE wallet_history ADD COLUMN prior DOUBLE PRECISION;
+                        END IF;
+                    END $$;
+                """)
+            except Exception:
+                pass
+            try:
+                await conn.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                            WHERE table_name='wallet_history' AND column_name='posterior') THEN
+                            ALTER TABLE wallet_history ADD COLUMN posterior DOUBLE PRECISION;
+                        END IF;
+                    END $$;
+                """)
+            except Exception:
+                pass
+
+            cols_row = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name='wallet_history'"
             )
-        except Exception:
-            pass
-        try:
-            cur.execute(
-                "ALTER TABLE wallet_history ADD COLUMN posterior REAL",
-            )
-        except Exception:
-            pass
-        cur.execute("PRAGMA table_info(wallet_history)")
-        cols = {row[1] for row in cur.fetchall()}
-        if "prior" in cols and "posterior" in cols:
-            cur.execute(
-                """
-                INSERT INTO wallet_history (wallet, prior, posterior, reason_codes, snapshot_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (wallet, prior, posterior, rc_json, now),
-            )
-        else:
-            score = int((1.0 - posterior) * 100)
-            cur.execute(
-                """
-                INSERT INTO wallet_history (wallet, score, risk_level, reason_codes, snapshot_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (wallet, score, "1", rc_json, now),
-            )
-        conn.commit()
-        conn.close()
-        print(f"[bayesian_update] wallet={wallet[:16]}... prior={prior:.2f} posterior={posterior:.2f}")
+            cols = {r["column_name"] for r in cols_row}
+            
+            if "prior" in cols and "posterior" in cols:
+                await conn.execute(
+                    """
+                    INSERT INTO wallet_history (wallet, prior, posterior, reason_codes, snapshot_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    wallet, prior, posterior, rc_json, now,
+                )
+            else:
+                score = int((1.0 - posterior) * 100)
+                await conn.execute(
+                    """
+                    INSERT INTO wallet_history (wallet, score, risk_level, reason_codes, snapshot_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    wallet, score, "1", rc_json, now,
+                )
+            print(f"[bayesian_update] wallet={wallet[:16]}... prior={prior:.2f} posterior={posterior:.2f}")
+        finally:
+            await release_conn(conn)
     except Exception:
         pass
+
+
+def save_bayesian_history(
+    wallet: str,
+    prior: float,
+    posterior: float,
+    reason_codes: list[str],
+) -> None:
+    """Sync wrapper for save_bayesian_history_async."""
+    asyncio.get_event_loop().run_until_complete(
+        save_bayesian_history_async(wallet, prior, posterior, reason_codes)
+    )
 
 
 def update_and_save(

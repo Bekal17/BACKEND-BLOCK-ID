@@ -18,11 +18,15 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend_blockid.database import Database, get_database
-from backend_blockid.database.repositories import get_wallet_reasons
+from backend_blockid.database.repositories import (
+    get_wallet_reasons,
+    get_trust_score_latest,
+    get_latest_trust_scores_batch,
+    insert_wallet_reason,
+)
 from backend_blockid.ml.reason_codes import REASON_WEIGHTS
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.solana_publisher import (
@@ -67,10 +71,6 @@ def _log_latency(
     logger.info("trust_score_latency", **payload)
 
 
-def get_db() -> Database:
-    """Dependency: database for trust score cache (DB_PATH env)."""
-    path = Path((os.getenv("DB_PATH") or "blockid.db").strip() or "blockid.db")
-    return get_database(path)
 
 # Full Anchor layout: 8 disc + 32 wallet + 1 score + 1 risk + 8 updated_at
 MIN_ACCOUNT_LEN = TRUST_SCORE_ACCOUNT_DISCRIMINATOR_LEN + TRUST_SCORE_ACCOUNT_WALLET_LEN + 1 + 1 + 8  # 50
@@ -166,32 +166,34 @@ def _oracle_and_pda_for_wallet(wallet: str) -> tuple[Any, Any]:
     return oracle_pubkey, pda
 
 
-def _record_to_response(wallet: str, record: Any, oracle_pubkey: Any, pda: Any) -> dict[str, Any]:
+async def _record_to_response(wallet: str, record: dict, oracle_pubkey: Any, pda: Any) -> dict[str, Any]:
     """Build API response from DB record + oracle/pda. Includes reason_codes and summary from metadata."""
     risk = 0
     summary = None
+    score_val = float(record.get("score") or 0)
+    computed_at = int(record.get("computed_at") or 0)
+    meta_json = record.get("metadata_json") or "{}"
     try:
-        meta = json.loads(record.metadata_json or "{}")
+        meta = json.loads(meta_json)
         summary = meta.get("summary")
         if "risk" in meta:
             risk = int(meta["risk"])
         else:
             from backend_blockid.utils.risk import score_to_risk
 
-            risk = score_to_risk(int(round(record.score)))
+            risk = score_to_risk(int(round(score_val)))
     except (json.JSONDecodeError, TypeError, ValueError):
         from backend_blockid.utils.risk import score_to_risk
 
-        risk = score_to_risk(int(round(record.score)))
+        risk = score_to_risk(int(round(score_val)))
 
-    reason_codes = get_wallet_reasons(wallet)
+    reason_codes = await get_wallet_reasons(wallet)
     if not reason_codes:
         from backend_blockid.ai_engine.positive_reasons import default_positive_reason
-        from backend_blockid.database.repositories import insert_wallet_reason
 
         positive = default_positive_reason()
         try:
-            insert_wallet_reason(
+            await insert_wallet_reason(
                 wallet,
                 positive["code"],
                 positive["weight"],
@@ -204,25 +206,24 @@ def _record_to_response(wallet: str, record: Any, oracle_pubkey: Any, pda: Any) 
             logger.exception("positive_reason_insert_failed", wallet=wallet)
 
         reason_codes = [positive]
-    final_score = int(round(record.score))
-    out = {
+    final_score = int(round(score_val))
+    return {
         "wallet": wallet,
         "score": final_score,
         "risk": risk,
         "summary": summary,
         "reason_codes": reason_codes,
-        "updated_at": _updated_at_iso(record.computed_at),
+        "updated_at": _updated_at_iso(computed_at),
         "oracle_pubkey": str(oracle_pubkey),
         "pda": str(pda),
     }
-    return out
 
 
 @router.get("/{wallet}")
-async def get_trust_score(wallet: str, db: Database = Depends(get_db)) -> dict[str, Any]:
+async def get_trust_score(wallet: str) -> dict[str, Any]:
     """
-    Return trust score for a wallet. Reads from local database first (fast).
-    Returns 404 if wallet has no cached score (sync worker or publish will populate).
+    Return trust score for a wallet. Reads from PostgreSQL.
+    Returns 404 if wallet has no cached score.
     """
     t_total = time.perf_counter()
     wallet = (wallet or "").strip()
@@ -237,12 +238,11 @@ async def get_trust_score(wallet: str, db: Database = Depends(get_db)) -> dict[s
         raise HTTPException(status_code=400, detail="Invalid wallet pubkey") from e
 
     t_db = time.perf_counter()
-    timeline = db.get_trust_score_timeline(wallet, limit=1)
+    latest = await get_trust_score_latest(wallet)
     db_ms = (time.perf_counter() - t_db) * 1000
-    if not timeline:
+    if not latest:
         raise HTTPException(status_code=404, detail="Trust score not found for this wallet")
 
-    latest = timeline[0]
     t_decode = time.perf_counter()
     try:
         oracle_pubkey, pda = _oracle_and_pda_for_wallet(wallet)
@@ -251,7 +251,7 @@ async def get_trust_score(wallet: str, db: Database = Depends(get_db)) -> dict[s
     except Exception as e:
         logger.error("trust_score_config_error", error=str(e))
         raise HTTPException(status_code=503, detail="Invalid oracle or program config") from e
-    out = _record_to_response(wallet, latest, oracle_pubkey, pda)
+    out = await _record_to_response(wallet, latest, oracle_pubkey, pda)
     decode_ms = (time.perf_counter() - t_decode) * 1000
     total_ms = (time.perf_counter() - t_total) * 1000
     _log_latency(wallet=wallet[:32], db_ms=db_ms, rpc_ms=0.0, decode_ms=decode_ms, total_ms=total_ms)
@@ -270,17 +270,16 @@ def _not_scored(wallet: str) -> dict[str, Any]:
 
 
 @router.post("/list")
-async def list_trust_scores(body: TrustScoreListRequest, db: Database = Depends(get_db)) -> list[dict[str, Any]]:
+async def list_trust_scores(body: TrustScoreListRequest) -> list[dict[str, Any]]:
     """
-    Batch fetch trust scores from local database. One batch query; missing wallets
-    return status="not_scored". No RPC in hot path for fast response (< 50ms for 100 wallets).
+    Batch fetch trust scores from PostgreSQL. Missing wallets return status="not_scored".
     """
     t_total = time.perf_counter()
     from solders.pubkey import Pubkey
 
     wallet_list = [(w or "").strip() for w in body.wallets]
     t_db = time.perf_counter()
-    batch = db.get_latest_trust_scores_batch(wallet_list)
+    batch = await get_latest_trust_scores_batch(wallet_list)
     db_ms = (time.perf_counter() - t_db) * 1000
 
     oracle_key = (os.getenv("ORACLE_PRIVATE_KEY") or "").strip()
@@ -294,7 +293,6 @@ async def list_trust_scores(body: TrustScoreListRequest, db: Database = Depends(
     try:
         keypair = _load_keypair(oracle_key)
         oracle_pubkey = keypair.pubkey()
-        oracle_pubkey_str = str(oracle_pubkey)
     except Exception as e:
         logger.error("trust_score_list_config_error", error=str(e))
         raise HTTPException(status_code=503, detail="Invalid oracle or program config") from e
@@ -315,7 +313,8 @@ async def list_trust_scores(body: TrustScoreListRequest, db: Database = Depends(
             results.append(_not_scored(wallet_str))
             continue
         pda = _get_trust_score_pda_cached(program_id_str, wallet_str)
-        results.append(_record_to_response(wallet_str, record, oracle_pubkey, pda))
+        out = await _record_to_response(wallet_str, record, oracle_pubkey, pda)
+        results.append(out)
     decode_ms = (time.perf_counter() - t_decode) * 1000
     total_ms = (time.perf_counter() - t_total) * 1000
     _log_latency(

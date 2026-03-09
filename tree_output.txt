@@ -1,0 +1,544 @@
+﻿D:\BACKENDBLOCKID\backend_blockid
++---__init__.py
++---__pycache__
+|   \---__init__.cpython-313.pyc
++---agent_worker
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---runner.cpython-313.pyc
+|   |   \---worker.cpython-313.pyc
+|   +---health.py
+|   +---priority_scheduler.py
+|   +---runner.py
+|   +---runtime.py
+|   +---tasks.py
+|   \---worker.py
++---ai_engine
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---badge_rules.cpython-313.pyc
+|   |   +---dynamic_risk_engine.cpython-313.pyc
+|   |   +---dynamic_risk_v2.cpython-313.pyc
+|   |   +---explain_reason.cpython-313.pyc
+|   |   +---generate_badge.cpython-313.pyc
+|   |   +---positive_reasons.cpython-313.pyc
+|   |   +---priority_wallets.cpython-313.pyc
+|   |   +---reason_summary.cpython-313.pyc
+|   |   +---reason_templates.cpython-313.pyc
+|   |   \---reason_weight_engine.cpython-313.pyc
+|   +---badge_rules.py
+|   +---dynamic_risk_engine.py
+|   +---dynamic_risk_v2.py
+|   +---explain_reason.py
+|   +---generate_badge.py
+|   +---oracle
+|   |   +---__init__.py
+|   |   \---solana_publisher.py
+|   +---positive_reasons.py
+|   +---priority_wallets.py
+|   +---reason_engine.py
+|   +---reason_summary.py
+|   +---reason_templates.py
+|   \---reason_weight_engine.py
++---alerts
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---engine.cpython-313.pyc
+|   |   \---escalation.cpython-313.pyc
+|   +---engine.py
+|   \---escalation.py
++---analysis_engine
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---anomaly.cpython-313.pyc
+|   |   +---entity_reputation.cpython-313.pyc
+|   |   +---features.cpython-313.pyc
+|   |   +---graph.cpython-313.pyc
+|   |   +---identity_cluster.cpython-313.pyc
+|   |   +---reputation_memory.cpython-313.pyc
+|   |   +---risk_propagation.cpython-313.pyc
+|   |   \---scorer.cpython-313.pyc
+|   +---anomaly.py
+|   +---entity_reputation.py
+|   +---features.py
+|   +---graph.py
+|   +---identity_cluster.py
+|   +---models.py
+|   +---reputation_memory.py
+|   +---risk_propagation.py
+|   +---scorer.py
+|   \---signals.py
++---analytics
+|   +---__init__.py
+|   +---analytics_pipeline.py
+|   +---nft_scam_detector.py
+|   +---risk_engine.py
+|   +---rugpull_detector.py
+|   +---scam_detector.py
+|   +---trust_engine.py
+|   +---wallet_classifier.py
+|   +---wallet_graph.py
+|   \---wallet_scanner.py
++---api
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---explorer_identity.cpython-313.pyc
+|   |   +---realtime_investigator.cpython-313.pyc
+|   |   +---wallet_dashboard.cpython-313.pyc
+|   |   \---wallet_overview.cpython-313.pyc
+|   +---explorer_identity.py
+|   +---realtime_investigator.py
+|   +---wallet_dashboard.py
+|   \---wallet_overview.py
++---api_server
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---badge_api.cpython-313.pyc
+|   |   +---billing_api.cpython-313.pyc
+|   |   +---billing_middleware.cpython-313.pyc
+|   |   +---billing_service.cpython-313.pyc
+|   |   +---db_wallet_tracking.cpython-313.pyc
+|   |   +---explain_wallet.cpython-313.pyc
+|   |   +---explorer_api.cpython-313.pyc
+|   |   +---graph_api.cpython-313.pyc
+|   |   +---helius_api.cpython-313.pyc
+|   |   +---investigation_api.cpython-313.pyc
+|   |   +---main.cpython-313.pyc
+|   |   +---metrics.cpython-313.pyc
+|   |   +---monitoring_api.cpython-313.pyc
+|   |   +---realtime_api.cpython-313.pyc
+|   |   +---report_api.cpython-313.pyc
+|   |   +---review_queue_api.cpython-313.pyc
+|   |   +---server.cpython-313.pyc
+|   |   +---transaction_api.cpython-313.pyc
+|   |   +---trust_score.cpython-313.pyc
+|   |   \---trust_score_sync.cpython-313.pyc
+|   +---app.py
+|   +---badge_api.py
+|   +---billing_api.py
+|   +---billing_middleware.py
+|   +---billing_service.py
+|   +---db_wallet_tracking.py
+|   +---explain_wallet.py
+|   +---explorer_api.py
+|   +---graph_api.py
+|   +---helius_api.py
+|   +---init_db.py
+|   +---investigation_api.py
+|   +---main.py
+|   +---metrics.py
+|   +---middleware.py
+|   +---monitoring_api.py
+|   +---realtime_api.py
+|   +---report_api.py
+|   +---review_queue_api.py
+|   +---routes.py
+|   +---server.py
+|   +---templates
+|   |   \---monitor.html
+|   +---transaction_api.py
+|   +---trust_score.py
+|   +---trust_score_sync.py
+|   \---wallet_api.py
++---behavioral_memory
+|   +---__init__.py
+|   +---engine.py
+|   \---models.py
++---blockid_logging
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   \---logger.cpython-313.pyc
+|   \---logger.py
++---config
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---badge_rules.cpython-313.pyc
+|   |   +---env.cpython-313.pyc
+|   |   +---rpc_endpoints.cpython-313.pyc
+|   |   +---settings.cpython-313.pyc
+|   |   \---stripe_settings.cpython-313.pyc
+|   +---badge_rules.py
+|   +---env.py
+|   +---pricing_config.json
+|   +---production.env.example
+|   +---rpc_endpoints.py
+|   +---settings.py
+|   \---stripe_settings.py
++---core
+|   +---__init__.py
+|   +---exceptions.py
+|   \---logging_utils.py
++---data
+|   +---bridge_scam_wallets.csv
+|   +---cluster_features.csv
+|   +---devnet_dummy
+|   |   +---drainer_features.csv
+|   |   +---flow_features.csv
+|   |   +---transactions.csv
+|   |   \---wallets.csv
+|   +---drainer_features.csv
+|   +---fake_airdrop_wallets.csv
+|   +---flow_features.csv
+|   +---generated_wallets.csv
+|   +---graph_cluster_features.csv
+|   +---manual_wallets.csv
+|   +---new_wallets.csv
+|   +---nft_wash_wallets.csv
+|   +---published_scores_2026-02-27.csv
+|   +---reason_codes.csv
+|   +---reason_penalties.csv
+|   +---scam_wallets.csv
+|   +---stress_wallets.csv
+|   +---suspicious_tokens.csv
+|   +---test_wallets.csv
+|   +---test_wallets_100.csv
+|   +---test_wallets_scored.csv
+|   +---token_features.csv
+|   +---transactions.csv
+|   +---wallet_reason_codes.csv
+|   +---wallet_scores.csv
+|   +---wallet_tracking.db-journal
+|   \---wallets.csv
++---database
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---config.cpython-313.pyc
+|   |   +---connection.cpython-313.pyc
+|   |   +---database.cpython-313.pyc
+|   |   +---db_wallet_tracking_light.cpython-313.pyc
+|   |   +---init_tables.cpython-313.pyc
+|   |   +---models.cpython-313.pyc
+|   |   +---pg_connection.cpython-313.pyc
+|   |   \---repositories.cpython-313.pyc
+|   +---backups
+|   |   +---blockid_20260302_130153.db
+|   |   +---blockid_20260302_130806.db
+|   |   +---blockid_20260302_130807.db
+|   |   +---blockid_20260302_131415.db
+|   |   +---blockid_20260302_134535.db
+|   |   +---blockid_20260302_135052.db
+|   |   +---blockid_20260302_140507.db
+|   |   +---blockid_20260302_140510.db
+|   |   +---blockid_20260302_162559.db
+|   |   +---blockid_20260302_162602.db
+|   |   +---blockid_20260302_163433.db
+|   |   +---blockid_20260302_163436.db
+|   |   +---blockid_20260302_171358.db
+|   |   +---blockid_20260302_171359.db
+|   |   +---blockid_20260302_174608.db
+|   |   +---blockid_20260302_174612.db
+|   |   +---blockid_20260302_181915.db
+|   |   +---blockid_20260302_181918.db
+|   |   +---blockid_20260302_190716.db
+|   |   \---blockid_20260302_190719.db
+|   +---check_db.py
+|   +---config.py
+|   +---connection.py
+|   +---create_billing_tables.py
+|   +---create_review_queue_table.py
+|   +---create_transactions_table.py
+|   +---create_wallet_clusters_table.py
+|   +---create_wallet_history_table.py
+|   +---create_wallet_meta_table.py
+|   +---database.py
+|   +---db_wallet_tracking_light.py
+|   +---init_tables.py
+|   +---migrate_sqlite_to_postgres.py
+|   +---migrations
+|   |   +---001_add_dynamic_risk_fields.sql
+|   |   +---002_add_priority_wallet_fields.sql
+|   |   +---003_add_indexes.sql
+|   |   +---004_fix_trust_scores_columns.sql
+|   |   +---005_fix_wallet_reasons.sql
+|   |   +---006_fix_computed_at.sql
+|   |   +---007_remove_computed_at_not_null.sql
+|   |   +---008_add_unique_wallet_index.sql
+|   |   +---add_tracked_wallets_reason_codes.py
+|   |   +---add_wallet_reason_evidence_table.py
+|   |   +---recreate_trust_scores_table.py
+|   |   \---recreate_wallet_reasons_table.py
+|   +---models.py
+|   +---pg_connection.py
+|   +---repositories.py
+|   +---schema.sql
+|   \---test_pg.py
++---explorer
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   \---recommendation_engine.cpython-313.pyc
+|   \---recommendation_engine.py
++---ingestion
+|   +---__init__.py
+|   \---solana_stream.py
++---logging
++---ml
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---bayesian_risk.cpython-313.pyc
+|   |   +---cluster_confidence.cpython-313.pyc
+|   |   +---cluster_risk.cpython-313.pyc
+|   |   +---dynamic_risk.cpython-313.pyc
+|   |   +---feature_builder.cpython-313.pyc
+|   |   +---graph_distance.cpython-313.pyc
+|   |   +---graph_risk.cpython-313.pyc
+|   |   +---predict.cpython-313.pyc
+|   |   +---predict_wallet_score.cpython-313.pyc
+|   |   +---predictor.cpython-313.pyc
+|   |   +---reason_builder.cpython-313.pyc
+|   |   +---reason_codes.cpython-313.pyc
+|   |   +---reason_weight_engine.cpython-313.pyc
+|   |   +---reputation_decay.cpython-313.pyc
+|   |   +---score_decay.cpython-313.pyc
+|   |   \---time_weighted_risk.cpython-313.pyc
+|   +---analyze_dataset.py
+|   +---bayesian_risk.py
+|   +---build_dataset.py
+|   +---cluster_confidence.py
+|   +---cluster_risk.py
+|   +---dynamic_risk.py
+|   +---feature_builder.py
+|   +---feature_extractor.py
+|   +---graph_distance.py
+|   +---graph_risk.py
+|   +---models
+|   +---predict.py
+|   +---predict_wallet_score.py
+|   +---predictor.py
+|   +---reason_builder.py
+|   +---reason_codes.py
+|   +---reason_weight_engine.py
+|   +---reputation_decay.py
+|   +---save_model.py
+|   +---scaler.pkl
+|   +---score_combiner.py
+|   +---score_decay.py
+|   +---test_predictor.py
+|   +---time_weighted_risk.py
+|   +---train_blockid_model.py
+|   +---train_model.py
+|   +---train_token_scam_model.py
+|   \---trust_model.pkl
++---models
+|   \---token_scam_model.joblib
++---oracle
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---auto_evidence_collector.cpython-313.pyc
+|   |   +---batch_publish.cpython-313.pyc
+|   |   +---drainer_detection.cpython-313.pyc
+|   |   +---flow_features.cpython-313.pyc
+|   |   +---graph_clustering.cpython-313.pyc
+|   |   +---incremental_wallet_meta_scanner.cpython-313.pyc
+|   |   +---pre_publish_check.cpython-313.pyc
+|   |   +---publish_one_wallet.cpython-313.pyc
+|   |   +---realtime_risk_engine.cpython-313.pyc
+|   |   +---realtime_wallet_pipeline.cpython-313.pyc
+|   |   +---reason_aggregator.cpython-313.pyc
+|   |   +---reason_weight_engine.cpython-313.pyc
+|   |   +---rpc_health.cpython-313.pyc
+|   |   +---rpc_manager.cpython-313.pyc
+|   |   +---scan_wallet_transactions.cpython-313.pyc
+|   |   +---solana_publisher.cpython-313.pyc
+|   |   +---trust_oracle.cpython-313.pyc
+|   |   +---wallet_profile_builder.cpython-313.pyc
+|   |   \---wallet_scan_prioritizer.cpython-313.pyc
+|   +---auto_evidence_collector.py
+|   +---auto_insert_scam_wallets.py
+|   +---batch_publish.py
+|   +---blockid_oracle.json
+|   +---build_reason_summary.py
+|   +---devnet_test.py
+|   +---drainer_detection.py
+|   +---fetch_tx_edges_helius.py
+|   +---flow_features.py
+|   +---get_100_wallets_bonk.py
+|   +---get_100_wallets_from_helius.py
+|   +---graph_clustering.py
+|   +---helius_batch_token_scanner.py
+|   +---helius_extract_fields.py
+|   +---incremental_wallet_meta_scanner.py
+|   +---pre_publish_check.py
+|   +---publish_one_wallet.py
+|   +---publish_scores.py
+|   +---publish_wallet_scores.py
+|   +---realtime_risk_engine.py
+|   +---realtime_wallet_pipeline.py
+|   +---reason_aggregator.py
+|   +---reason_summary.py
+|   +---reason_weight_engine.py
+|   +---rpc_health.py
+|   +---rpc_manager.py
+|   +---scan_100_tokens_helius.py
+|   +---scan_wallet_transactions.py
+|   +---solana_publisher.py
+|   +---test_helius_asset.py
+|   +---trust_oracle.py
+|   +---wallet_meta_utils.py
+|   +---wallet_profile_builder.py
+|   \---wallet_scan_prioritizer.py
++---reports
+|   +---helius_cost_report.csv
+|   +---mainnet_launch_report.txt
+|   \---mainnet_readiness_report.txt
++---scheduler
+|   +---__init__.py
+|   \---engine.py
++---solana_listener
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---listener.cpython-313.pyc
+|   |   +---models.cpython-313.pyc
+|   |   \---parser.cpython-313.pyc
+|   +---listener.py
+|   +---models.py
+|   +---normalizer.py
+|   \---parser.py
++---tests
++---tools
+|   +---LOAD_TEST_README.md
+|   +---__init__.py
+|   +---__pycache__
+|   |   +---__init__.cpython-313.pyc
+|   |   +---aggregate_reason_codes.cpython-313.pyc
+|   |   +---backup_db.cpython-313.pyc
+|   |   +---badge_engine.cpython-313.pyc
+|   |   +---blockid_logger.cpython-313.pyc
+|   |   +---build_wallet_graph.cpython-313.pyc
+|   |   +---generate_cluster_features.cpython-313.pyc
+|   |   +---generate_spec.cpython-313.pyc
+|   |   +---generate_wallet_reason_codes.cpython-313.pyc
+|   |   +---generate_wallet_report.cpython-313.pyc
+|   |   +---health_check.cpython-313.pyc
+|   |   +---helius_client.cpython-313.pyc
+|   |   +---helius_cost_monitor.cpython-313.pyc
+|   |   +---locust_blockid.cpython-313.pyc
+|   |   +---mainnet_launch_checklist.cpython-313.pyc
+|   |   +---propagation_engine_v1.cpython-313.pyc
+|   |   +---review_queue_engine.cpython-313.pyc
+|   |   +---run_full_pipeline.cpython-313.pyc
+|   |   +---run_migrations.cpython-313.pyc
+|   |   +---save_score_history.cpython-313.pyc
+|   |   +---seed_priority_wallets.cpython-313.pyc
+|   |   +---show_scan_priority.cpython-313.pyc
+|   |   +---telegram_alert.cpython-313.pyc
+|   |   +---test_rpc_endpoints.cpython-313.pyc
+|   |   +---time_utils.cpython-313.pyc
+|   |   +---verify_pipeline_output.cpython-313.pyc
+|   |   \---verify_schema.cpython-313.pyc
+|   +---aggregate_reason_codes.py
+|   +---audit_postgres_migration.py
+|   +---audit_runtime_db_usage.py
+|   +---auto_collect_scam_wallets.py
+|   +---auto_detect_scam_tx_devnet.py
+|   +---auto_insert_scam_wallets.py
+|   +---backup_db.py
+|   +---badge_engine.py
+|   +---blockid_logger.py
+|   +---build_cluster_features.py
+|   +---build_training_dataset.py
+|   +---build_wallet_clusters.py
+|   +---build_wallet_graph.py
+|   +---build_wallet_graph_edges.py
+|   +---canary_deploy.py
+|   +---check_cluster_wallets.py
+|   +---check_clusters.py
+|   +---check_database_integrity.py
+|   +---check_db_schema.py
+|   +---check_edges.py
+|   +---check_edges_sample.py
+|   +---check_tables.py
+|   +---check_test_wallet.py
+|   +---check_transactions.py
+|   +---check_transactions_schema.py
+|   +---collect_transactions.py
+|   +---convert_labels_to_scores.py
+|   +---convert_schema_to_postgres.py
+|   +---deploy_blockid.py
+|   +---export_schema.py
+|   +---fetch_helius_transactions.py
+|   +---fetch_new_tokens.py
+|   +---find_active_wallets.py
+|   +---flow_features.py
+|   +---generate_cluster_features.py
+|   +---generate_new_wallets.py
+|   +---generate_spec.py
+|   +---generate_test_wallets.py
+|   +---generate_wallet_reason_codes.py
+|   +---generate_wallet_report.py
+|   +---generate_wallets.py
+|   +---health_check.py
+|   +---helius_client.py
+|   +---helius_cost_monitor.py
+|   +---init_blockid_db.py
+|   +---insert_wallet_scores.py
+|   +---load_graph_distance.py
+|   +---locust_blockid.py
+|   +---mainnet_launch_checklist.py
+|   +---mainnet_readiness_checklist.py
+|   +---mark_scam_high_risk.py
+|   +---merge_wallet_datasets.py
+|   +---migrate_dynamic_risk_v2.py
+|   +---optimize_propagation_weights.py
+|   +---optimize_reason_weights.py
+|   +---parallel_publish_test.py
+|   +---pipeline_scheduler.py
+|   +---pipeline_status.py
+|   +---plot_propagation_paths.py
+|   +---plot_wallet_cluster_heatmap.py
+|   +---plot_wallet_history.py
+|   +---propagation_engine_v1.py
+|   +---reset_usage.py
+|   +---review_queue_cli.py
+|   +---review_queue_engine.py
+|   +---rollback_deployment.py
+|   +---rpc_stress_test.py
+|   +---run_blockid.py
+|   +---run_blockid_pipeline.py
+|   +---run_full_pipeline.py
+|   +---run_migrations.py
+|   +---save_score_history.py
+|   +---seed_demo_transactions.py
+|   +---seed_graph_demo.py
+|   +---seed_priority_wallets.py
+|   +---show_scan_priority.py
+|   +---stress_test_10k_auto.py
+|   +---telegram_alert.py
+|   +---test_blockid_pipeline.py
+|   +---test_dynamic_risk.py
+|   +---test_false_positives.py
+|   +---test_insert_scam.py
+|   +---test_positive_ml_integration.py
+|   +---test_priority_wallets.py
+|   +---test_reason_aggregation.py
+|   +---test_rpc_endpoints.py
+|   +---test_wallet_reasons_api.py
+|   +---time_utils.py
+|   +---tree.py
+|   +---update_priority_wallets.py
+|   +---validate_test_wallets.py
+|   +---verify_onchain_scores.py
+|   +---verify_pipeline_output.py
+|   +---verify_schema.py
+|   +---visualize_cluster_risk.py
+|   \---wallet_meta.py
+\---utils
+    +---__init__.py
+    +---__pycache__
+    |   +---__init__.cpython-313.pyc
+    |   +---risk.cpython-313.pyc
+    |   \---wallet_utils.cpython-313.pyc
+    +---risk.py
+    \---wallet_utils.py

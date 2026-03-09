@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.blockid_logging import get_logger
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 
 logger = get_logger(__name__)
 
@@ -47,10 +47,10 @@ HIGH_RISK_CODES = frozenset({
 })
 RECENT_DAYS = 7
 RECENT_SEC = RECENT_DAYS * 86400
-DAYS_SINCE_CAP = 30  # cap days_since_scan factor
+DAYS_SINCE_CAP = 30
 
 
-def _get_candidates(test_mode: bool) -> list[str]:
+async def _get_candidates(test_mode: bool) -> list[str]:
     """Return candidate wallets. TEST_MODE → only test_wallets.csv."""
     wallets: set[str] = set()
 
@@ -62,21 +62,22 @@ def _get_candidates(test_mode: bool) -> list[str]:
                     wallets.add(w)
         return sorted(wallets)
 
-    # 1. tracked_wallets
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = await get_conn()
     try:
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tracked_wallets'")
-        if cur.fetchone():
-            cur.execute("SELECT wallet FROM tracked_wallets WHERE wallet IS NOT NULL")
-            for r in cur.fetchall():
-                w = (r["wallet"] if hasattr(r, "keys") else r[0]).strip() if r else ""
+        table_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tracked_wallets')"
+        )
+        if table_exists:
+            rows = await conn.fetch("SELECT wallet FROM tracked_wallets WHERE wallet IS NOT NULL")
+            for r in rows:
+                w = (r["wallet"] or "").strip() if r else ""
                 if w:
                     wallets.add(w)
     except Exception:
         pass
+    finally:
+        await release_conn(conn)
 
-    # 2. CSV sources
     for path in WALLET_SOURCES:
         if path.exists():
             try:
@@ -87,22 +88,20 @@ def _get_candidates(test_mode: bool) -> list[str]:
                             wallets.add(w)
             except Exception:
                 pass
-    conn.close()
     return sorted(wallets)
 
 
-def _scam_cluster_ids(cur: Any) -> set[int | str]:
+async def _scam_cluster_ids(conn: Any) -> set[int | str]:
     """Cluster IDs that contain at least one scam wallet."""
-    cur.execute("""
+    rows = await conn.fetch("""
         SELECT DISTINCT wc.cluster_id FROM wallet_clusters wc
         INNER JOIN scam_wallets sw ON wc.wallet = sw.wallet
     """)
-    return {r[0] for r in cur.fetchall() if r[0] is not None}
+    return {r["cluster_id"] for r in rows if r["cluster_id"] is not None}
 
 
-def _compute_factors(
+async def _compute_factors(
     conn: Any,
-    cur: Any,
     wallet: str,
     scam_clusters: set[int | str],
     max_tx_count: int,
@@ -115,85 +114,75 @@ def _compute_factors(
     trust_factor = 0.0
     cluster_risk = 0.0
     tx_volume = 0.0
-    followers = 0.0  # no data source; use 0
-    days_since = 0.5  # default mid if never scanned
+    followers = 0.0
+    days_since = 0.5
     reasons: list[str] = []
 
     now = int(time.time())
     cutoff_recent = now - RECENT_SEC
 
-    # 1. Recent suspicious activity (wallet_reasons with HIGH_RISK, created_at recent)
-    cur.execute("""
+    placeholders = ",".join(f"${i+2}" for i in range(len(HIGH_RISK_CODES)))
+    params = [wallet] + list(HIGH_RISK_CODES) + [cutoff_recent]
+    row = await conn.fetchrow(f"""
         SELECT 1 FROM wallet_reasons
-        WHERE wallet = ? AND reason_code IN ({})
-        AND (created_at IS NULL OR created_at >= ?)
+        WHERE wallet = $1 AND reason_code IN ({placeholders})
+        AND (created_at IS NULL OR created_at >= ${len(HIGH_RISK_CODES)+2})
         LIMIT 1
-    """.format(",".join("?" * len(HIGH_RISK_CODES))), (wallet, *HIGH_RISK_CODES, cutoff_recent))
-    if cur.fetchone():
+    """, *params)
+    if row:
         suspicious = 1.0
         reasons.append("recent_suspicious")
 
-    # 2. Trust score low (<40) → (1 - score/100)
-    cur.execute("SELECT score FROM trust_scores WHERE wallet = ?", (wallet,))
-    row = cur.fetchone()
+    row = await conn.fetchrow("SELECT score FROM trust_scores WHERE wallet = $1", wallet)
     if row:
-        score = float(row[0] if hasattr(row, "keys") else row[0] or 50)
+        score = float(row["score"] or 50)
         trust_factor = max(0.0, 1.0 - score / 100.0)
         if score < 40:
             reasons.append("low_trust_score")
 
-    # 3. Cluster near scam
-    cur.execute("SELECT cluster_id FROM wallet_clusters WHERE wallet = ? LIMIT 1", (wallet,))
-    row = cur.fetchone()
+    row = await conn.fetchrow("SELECT cluster_id FROM wallet_clusters WHERE wallet = $1 LIMIT 1", wallet)
     if row:
-        cid = row[0] if hasattr(row, "keys") else row[0]
+        cid = row["cluster_id"]
         if cid in scam_clusters:
             cluster_risk = 1.0
             reasons.append("recent_scam_cluster")
 
-    # 4. Tx volume (normalized by max)
-    cur.execute("SELECT COUNT(*) FROM transactions WHERE wallet = ?", (wallet,))
-    row = cur.fetchone()
-    count = int(row[0] if hasattr(row, "keys") else row[0] or 0)
+    row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM transactions WHERE wallet = $1", wallet)
+    count = int(row["cnt"] or 0) if row else 0
     if max_tx_count > 0:
         tx_volume = min(1.0, count / max_tx_count)
         if count > 100:
             reasons.append("high_tx_volume")
 
-    # 5. Followers — no data, keep 0
-
-    # 6. Days since last scan
-    cur.execute(
-        "SELECT last_scan_ts FROM wallet_scan_meta WHERE wallet = ?",
-        (wallet,),
+    row = await conn.fetchrow(
+        "SELECT last_scan_ts FROM wallet_scan_meta WHERE wallet = $1",
+        wallet,
     )
-    row = cur.fetchone()
     if row:
-        last = int(row[0] if hasattr(row, "keys") else row[0] or 0)
+        last = int(row["last_scan_ts"] or 0)
         days = (now - last) // 86400 if last else DAYS_SINCE_CAP
         days_since = min(1.0, days / DAYS_SINCE_CAP)
         if days > 7:
             reasons.append("not_scanned_recently")
     else:
-        days_since = 1.0  # never scanned = highest priority
+        days_since = 1.0
         reasons.append("never_scanned")
 
     top_reason = reasons[0] if reasons else "default"
     return suspicious, trust_factor, cluster_risk, tx_volume, followers, days_since, top_reason
 
 
-def get_prioritized_wallets(
+async def get_prioritized_wallets(
     max_wallets: int | None = None,
     test_mode: bool = False,
 ) -> list[str]:
     wallets: list[str] = []
 
-    wallets += get_scam_wallets(limit=50000)
-    wallets += get_new_wallets(limit=50000)
-    wallets += get_active_wallets(limit=50000)
-    wallets += get_old_wallets(limit=50000)
+    wallets += await get_scam_wallets(limit=50000)
+    wallets += await get_new_wallets(limit=50000)
+    wallets += await get_active_wallets(limit=50000)
+    wallets += await get_old_wallets(limit=50000)
 
-    # remove duplicates keep order
     seen: set[str] = set()
     ordered: list[str] = []
     for w in wallets:
@@ -207,7 +196,7 @@ def get_prioritized_wallets(
     return ordered[:limit] if limit is not None else ordered
 
 
-def get_prioritized_wallets_with_scores(
+async def get_prioritized_wallets_with_scores(
     max_wallets: int | None = None,
     test_mode: bool | None = None,
 ) -> list[tuple[str, float, str]]:
@@ -216,45 +205,115 @@ def get_prioritized_wallets_with_scores(
         test_mode = os.getenv("BLOCKID_TEST_MODE", "0") == "1"
     n = max_wallets or MAX_WALLETS_PER_RUN
 
-    candidates = _get_candidates(test_mode)
+    candidates = await _get_candidates(test_mode)
     if not candidates:
         return []
 
-    conn = get_connection()
-    cur = conn.cursor()
-    scam_clusters = _scam_cluster_ids(cur)
-    cur.execute("SELECT MAX(c) FROM (SELECT COUNT(*) AS c FROM transactions GROUP BY wallet)")
-    row = cur.fetchone()
-    max_tx_count = max(1, int(row[0] if row and row[0] is not None else 1))
+    conn = await get_conn()
+    try:
+        scam_clusters = await _scam_cluster_ids(conn)
+        row = await conn.fetchrow("SELECT MAX(c) as max_c FROM (SELECT COUNT(*) AS c FROM transactions GROUP BY wallet) sub")
+        max_tx_count = max(1, int(row["max_c"] if row and row["max_c"] is not None else 1))
 
-    scored: list[tuple[str, float, str]] = []
-    for w in candidates:
-        try:
-            sus, trust, cluster, tx, follow, days, reason = _compute_factors(
-                conn, cur, w, scam_clusters, max_tx_count
-            )
-            priority = (
-                0.3 * sus + 0.2 * trust + 0.2 * cluster
-                + 0.1 * tx + 0.1 * follow + 0.1 * days
-            )
-            priority = max(0.0, min(1.0, priority))
-            scored.append((w, priority, reason))
-        except Exception:
-            scored.append((w, 0.5, "error"))
-    conn.close()
+        scored: list[tuple[str, float, str]] = []
+        for w in candidates:
+            try:
+                sus, trust, cluster, tx, follow, days, reason = await _compute_factors(
+                    conn, w, scam_clusters, max_tx_count
+                )
+                priority = (
+                    0.3 * sus + 0.2 * trust + 0.2 * cluster
+                    + 0.1 * tx + 0.1 * follow + 0.1 * days
+                )
+                priority = max(0.0, min(1.0, priority))
+                scored.append((w, priority, reason))
+            except Exception:
+                scored.append((w, 0.5, "error"))
+    finally:
+        await release_conn(conn)
 
     scored.sort(key=lambda x: -x[1])
     return scored[:n]
 
 
-def update_scan_timestamp(wallet: str) -> None:
+async def update_scan_timestamp(wallet: str) -> None:
+    """Record that wallet was scanned (call after successful Helius fetch)."""
+    await _update_scan_timestamp_async(wallet)
+
+
+async def _update_scan_timestamp_async(wallet: str) -> None:
     """Record that wallet was scanned (call after successful Helius fetch)."""
     ts = int(time.time())
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO wallet_scan_meta (wallet, last_scan_ts) VALUES (?, ?)",
-        (wallet, ts),
-    )
-    conn.commit()
-    conn.close()
+    conn = await get_conn()
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_scan_meta (
+                wallet TEXT PRIMARY KEY,
+                last_scan_ts INTEGER
+            )
+        """)
+        await conn.execute(
+            """
+            INSERT INTO wallet_scan_meta (wallet, last_scan_ts) VALUES ($1, $2)
+            ON CONFLICT(wallet) DO UPDATE SET last_scan_ts = EXCLUDED.last_scan_ts
+            """,
+            wallet, ts,
+        )
+    finally:
+        await release_conn(conn)
+
+
+async def get_scam_wallets(limit: int = 50000) -> list[str]:
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch("SELECT wallet FROM scam_wallets LIMIT $1", limit)
+        return [r["wallet"] for r in rows if r.get("wallet")]
+    except Exception:
+        return []
+    finally:
+        await release_conn(conn)
+
+
+async def get_new_wallets(limit: int = 50000) -> list[str]:
+    conn = await get_conn()
+    try:
+        cutoff = int(time.time()) - (7 * 86400)
+        rows = await conn.fetch(
+            "SELECT wallet FROM wallet_meta WHERE first_tx_ts >= $1 LIMIT $2",
+            cutoff, limit
+        )
+        return [r["wallet"] for r in rows if r.get("wallet")]
+    except Exception:
+        return []
+    finally:
+        await release_conn(conn)
+
+
+async def get_active_wallets(limit: int = 50000) -> list[str]:
+    conn = await get_conn()
+    try:
+        cutoff = int(time.time()) - (24 * 3600)
+        rows = await conn.fetch(
+            "SELECT DISTINCT wallet FROM transactions WHERE timestamp >= $1 LIMIT $2",
+            cutoff, limit
+        )
+        return [r["wallet"] for r in rows if r.get("wallet")]
+    except Exception:
+        return []
+    finally:
+        await release_conn(conn)
+
+
+async def get_old_wallets(limit: int = 50000) -> list[str]:
+    conn = await get_conn()
+    try:
+        cutoff = int(time.time()) - (30 * 86400)
+        rows = await conn.fetch(
+            "SELECT wallet FROM wallet_scan_meta WHERE last_scan_ts < $1 ORDER BY last_scan_ts ASC LIMIT $2",
+            cutoff, limit
+        )
+        return [r["wallet"] for r in rows if r.get("wallet")]
+    except Exception:
+        return []
+    finally:
+        await release_conn(conn)

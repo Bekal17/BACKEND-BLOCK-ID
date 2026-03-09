@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import os
 import sys
@@ -28,7 +29,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend_blockid.database.connection import get_connection
+from backend_blockid.database.pg_connection import get_conn, release_conn
 
 _REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 CSV_REPORT = _REPORTS_DIR / "helius_cost_report.csv"
@@ -42,49 +43,58 @@ def _today_start_ts() -> int:
     return int(time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, 0)))
 
 
-def get_today_stats() -> tuple[int, float]:
+async def get_today_stats_async() -> tuple[int, float]:
     """Return (total_calls_today, estimated_cost_today)."""
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = await get_conn()
     cutoff = _today_start_ts()
     try:
-        cur.execute(
-            "SELECT COALESCE(SUM(request_count), 0), COALESCE(SUM(estimated_cost), 0) FROM helius_usage WHERE timestamp >= ?",
-            (cutoff,),
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(request_count), 0) as calls, COALESCE(SUM(estimated_cost), 0) as cost FROM helius_usage WHERE timestamp >= $1",
+            cutoff,
         )
-        row = cur.fetchone()
-        total_calls = int(row[0] or 0)
-        total_cost = float(row[1] or 0.0)
+        total_calls = int(row["calls"] or 0)
+        total_cost = float(row["cost"] or 0.0)
     except Exception:
         total_calls, total_cost = 0, 0.0
-    conn.close()
+    finally:
+        await release_conn(conn)
     return total_calls, total_cost
 
 
-def get_top_wallets_today(limit: int = 10) -> list[tuple[str, int, float]]:
+def get_today_stats() -> tuple[int, float]:
+    """Sync wrapper for get_today_stats_async."""
+    return asyncio.get_event_loop().run_until_complete(get_today_stats_async())
+
+
+async def get_top_wallets_today_async(limit: int = 10) -> list[tuple[str, int, float]]:
     """Return [(wallet, calls, cost), ...] sorted by cost desc."""
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = await get_conn()
     cutoff = _today_start_ts()
     rows: list[tuple[str, int, float]] = []
     try:
-        cur.execute(
+        result = await conn.fetch(
             """
             SELECT wallet, SUM(request_count) AS calls, SUM(estimated_cost) AS cost
-            FROM helius_usage WHERE timestamp >= ?
-            GROUP BY wallet ORDER BY cost DESC LIMIT ?
+            FROM helius_usage WHERE timestamp >= $1
+            GROUP BY wallet ORDER BY cost DESC LIMIT $2
             """,
-            (cutoff, limit),
+            cutoff, limit,
         )
-        for r in cur.fetchall():
-            w = (r[0] if hasattr(r, "keys") else r[0]) or ""
-            c = int(r[1] if hasattr(r, "keys") else r[1] or 0)
-            cost = float(r[2] if hasattr(r, "keys") else r[2] or 0.0)
+        for r in result:
+            w = r["wallet"] or ""
+            c = int(r["calls"] or 0)
+            cost = float(r["cost"] or 0.0)
             rows.append((w, c, cost))
     except Exception:
         pass
-    conn.close()
+    finally:
+        await release_conn(conn)
     return rows
+
+
+def get_top_wallets_today(limit: int = 10) -> list[tuple[str, int, float]]:
+    """Sync wrapper for get_top_wallets_today_async."""
+    return asyncio.get_event_loop().run_until_complete(get_top_wallets_today_async(limit))
 
 
 def save_csv_report(date_str: str, total_calls: int, estimated_cost: float) -> None:
@@ -113,7 +123,7 @@ def run_report(max_wallets: int | None = None) -> dict:
     """Generate daily usage report."""
     total_calls, cost_today = get_today_stats()
     top_wallets = get_top_wallets_today(10)
-    cost_monthly = cost_today * 30  # simple projection
+    cost_monthly = cost_today * 30
     max_w = max_wallets or DEFAULT_MAX_WALLETS
     return {
         "total_calls_today": total_calls,
@@ -134,7 +144,6 @@ def main() -> int:
 
     r = run_report(args.max_wallets)
 
-    # Print report
     if args.check_only:
         if r["over_budget"]:
             print(f"[helius_cost] OVER_BUDGET: ${r['estimated_cost_today_usd']:.4f} > ${DAILY_LIMIT}")
@@ -151,12 +160,10 @@ def main() -> int:
         print(f"    wallet={item['wallet'][:16]}... calls={item['calls']} cost=${item['cost_usd']:.6f}")
     print(f"  within_limit: {not r['over_budget']}")
 
-    # Save CSV
     date_str = time.strftime("%Y-%m-%d", time.gmtime())
     save_csv_report(date_str, r["total_calls_today"], r["estimated_cost_today_usd"])
     print(f"  report: {CSV_REPORT}")
 
-    # Budget guard
     if r["over_budget"]:
         print("")
         print("WARNING: Estimated cost today exceeds DAILY_LIMIT. Pipeline stopped.")
