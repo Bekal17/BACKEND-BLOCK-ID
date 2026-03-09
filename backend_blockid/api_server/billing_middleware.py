@@ -46,6 +46,9 @@ class BillingMiddleware(BaseHTTPMiddleware):
     """Track API usage and enforce rate limits when BILLING_ENABLED=1."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if not BILLING_ENABLED:
             return await call_next(request)
 
