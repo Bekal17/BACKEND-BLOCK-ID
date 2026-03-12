@@ -198,8 +198,9 @@ async def _insert_transactions(conn, wallet: str, records: list[dict[str, Any]])
                 int(time.time()),
             )
             inserted += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("insert_transaction_failed", wallet=wallet[:16], error=str(e), signature=r.get("signature","")[:16])
+    logger.info("insert_transactions_done", wallet=wallet[:16], inserted=inserted, total=len(records))
     return inserted
 
 
