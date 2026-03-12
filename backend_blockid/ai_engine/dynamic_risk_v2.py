@@ -250,7 +250,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
 
         details["final_score"] = float(final_score)
         details["reason_penalty"] = float(reason_penalty)
-        details["risk_level"] = float(risk_level)
+        details["risk_level"] = risk_level
         return details
     finally:
         await release_conn(conn)
