@@ -130,7 +130,15 @@ def _fetch_transactions(wallet: str) -> list[dict[str, Any]]:
         resp.raise_for_status()
         data = resp.json()
         helius_request("addresses/transactions", wallet, request_count=1)
-        return data if isinstance(data, list) else []
+        result = data if isinstance(data, list) else []
+        logger.info("fetch_transactions_done", wallet=wallet[:16], count=len(result))
+        if result:
+            first = result[0]
+            logger.info("fetch_transactions_sample", wallet=wallet[:16],
+                       has_nativeTransfers=bool(first.get("nativeTransfers")),
+                       has_tokenTransfers=bool(first.get("tokenTransfers")),
+                       keys=list(first.keys())[:8])
+        return result
     except Exception as e:
         logger.warning("realtime_pipeline_fetch_failed", wallet=wallet[:16], error=str(e))
         return []
