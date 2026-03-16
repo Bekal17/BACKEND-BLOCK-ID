@@ -8,6 +8,7 @@ from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.ai_engine.priority_wallets import update_priority
 from backend_blockid.utils.risk import score_to_risk
+from backend_blockid.database.score_history import log_score_change
 
 logger = get_logger(__name__)
 
@@ -203,6 +204,35 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         final_score = (dynamic_risk + reason_penalty)
         final_score = max(0.0, min(100.0, final_score))
         risk_level = score_to_risk(int(round(final_score)))
+
+        # Fetch score_before for history (before any UPDATE)
+        row_before = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1",
+            wallet,
+        )
+        score_before = float(row_before["score"]) if row_before and row_before["score"] is not None else None
+
+        # Log to history BEFORE updating trust_scores (non-fatal)
+        logger.info(
+            "score_history_hook_called",
+            wallet=wallet[:16],
+            score_before=score_before,
+            score_after=float(final_score),
+        )
+        await log_score_change(
+            wallet=wallet,
+            score_before=score_before,
+            score_after=float(final_score),
+            change_category="BEHAVIORAL",
+            triggered_by="realtime_pipeline",
+            ml_score=float(ml_score),
+            dynamic_risk=float(dynamic_risk),
+            reason_penalty=float(reason_penalty),
+            graph_penalty=float(details.get("graph_penalty", 0.0)),
+            decay=float(details.get("decay", 0.0)),
+            activity_boost=float(details.get("activity_boost", 0.0)),
+            risk_level=str(risk_level),
+        )
 
         exists = await conn.fetchval("SELECT 1 FROM trust_scores WHERE wallet = $1", wallet)
         if exists:

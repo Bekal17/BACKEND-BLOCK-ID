@@ -11,9 +11,10 @@ Steps (same modules as run_full_pipeline):
   3. drainer_detection (drainer_features_for_wallet)
   4. auto_evidence_collector (scan_wallet_transactions._scan_wallet + insert)
   5. reason_aggregator (main_async)
-  6. reason_weight_engine — skip for single wallet (would wipe wallet_reasons; we apply weights inline)
-  7. predict_wallet_score_for_wallet — ML scoring for requested wallet only
-  8. update_wallet_score_async (dynamic_risk_v2)
+  6. reason_weight_engine — skip for single wallet (applied inline)
+  7. predict_wallet_score_for_wallet — ML scoring
+  8. [NEW] daemon_enrichment — Daemon Protocol risk + sanctions check
+  9. update_wallet_score_async (dynamic_risk_v2) — uses Daemon-enriched score
 
 Target runtime: < 3 seconds.
 """
@@ -31,6 +32,7 @@ from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.database.db_wallet_tracking_light import insert_reason_evidence_async
 from backend_blockid.database.repositories import insert_wallet_reason
+from backend_blockid.database.score_history import log_score_change
 from backend_blockid.ml.reason_codes import get_reason_weights
 from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score_async
 from backend_blockid.tools.helius_client import helius_request
@@ -134,10 +136,13 @@ def _fetch_transactions(wallet: str) -> list[dict[str, Any]]:
         logger.info("fetch_transactions_done", wallet=wallet[:16], count=len(result))
         if result:
             first = result[0]
-            logger.info("fetch_transactions_sample", wallet=wallet[:16],
-                       has_nativeTransfers=bool(first.get("nativeTransfers")),
-                       has_tokenTransfers=bool(first.get("tokenTransfers")),
-                       keys=list(first.keys())[:8])
+            logger.info(
+                "fetch_transactions_sample",
+                wallet=wallet[:16],
+                has_nativeTransfers=bool(first.get("nativeTransfers")),
+                has_tokenTransfers=bool(first.get("tokenTransfers")),
+                keys=list(first.keys())[:8],
+            )
         return result
     except Exception as e:
         logger.warning("realtime_pipeline_fetch_failed", wallet=wallet[:16], error=str(e))
@@ -168,7 +173,9 @@ async def _ensure_wallet_in_trust_scores(wallet: str) -> None:
     try:
         conn = await get_conn()
         try:
-            exists = await conn.fetchval("SELECT 1 FROM trust_scores WHERE wallet = $1", wallet)
+            exists = await conn.fetchval(
+                "SELECT 1 FROM trust_scores WHERE wallet = $1", wallet
+            )
             if not exists:
                 now = int(time.time())
                 await conn.execute(
@@ -192,8 +199,9 @@ async def _insert_transactions(conn, wallet: str, records: list[dict[str, Any]])
             await conn.execute(
                 """
                 INSERT INTO transactions
-                (wallet, signature, sender, receiver, amount_lamports, timestamp, slot, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (wallet, signature, sender, receiver, amount_lamports,
+                timestamp, slot, created_at, program_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (wallet, signature) DO NOTHING
                 """,
                 r["wallet"],
@@ -204,16 +212,27 @@ async def _insert_transactions(conn, wallet: str, records: list[dict[str, Any]])
                 r["timestamp"],
                 None,
                 int(time.time()),
+                r.get("program_id"),
             )
             inserted += 1
         except Exception as e:
-            logger.warning("insert_transaction_failed", wallet=wallet[:16], error=str(e), signature=r.get("signature","")[:16])
-    logger.info("insert_transactions_done", wallet=wallet[:16], inserted=inserted, total=len(records))
+            logger.warning(
+                "insert_transaction_failed",
+                wallet=wallet[:16],
+                error=str(e),
+                signature=r.get("signature", "")[:16],
+            )
+    logger.info(
+        "insert_transactions_done",
+        wallet=wallet[:16],
+        inserted=inserted,
+        total=len(records),
+    )
     return inserted
 
 
 async def _apply_reason_weights(wallet: str, evidence: list[dict]) -> None:
-    """Apply reason weights and insert into wallet_reasons (same logic as reason_weight_engine)."""
+    """Apply reason weights and insert into wallet_reasons."""
     weights = get_reason_weights()
     seen_codes: set[str] = set()
 
@@ -247,10 +266,91 @@ async def _apply_reason_weights(wallet: str, evidence: list[dict]) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# [NEW] Daemon Protocol enrichment
+# ---------------------------------------------------------------------------
+
+async def _run_daemon_enrichment(wallet: str) -> dict[str, Any] | None:
+    """
+    Query Daemon Protocol for risk score + sanctions data.
+    Runs in executor (httpx is sync). Returns dict to store in PostgreSQL,
+    or None if Daemon is unavailable (graceful degradation).
+
+    Stores result in trust_scores.daemon_risk_score, daemon_is_sanctioned,
+    daemon_risk_level if those columns exist — otherwise logs only.
+    """
+    try:
+        from backend_blockid.integrations.daemon_client import get_wallet_risk
+        loop = asyncio.get_event_loop()
+        daemon = await loop.run_in_executor(None, lambda: get_wallet_risk(wallet))
+
+        if daemon is None:
+            logger.warning("daemon_enrichment_skipped", wallet=wallet[:16], reason="no result")
+            return None
+
+        logger.info(
+            "daemon_enrichment_done",
+            wallet=wallet[:16],
+            daemon_risk_score=daemon.risk_score,
+            daemon_risk_level=daemon.risk_level,
+            daemon_is_sanctioned=daemon.is_sanctioned,
+            daemon_is_critical=daemon.is_critical,
+            daemon_penalty=daemon.penalty_score,
+        )
+
+        # Persist Daemon data to trust_scores (best-effort — skip if columns don't exist yet)
+        try:
+            conn = await get_conn()
+            try:
+                await conn.execute(
+                    """
+                    UPDATE trust_scores
+                    SET
+                        daemon_risk_score    = $1,
+                        daemon_is_sanctioned = $2,
+                        daemon_risk_level    = $3,
+                        daemon_labels        = $4,
+                        daemon_updated_at    = CURRENT_TIMESTAMP
+                    WHERE wallet = $5
+                    """,
+                    daemon.risk_score,
+                    daemon.is_sanctioned,
+                    daemon.risk_level,
+                    ",".join(daemon.labels) if daemon.labels else None,
+                    wallet,
+                )
+            finally:
+                await release_conn(conn)
+        except Exception as db_err:
+            # Columns may not exist yet — non-fatal
+            logger.debug(
+                "daemon_enrichment_db_skip",
+                wallet=wallet[:16],
+                error=str(db_err),
+            )
+
+        return {
+            "risk_score": daemon.risk_score,
+            "risk_level": daemon.risk_level,
+            "is_sanctioned": daemon.is_sanctioned,
+            "is_critical": daemon.is_critical,
+            "penalty": daemon.penalty_score,
+            "labels": daemon.labels,
+        }
+
+    except Exception as e:
+        logger.warning("daemon_enrichment_error", wallet=wallet[:16], error=str(e))
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
 async def run_realtime_wallet_pipeline(wallet: str) -> int:
     """
-    Run full BlockID pipeline for a single wallet. Same logic as run_full_pipeline.
-    Returns the number of trust_scores rows inserted (1 if new, 0 if updated).
+    Run full BlockID pipeline for a single wallet.
+    Returns 1 if wallet is new, 0 if updated.
     """
     wallet = (wallet or "").strip()
     if not wallet:
@@ -258,7 +358,9 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
 
     conn = await get_conn()
     try:
-        existed_before = await conn.fetchval("SELECT 1 FROM trust_scores WHERE wallet = $1", wallet)
+        existed_before = await conn.fetchval(
+            "SELECT 1 FROM trust_scores WHERE wallet = $1", wallet
+        )
     finally:
         await release_conn(conn)
 
@@ -278,13 +380,9 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         from backend_blockid.oracle.wallet_profile_builder import build_wallet_profile
         await build_wallet_profile(wallet)
     except Exception as e:
-        logger.debug(
-            "realtime_wallet_profile_skip",
-            wallet=wallet[:16],
-            error=str(e),
-        )
+        logger.debug("realtime_wallet_profile_skip", wallet=wallet[:16], error=str(e))
 
-    # Fetch transactions and insert (pipeline prerequisite)
+    # Fetch + insert transactions
     records: list[dict[str, Any]] = []
     if API_KEY:
         raw = _fetch_transactions(wallet)
@@ -294,7 +392,6 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                 records.append(r)
 
     conn = await get_conn()
-    existed = False
     try:
         if records:
             await _insert_transactions(conn, wallet, records)
@@ -355,7 +452,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             except Exception:
                 pass
 
-        # Apply reason weights (reason_weight_engine logic for single wallet)
+        # Step 4b: _apply_reason_weights — DELETE + insert negative reasons (must run before Step 5b)
         await _apply_reason_weights(wallet, evidence)
 
         # Step 5: reason_aggregator
@@ -366,7 +463,27 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         except Exception as e:
             logger.debug("realtime_reason_aggregator_skip", wallet=wallet[:16], error=str(e))
 
-        # Step 6: reason_weight_engine — skip (we applied weights above; full module would wipe DB)
+        # Step 5b: detect_positive_reasons — insert positive reasons AFTER 4b so DELETE does not wipe them
+        logger.info("realtime_pipeline_step", step="detect_positive_reasons", wallet=wallet[:16])
+        try:
+            from backend_blockid.ai_engine.positive_reasons import detect_positive_reasons
+            positive = await detect_positive_reasons(wallet)
+            for r in positive:
+                await insert_wallet_reason(
+                    wallet=wallet,
+                    reason_code=r["code"],
+                    weight=int(r.get("weight", 0)),
+                    confidence=float(r.get("confidence", 1.0)),
+                    tx_hash=r.get("tx_hash"),
+                )
+        except Exception as e:
+            logger.warning(
+                "realtime_positive_reasons_skip",
+                wallet=wallet[:16],
+                error=str(e),
+            )
+
+        # Step 6: reason_weight_engine — skip (applied inline above)
 
         # Ensure wallet in cluster_features for predict
         cluster_path = _DATA_DIR / "cluster_features.csv"
@@ -390,10 +507,121 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             await predict_wallet_score_for_wallet(wallet)
         except Exception as e:
             logger.debug("realtime_predict_skip", wallet=wallet[:16], error=str(e))
+
     finally:
         await release_conn(conn)
 
-    # Step 8: update_wallet_score_async
+    # Step 8: [NEW] Daemon Protocol enrichment
+    # Runs AFTER ML scoring — enriches trust_scores with external risk/sanctions data
+    # Non-blocking: pipeline completes normally even if Daemon is down
+    logger.info("realtime_pipeline_step", step="daemon_enrichment", wallet=wallet[:16])
+    await _run_daemon_enrichment(wallet)
+
+    # Step 9: [NEW] Behavioral linking scan (suggestions only; user must confirm)
+    logger.info("realtime_pipeline_step", step="behavioral_linking", wallet=wallet[:16])
+    try:
+        from backend_blockid.ml.behavioral_linking import run_linking_scan, save_suggestions
+        link_conn = await get_conn()
+        try:
+            suggestions = await run_linking_scan(wallet, link_conn)
+            if suggestions:
+                handle_row = await link_conn.fetchrow(
+                    "SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1",
+                    wallet,
+                )
+                handle = handle_row["handle"] if handle_row else None
+                saved = await save_suggestions(wallet, suggestions, handle, link_conn)
+                logger.info(
+                    "behavioral_linking_done",
+                    wallet=wallet[:16],
+                    suggestions_found=len(suggestions),
+                    suggestions_saved=saved,
+                )
+        finally:
+            await release_conn(link_conn)
+    except Exception as e:
+        logger.debug("behavioral_linking_skip", wallet=wallet[:16], error=str(e))
+
+    # Step 9b: Apply linking boost to trust score
+    try:
+        from backend_blockid.ml.behavioral_linking import calculate_linking_boost
+
+        boost_conn = await get_conn()
+        try:
+            boost, linking_reasons = await calculate_linking_boost(wallet, boost_conn)
+            if boost != 0 or linking_reasons:
+                # Insert linking reason codes
+                for code in linking_reasons:
+                    weight = get_reason_weights().get(code, 0)
+                    await insert_wallet_reason(
+                        wallet=wallet,
+                        reason_code=code,
+                        weight=weight,
+                        confidence=1.0,
+                    )
+
+                if boost != 0:
+                    # Step 1: fetch score_before for linking history
+                    score_row = await boost_conn.fetchrow(
+                        "SELECT score FROM trust_scores WHERE wallet = $1",
+                        wallet,
+                    )
+                    score_before_linking = (
+                        float(score_row["score"]) if score_row and score_row["score"] is not None else None
+                    )
+                    base_score = score_before_linking if score_before_linking is not None else 0.0
+                    new_linking_score = min(97.0, max(0.0, base_score + float(boost)))
+
+                    # Step 2: log LINKING change BEFORE UPDATE (non-fatal)
+                    try:
+                        logger.info(
+                            "score_history_linking_hook",
+                            wallet=wallet[:16],
+                            boost=boost,
+                            linking_reasons=linking_reasons,
+                            score_before=score_before_linking,
+                        )
+                        await log_score_change(
+                            wallet=wallet,
+                            score_before=score_before_linking,
+                            score_after=float(new_linking_score),
+                            change_category="LINKING",
+                            triggered_by="linking_engine",
+                            reason_codes=linking_reasons or None,
+                            confidence=None,
+                            metadata={
+                                "boost": float(boost),
+                                "signals_count": len(linking_reasons or []),
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                    # Step 3: apply linking boost to trust_scores
+                    await boost_conn.execute(
+                        """
+                        UPDATE trust_scores
+                        SET score = LEAST(97, GREATEST(0, score + $1)),
+                            final_score = LEAST(97, GREATEST(0, COALESCE(final_score, score) + $1)),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE wallet = $2
+                        """,
+                        boost,
+                        wallet,
+                    )
+
+                logger.info(
+                    "linking_boost_applied",
+                    wallet=wallet[:16],
+                    boost=boost,
+                    linking_reasons=linking_reasons,
+                )
+        finally:
+            await release_conn(boost_conn)
+    except Exception as e:
+        logger.debug("linking_boost_skip", wallet=wallet[:16], error=str(e))
+
+    # Step 10: update_wallet_score_async (uses Daemon-enriched data if persisted)
     logger.info("realtime_pipeline_step", step="update_wallet_score_async", wallet=wallet[:16])
     await update_wallet_score_async(wallet)
 
@@ -406,6 +634,10 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     return inserted_count
 
 
+# ---------------------------------------------------------------------------
+# Streaming pipeline (SSE / Realtime Investigator Mode)
+# ---------------------------------------------------------------------------
+
 async def run_realtime_wallet_pipeline_streaming(wallet: str):
     """
     Run full BlockID pipeline for a single wallet, yielding progress as (step_id, message, **extra).
@@ -417,7 +649,9 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
 
     conn = await get_conn()
     try:
-        existed_before = await conn.fetchval("SELECT 1 FROM trust_scores WHERE wallet = $1", wallet)
+        existed_before = await conn.fetchval(
+            "SELECT 1 FROM trust_scores WHERE wallet = $1", wallet
+        )
     finally:
         await release_conn(conn)
 
@@ -432,16 +666,11 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
         logger.debug("realtime_scan_wallet_skip", wallet=wallet[:16], error=str(e))
 
     # Step 1.5: build_wallet_profile
-    logger.info("realtime_pipeline_step", step="build_wallet_profile", wallet=wallet[:16])
     try:
         from backend_blockid.oracle.wallet_profile_builder import build_wallet_profile
         await build_wallet_profile(wallet)
     except Exception as e:
-        logger.debug(
-            "realtime_wallet_profile_skip",
-            wallet=wallet[:16],
-            error=str(e),
-        )
+        logger.debug("realtime_wallet_profile_skip", wallet=wallet[:16], error=str(e))
 
     records: list[dict[str, Any]] = []
     if API_KEY:
@@ -519,6 +748,25 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
         except Exception as e:
             logger.debug("realtime_reason_aggregator_skip", wallet=wallet[:16], error=str(e))
 
+        # Step 5b: detect_positive_reasons — insert positive reasons AFTER 4b so DELETE does not wipe them
+        try:
+            from backend_blockid.ai_engine.positive_reasons import detect_positive_reasons
+            positive = await detect_positive_reasons(wallet)
+            for r in positive:
+                await insert_wallet_reason(
+                    wallet=wallet,
+                    reason_code=r["code"],
+                    weight=int(r.get("weight", 0)),
+                    confidence=float(r.get("confidence", 1.0)),
+                    tx_hash=r.get("tx_hash"),
+                )
+        except Exception as e:
+            logger.warning(
+                "realtime_positive_reasons_skip",
+                wallet=wallet[:16],
+                error=str(e),
+            )
+
         cluster_path = _DATA_DIR / "cluster_features.csv"
         default_row = {
             "wallet": wallet,
@@ -538,8 +786,44 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
             await predict_wallet_score_for_wallet(wallet)
         except Exception as e:
             logger.debug("realtime_predict_skip", wallet=wallet[:16], error=str(e))
+
     finally:
         await release_conn(conn)
 
+    # Step 5 (streaming): daemon_enrichment — [NEW]
+    yield ("daemon_check", "Checking sanctions & external risk", {"wallet": wallet[:16]})
+    daemon_data = await _run_daemon_enrichment(wallet)
+
+    # Step 5.5 (streaming): behavioral_linking
+    yield ("behavioral_linking", "Scanning for linked wallets", {"wallet": wallet[:16]})
+    try:
+        from backend_blockid.ml.behavioral_linking import run_linking_scan, save_suggestions
+        link_conn = await get_conn()
+        try:
+            suggestions = await run_linking_scan(wallet, link_conn)
+            if suggestions:
+                handle_row = await link_conn.fetchrow(
+                    "SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1",
+                    wallet,
+                )
+                handle = handle_row["handle"] if handle_row else None
+                await save_suggestions(wallet, suggestions, handle, link_conn)
+        finally:
+            await release_conn(link_conn)
+    except Exception as e:
+        logger.debug("behavioral_linking_skip", wallet=wallet[:16], error=str(e))
+
+    # Step 6 (streaming): finalize score
     await update_wallet_score_async(wallet)
-    yield ("done", "Analysis complete", {"wallet": wallet[:16], "trust_inserted": 1 if not existed_before else 0})
+
+    yield (
+        "done",
+        "Analysis complete",
+        {
+            "wallet": wallet[:16],
+            "trust_inserted": 1 if not existed_before else 0,
+            "daemon_risk_score": daemon_data.get("risk_score") if daemon_data else None,
+            "daemon_is_sanctioned": daemon_data.get("is_sanctioned") if daemon_data else None,
+            "daemon_risk_level": daemon_data.get("risk_level") if daemon_data else None,
+        },
+    )

@@ -87,3 +87,4 @@ k8s/secret.yaml
 # ==============================
 
 BACKEND-BLOCK-ID/
+mint_service/keypair.json

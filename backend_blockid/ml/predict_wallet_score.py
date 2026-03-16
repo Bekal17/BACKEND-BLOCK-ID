@@ -429,7 +429,7 @@ def predict_wallet_score_batch() -> int:
             ml_score = 50
             logger.info("base_score_normalized_to_50", wallet=wallet)
         penalty = -penalty_map.get(wallet, 0)  # negative so base + penalty reduces score
-        final_score = max(0, min(100, ml_score + penalty))
+        final_score = max(0, min(97, ml_score + penalty))
 
         reason_data = reason_map.get(wallet, ([], [], {}))
         reason_codes, reason_text = reason_data[0], reason_data[1]
@@ -589,7 +589,7 @@ def predict_wallet_score_batch() -> int:
         )
 
         final_score = safe_num(final_score, 0)
-        final_score = max(0, min(100, final_score))
+        final_score = max(0, min(97, final_score))
 
         logger.info(
             "scoring_debug",

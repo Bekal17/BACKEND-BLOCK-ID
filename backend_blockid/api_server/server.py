@@ -53,6 +53,12 @@ from backend_blockid.api_server.billing_middleware import BillingMiddleware
 from backend_blockid.api_server.api_key_middleware import ApiKeyMiddleware, start_hourly_flush
 from backend_blockid.api_server.metrics import generate_metrics, http_request_duration_seconds
 from backend_blockid.api_server.trust_score import router as trust_router
+from backend_blockid.database.admin_history import log_admin_action
+from backend_blockid.api_server.identity_api import router as identity_router
+from backend_blockid.api_server.handle_api import router as handle_router
+from backend_blockid.api_server.linking_api import router as linking_router
+from backend_blockid.api_server.profile_api import router as profile_router
+from backend_blockid.api_server.social_api import router as social_router
 from backend_blockid.database.pg_connection import init_db
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
@@ -230,7 +236,11 @@ app.include_router(explorer_router)
 app.include_router(wallet_overview_router)
 app.include_router(wallet_dashboard_router)
 app.include_router(investigator_router)
-
+app.include_router(identity_router)
+app.include_router(handle_router)
+app.include_router(linking_router)
+app.include_router(profile_router)
+app.include_router(social_router)
 
 
 @app.post("/wallet/recalculate/{wallet}")
@@ -257,6 +267,20 @@ async def recalculate_wallet(wallet: str) -> dict[str, Any]:
         print("[RealtimePipeline] Updating wallet score")
         print("[RealtimePipeline] Completed")
         logger.info("recalculate_wallet_done", wallet=wallet[:16], trust_inserted=trust_inserted)
+
+        # Admin history hook (FORCE_RECALCULATE) — non-fatal
+        try:
+            await log_admin_action(
+                action_type="FORCE_RECALCULATE",
+                wallet=wallet,
+                value_before=None,
+                value_after=None,
+                reason="manual recalculate via API",
+                admin_id="api",
+            )
+        except Exception:
+            pass
+
         return {
             "status": "ok",
             "wallet": wallet,

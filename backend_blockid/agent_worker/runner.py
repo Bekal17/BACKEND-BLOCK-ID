@@ -68,7 +68,8 @@ def _analyze_and_save_wallet(
     from backend_blockid.solana_listener.parser import ParsedTransaction
     from backend_blockid.analysis_engine.features import extract_features
     from backend_blockid.analysis_engine.anomaly import detect_anomalies
-    from backend_blockid.analysis_engine.scorer import compute_trust_score
+    from backend_blockid.analytics.risk_engine import calculate_risk
+    from backend_blockid.analytics.trust_engine import calculate_trust
     from backend_blockid.analysis_engine.graph import update_wallet_graph
     from backend_blockid.analysis_engine.risk_propagation import propagate_risk
 
@@ -93,7 +94,14 @@ def _analyze_and_save_wallet(
     ]
     features = extract_features(txs, wallet)
     anomaly_result = detect_anomalies(features, config=anomaly_config)
-    base_score = compute_trust_score(features, anomaly_result)
+    metrics = {
+        "wallet": wallet,
+        "tx_count": features.tx_count,
+        "wallet_age_days": int(features.time_span_days or 0),
+        "unique_programs": features.unique_counterparties,
+    }
+    risk = calculate_risk(metrics)
+    base_score, _risk_label, _reason_codes = calculate_trust(metrics, risk, daemon=None)
     try:
         score = propagate_risk(db, wallet, base_score)
     except Exception as e:

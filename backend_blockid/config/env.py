@@ -56,6 +56,12 @@ def load_blockid_env() -> None:
         pass
 
 
+def get_helius_api_key() -> str:
+    """Return HELIUS_API_KEY from env (for Enhanced Transactions, etc.)."""
+    load_blockid_env()
+    return (os.getenv("HELIUS_API_KEY") or "").strip()
+
+
 def get_solana_network() -> str:
     """
     Return SOLANA_NETWORK from env: devnet | mainnet.

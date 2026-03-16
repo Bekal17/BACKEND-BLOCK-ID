@@ -45,7 +45,17 @@ async def generate_badge_async(wallet: str, *, _conn=None) -> dict:
             FROM wallet_reasons
             WHERE wallet = $1 AND reason_code IS NOT NULL
             ORDER BY ABS(weight) DESC
-            LIMIT 3
+            LIMIT 10
+            """,
+            wallet.strip(),
+        )
+        positive_rows = await conn.fetch(
+            """
+            SELECT reason_code, weight
+            FROM wallet_reasons
+            WHERE wallet = $1 AND reason_code IS NOT NULL AND weight > 0
+            ORDER BY weight DESC
+            LIMIT 2
             """,
             wallet.strip(),
         )
@@ -55,6 +65,8 @@ async def generate_badge_async(wallet: str, *, _conn=None) -> dict:
 
     top_reasons: list[str] = []
     reason_texts: list[str] = []
+    positive_texts: list[str] = []
+
     for r in reason_rows:
         code = (r["reason_code"] or "").strip()
         if code and code != "NO_RISK_DETECTED":
@@ -63,16 +75,33 @@ async def generate_badge_async(wallet: str, *, _conn=None) -> dict:
             text = get_template(code, **placeholders)
             reason_texts.append(text)
 
+    for r in positive_rows[:2]:
+        code = (r["reason_code"] or "").strip()
+        if code:
+            placeholders = {"distance": "1-3"} if code == "SCAM_DISTANCE" else {}
+            t = get_template(code, **placeholders)
+            if t and t not in positive_texts:
+                positive_texts.append(t)
+
     def _shorten(t: str) -> str:
         return t.replace("This wallet ", "").replace("This wallet", "").strip()
 
-    if badge["name"] == "Trusted" and not reason_texts:
+    if badge["name"] == "Trusted" and not reason_texts and not positive_texts:
         message = "No significant risk detected."
         summary = "No significant risk detected."
-    elif reason_texts:
-        message = reason_texts[0]
-        parts = [_shorten(t) for t in reason_texts[:2]]
-        summary = f"{badge['name']} — " + " and ".join(parts)
+    elif reason_texts or positive_texts:
+        risk_parts = [_shorten(t) for t in reason_texts[:2]]
+        pos_parts = [_shorten(t) for t in positive_texts[:2]]
+        if risk_parts and pos_parts:
+            message = reason_texts[0] if reason_texts else positive_texts[0]
+            summary = f"{badge['name']} — " + " and ".join(risk_parts)
+            summary += ". Positive: " + ", ".join(pos_parts)
+        elif risk_parts:
+            message = reason_texts[0]
+            summary = f"{badge['name']} — " + " and ".join(risk_parts)
+        else:
+            message = positive_texts[0]
+            summary = f"{badge['name']} — " + ", ".join(pos_parts)
     else:
         message = f"Score {score}. Risk level: {risk_level_text}."
         summary = f"Score {score}. Risk level: {risk_level_text}."

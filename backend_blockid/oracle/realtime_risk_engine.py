@@ -129,7 +129,7 @@ async def update_wallet_risk(wallet: str) -> dict[str, Any] | None:
         if TEST_MODE:
             base_score = await _get_current_score(conn, wallet)
             dummy_penalty = -5
-            final_score = max(0, min(100, int(base_score) + dummy_penalty))
+            final_score = max(0, min(97, int(base_score) + dummy_penalty))
             reason_codes = ["TEST_MODE_DUMMY"]
             risk_level = "medium" if final_score < 70 else "low"
             await update_wallet_score(wallet, final_score, risk_level, "{}")
@@ -180,7 +180,7 @@ async def update_wallet_risk(wallet: str) -> dict[str, Any] | None:
 
         penalty, reasons = compute_dynamic_penalty(reasons, wallet, cluster_size=0, flow_amount=0, tx_count=0)
         final_score = int(base_score) + penalty - int(posterior * 100)
-        final_score = max(0, min(100, final_score))
+        final_score = max(0, min(97, final_score))
         risk_level = risk_level_from_reasons(reasons)
         reason_codes = [r.get("code", "") for r in reasons if r.get("code")]
 
