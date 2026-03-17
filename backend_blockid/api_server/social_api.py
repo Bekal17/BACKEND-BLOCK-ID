@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, Query, status
 from pydantic import BaseModel, Field
 
 from backend_blockid.api_server.identity_eligibility import get_score_tier
+from backend_blockid.api_server.privacy_api import _ensure_privacy_settings
 from backend_blockid.api_server.social_moderation import (
     check_appeal,
     check_post_visibility,
@@ -346,9 +347,11 @@ async def get_explore_feed(
             f"""
             SELECT p.*
             FROM social_posts p
+            LEFT JOIN user_privacy_settings ups ON ups.wallet = p.wallet
             WHERE p.post_type = 'PUBLIC'
               AND p.is_hidden = FALSE
               AND COALESCE(p.trust_score, 0) >= $1
+              AND (ups.posts_visibility = 'PUBLIC' OR ups.posts_visibility IS NULL)
               {before_clause}
             ORDER BY p.trust_score DESC, p.created_at DESC
             LIMIT $2
@@ -385,6 +388,14 @@ async def follow_wallet(body: Dict[str, Any]):
             raise HTTPException(
                 status_code=403,
                 detail="Trust score too low. Score 30+ required to follow.",
+            )
+
+        # Check if target wallet allows follows
+        target_settings = await _ensure_privacy_settings(following_wallet, conn)
+        if target_settings.get("allow_follows") == "NONE":
+            raise HTTPException(
+                status_code=403,
+                detail="This wallet does not accept follows",
             )
 
         await conn.execute(

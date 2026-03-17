@@ -31,6 +31,7 @@ from backend_blockid.api_server.db_wallet_tracking import (
     list_wallets as tracking_list_wallets,
 )
 from backend_blockid.api_server.badge_api import router as badge_router
+from backend_blockid.api_server.balance_api import router as balance_router
 from backend_blockid.api_server.graph_api import router as graph_router, investigation_router as graph_investigation_router
 from backend_blockid.api_server.investigation_api import router as investigation_router
 from backend_blockid.api_server.realtime_api import router as realtime_router
@@ -57,6 +58,7 @@ from backend_blockid.database.admin_history import log_admin_action
 from backend_blockid.api_server.identity_api import router as identity_router
 from backend_blockid.api_server.handle_api import router as handle_router
 from backend_blockid.api_server.linking_api import router as linking_router
+from backend_blockid.api_server.privacy_api import router as privacy_router
 from backend_blockid.api_server.profile_api import router as profile_router
 from backend_blockid.api_server.social_api import router as social_router
 from backend_blockid.database.pg_connection import init_db
@@ -216,6 +218,7 @@ def metrics() -> Response:
 
 
 app.include_router(trust_router, prefix="/api", tags=["Trust Score"])
+app.include_router(balance_router)
 app.include_router(explain_router)
 app.include_router(badge_router)
 app.include_router(investigation_router)
@@ -239,6 +242,7 @@ app.include_router(investigator_router)
 app.include_router(identity_router)
 app.include_router(handle_router)
 app.include_router(linking_router)
+app.include_router(privacy_router)
 app.include_router(profile_router)
 app.include_router(social_router)
 
