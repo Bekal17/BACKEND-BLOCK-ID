@@ -3,10 +3,11 @@ BlockID Identity NFT eligibility checker.
 
 Rules:
 1. already_minted → ALREADY_MINTED (not eligible)
-2. risk_level in ("HIGH", "CRITICAL") → HIGH_RISK_WALLET (not eligible)
-   SAFE, LOW, MEDIUM → eligible
-3. tx_count == 0 → NO_TRANSACTION_HISTORY (not eligible)
-4. All pass → eligible = True
+2. score < 30 → BLOCKED_LOW_SCORE (not eligible)
+3. risk_level in ("HIGH", "CRITICAL") → HIGH_RISK_WALLET (not eligible)
+4. score >= 30 → eligible = True
+
+Score tiers: BLOCKED (0-29), READ_ONLY (30-39), BASIC (40-49), STANDARD (50-69), TRUSTED (70+)
 """
 
 from __future__ import annotations
@@ -23,10 +24,10 @@ async def check_eligibility(wallet: str, conn) -> dict:
             "trust_score": float,
             "risk_level": str,
             "tx_count": int,
-            "already_minted": bool
+            "already_minted": bool,
+            "score_tier": str,
         }
     """
-    wallet = (wallet or "").strip()
     result = {
         "eligible": False,
         "reason": None,
@@ -34,19 +35,18 @@ async def check_eligibility(wallet: str, conn) -> dict:
         "risk_level": "",
         "tx_count": 0,
         "already_minted": False,
+        "score_tier": "BLOCKED",
     }
 
+    wallet = (wallet or "").strip()
     if not wallet:
         result["reason"] = "INVALID_WALLET"
         return result
 
     # 1. Check already minted
     existing = await conn.fetchrow(
-        """
-        SELECT mint_status, trust_score, risk_level
-        FROM identity_nft
-        WHERE wallet = $1
-        """,
+        "SELECT mint_status, trust_score, risk_level "
+        "FROM identity_nft WHERE wallet = $1",
         wallet,
     )
     if existing and (existing.get("mint_status") or "").upper() == "MINTED":
@@ -56,50 +56,56 @@ async def check_eligibility(wallet: str, conn) -> dict:
         result["risk_level"] = str(existing.get("risk_level") or "")
         return result
 
-    # 2. Get trust_scores (score, risk_level)
+    # 2. Get trust score
     ts_row = await conn.fetchrow(
-        """
-        SELECT score, risk_level, wallet_age_days, metadata_json
-        FROM trust_scores
-        WHERE wallet = $1
-        ORDER BY computed_at DESC NULLS LAST, last_updated DESC NULLS LAST
-        LIMIT 1
-        """,
+        "SELECT score, risk_level FROM trust_scores "
+        "WHERE wallet = $1 "
+        "ORDER BY computed_at DESC NULLS LAST LIMIT 1",
         wallet,
     )
-
-    # 3. Get tx_count from transactions
-    tx_row = await conn.fetchrow(
-        """
-        SELECT COUNT(*)::int AS cnt
-        FROM transactions
-        WHERE wallet = $1
-        """,
-        wallet,
-    )
-    tx_count = int(tx_row.get("cnt") or 0) if tx_row else 0
-
-    # If no trust_scores row, wallet not scored yet - caller should run pipeline
-    trust_score = 0.0
-    risk_level = ""
-    if ts_row:
-        trust_score = float(ts_row.get("score") or 0)
-        risk_level = str(ts_row.get("risk_level") or "").strip().upper()
+    trust_score = float(ts_row.get("score") or 0) if ts_row else 0.0
+    risk_level = str(ts_row.get("risk_level") or "").strip().upper() if ts_row else ""
 
     result["trust_score"] = trust_score
     result["risk_level"] = risk_level
-    result["tx_count"] = tx_count
 
-    # Rule 3: tx_count == 0 → NO_TRANSACTION_HISTORY
-    if tx_count == 0:
-        result["reason"] = "NO_TRANSACTION_HISTORY"
+    # 3. Determine score tier
+    if trust_score >= 70:
+        result["score_tier"] = "TRUSTED"
+    elif trust_score >= 50:
+        result["score_tier"] = "STANDARD"
+    elif trust_score >= 40:
+        result["score_tier"] = "BASIC"
+    elif trust_score >= 30:
+        result["score_tier"] = "READ_ONLY"
+    else:
+        result["score_tier"] = "BLOCKED"
+
+    # 4. Block if score < 30
+    if trust_score < 30:
+        result["reason"] = "BLOCKED_LOW_SCORE"
         return result
 
-    # Rule 2: risk_level HIGH or CRITICAL → HIGH_RISK_WALLET
+    # 5. Block if HIGH/CRITICAL risk
     if risk_level in ("HIGH", "CRITICAL"):
         result["reason"] = "HIGH_RISK_WALLET"
         return result
 
+    # 6. Eligible (score >= 30 and not high risk)
     result["eligible"] = True
     result["reason"] = None
     return result
+
+
+def get_score_tier(trust_score: float) -> str:
+    """Return score tier string for a given trust score."""
+    if trust_score >= 70:
+        return "TRUSTED"
+    elif trust_score >= 50:
+        return "STANDARD"
+    elif trust_score >= 40:
+        return "BASIC"
+    elif trust_score >= 30:
+        return "READ_ONLY"
+    else:
+        return "BLOCKED"

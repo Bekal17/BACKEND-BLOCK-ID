@@ -35,6 +35,7 @@ from backend_blockid.database.repositories import insert_wallet_reason
 from backend_blockid.database.score_history import log_score_change
 from backend_blockid.ml.reason_codes import get_reason_weights
 from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score_async
+from backend_blockid.api_server.identity_eligibility import check_eligibility
 from backend_blockid.tools.helius_client import helius_request
 
 logger = get_logger(__name__)
@@ -624,6 +625,52 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     # Step 10: update_wallet_score_async (uses Daemon-enriched data if persisted)
     logger.info("realtime_pipeline_step", step="update_wallet_score_async", wallet=wallet[:16])
     await update_wallet_score_async(wallet)
+
+    # AUTO-MINT: Trigger Identity NFT mint if eligible
+    # Fires when score >= 30 and wallet doesn't have NFT yet
+    try:
+        auto_mint_conn = await get_conn()
+        try:
+            # Check if already minted
+            existing_nft = await auto_mint_conn.fetchrow(
+                "SELECT mint_status FROM identity_nft WHERE wallet = $1",
+                wallet,
+            )
+            already_minted = (
+                existing_nft
+                and (existing_nft.get("mint_status") or "").upper() == "MINTED"
+            )
+
+            if not already_minted:
+                elig = await check_eligibility(wallet, auto_mint_conn)
+                if elig["eligible"]:
+                    logger.info(
+                        "auto_mint_identity_nft_triggered",
+                        wallet=wallet[:16],
+                        trust_score=elig["trust_score"],
+                        score_tier=elig.get("score_tier"),
+                    )
+                    # Import here to avoid circular imports
+                    from backend_blockid.api_server.identity_api import (
+                        MintRequest,
+                        mint_identity_nft,
+                    )
+                    mint_req = MintRequest(wallet=wallet)
+                    mint_result = await mint_identity_nft(mint_req)
+                    logger.info(
+                        "auto_mint_identity_nft_done",
+                        wallet=wallet[:16],
+                        success=mint_result.get("success", False),
+                    )
+        finally:
+            await release_conn(auto_mint_conn)
+    except Exception as e:
+        # Non-fatal — auto-mint failure should never crash pipeline
+        logger.warning(
+            "auto_mint_identity_nft_skip",
+            wallet=wallet[:16],
+            error=str(e),
+        )
 
     inserted_count = 1 if not existed_before else 0
     logger.info(

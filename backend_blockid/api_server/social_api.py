@@ -9,6 +9,7 @@ import httpx
 from fastapi import APIRouter, File, HTTPException, UploadFile, Query, status
 from pydantic import BaseModel, Field
 
+from backend_blockid.api_server.identity_eligibility import get_score_tier
 from backend_blockid.api_server.social_moderation import (
     check_appeal,
     check_post_visibility,
@@ -121,6 +122,42 @@ async def create_post(body: CreatePostRequest):
 
     conn = await get_conn()
     try:
+        # Score gate: require score >= 40 to post
+        ts = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        )
+        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
+        tier = get_score_tier(score)
+
+        if tier == "BLOCKED":
+            raise HTTPException(
+                status_code=403,
+                detail="Trust score too low to post. "
+                "Score 30+ required for basic access.",
+            )
+        if tier == "READ_ONLY":
+            raise HTTPException(
+                status_code=403,
+                detail="Score 40+ required to create posts.",
+            )
+
+        # Rate limit for BASIC tier (score 40-49): 3 posts/day
+        if tier == "BASIC":
+            today_count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM social_posts
+                WHERE wallet = $1
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                """,
+                wallet,
+            )
+            if (today_count or 0) >= 3:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily post limit reached (3/day for your score tier). "
+                    "Reach score 50+ for unlimited posting.",
+                )
+
         visibility = await check_post_visibility(wallet, conn)
         if not visibility["can_post"]:
             raise HTTPException(status_code=403, detail=visibility.get("reason") or "NOT_ALLOWED")
@@ -339,6 +376,17 @@ async def follow_wallet(body: Dict[str, Any]):
 
     conn = await get_conn()
     try:
+        # Score gate: require score >= 30 to follow
+        ts = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1", follower_wallet
+        )
+        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
+        if score < 30:
+            raise HTTPException(
+                status_code=403,
+                detail="Trust score too low. Score 30+ required to follow.",
+            )
+
         await conn.execute(
             """
             INSERT INTO social_follows (follower_wallet, following_wallet)
@@ -402,6 +450,17 @@ async def like_post(body: Dict[str, Any]):
 
     conn = await get_conn()
     try:
+        # Score gate: require score >= 40 to like
+        ts = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        )
+        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
+        if score < 40:
+            raise HTTPException(
+                status_code=403,
+                detail="Score 40+ required to like posts.",
+            )
+
         inserted = await conn.fetchrow(
             """
             INSERT INTO social_likes (post_id, wallet)
@@ -457,6 +516,127 @@ async def unlike_post(body: Dict[str, Any]):
         await release_conn(conn)
 
 
+@router.post("/repost")
+async def repost_post(body: Dict[str, Any]):
+    wallet = (body.get("wallet") or "").strip()
+    post_id = body.get("post_id")
+    quote_content = (body.get("quote_content") or "").strip()
+
+    if not wallet or not post_id:
+        raise HTTPException(status_code=400, detail="wallet and post_id required")
+
+    signature = body.get("signature", "")
+    if signature != "devtest_signature_bypass":
+        await _require_identity_nft(wallet)
+
+    conn = await get_conn()
+    try:
+        # Score gate: require >= 40
+        ts = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        )
+        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
+        tier = get_score_tier(score)
+        if tier in ("BLOCKED", "READ_ONLY"):
+            raise HTTPException(
+                status_code=403,
+                detail="Score 40+ required to repost.",
+            )
+
+        # Rate limit BASIC tier (40-49): 3 posts/day
+        if tier == "BASIC":
+            today_count = await conn.fetchval(
+                """SELECT COUNT(*) FROM social_posts
+                   WHERE wallet = $1
+                   AND created_at > NOW() - INTERVAL '24 hours'""",
+                wallet,
+            )
+            if (today_count or 0) >= 3:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily limit reached. Score 50+ for unlimited.",
+                )
+
+        # Get original post
+        original = await conn.fetchrow(
+            "SELECT id, wallet, content, post_type "
+            "FROM social_posts WHERE id = $1 AND is_hidden = FALSE",
+            post_id,
+        )
+        if not original:
+            raise HTTPException(status_code=404, detail="Post not found")
+
+        # Cannot repost own post
+        if original["wallet"] == wallet:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot repost your own post",
+            )
+
+        # Check already reposted
+        already = await conn.fetchval(
+            """SELECT id FROM social_posts
+               WHERE wallet = $1 AND repost_of = $2
+               AND is_repost = TRUE""",
+            wallet,
+            post_id,
+        )
+        if already:
+            raise HTTPException(
+                status_code=400,
+                detail="Already reposted this post",
+            )
+
+        # Get handle
+        handle_row = await conn.fetchrow(
+            "SELECT handle FROM handle_registry "
+            "WHERE owner_wallet = $1 LIMIT 1",
+            wallet,
+        )
+        handle = handle_row["handle"] if handle_row else None
+
+        # Simple repost uses original content; quote repost uses quote_content
+        is_quote = bool(quote_content)
+        content = quote_content if is_quote else original["content"]
+
+        # Create new post as repost
+        new_post = await conn.fetchrow(
+            """INSERT INTO social_posts
+               (wallet, handle, content, post_type,
+                is_repost, repost_of, quote_content,
+                like_count, reply_count, repost_count)
+               VALUES ($1, $2, $3, $4, TRUE, $5, $6, 0, 0, 0)
+               RETURNING id, created_at""",
+            wallet,
+            handle,
+            content,
+            original["post_type"],
+            post_id,
+            quote_content if is_quote else None,
+        )
+
+        # Increment repost_count on original post
+        await conn.execute(
+            "UPDATE social_posts SET repost_count = "
+            "COALESCE(repost_count, 0) + 1 WHERE id = $1",
+            post_id,
+        )
+
+        # Notify original poster
+        await _notify(conn, original["wallet"], "REPOST", wallet, post_id)
+
+        return {
+            "success": True,
+            "post_id": new_post["id"],
+            "is_quote": is_quote,
+            "original_post_id": post_id,
+            "wallet": wallet,
+            "message": "Quote reposted" if is_quote else "Reposted",
+        }
+    finally:
+        await release_conn(conn)
+
+
 @router.post("/flag")
 async def flag_post(body: Dict[str, Any]):
     wallet = body.get("wallet", "").strip()
@@ -474,6 +654,60 @@ async def flag_post(body: Dict[str, Any]):
     try:
         result = await process_flag(post_id, wallet, reason, conn)
         return result
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/report")
+async def report_post(body: Dict[str, Any]):
+    wallet = (body.get("wallet") or "").strip()
+    post_id = body.get("post_id")
+    reason = (body.get("reason") or "OTHER").strip().upper()
+    details = (body.get("details") or "").strip()
+
+    valid_reasons = {"SPAM", "HARASSMENT", "MISINFORMATION", "SCAM", "OTHER"}
+    if reason not in valid_reasons:
+        reason = "OTHER"
+
+    if not wallet or not post_id:
+        raise HTTPException(status_code=400, detail="wallet and post_id required")
+
+    signature = body.get("signature", "")
+    if signature != "devtest_signature_bypass":
+        await _require_identity_nft(wallet)
+
+    conn = await get_conn()
+    try:
+        post = await conn.fetchrow(
+            "SELECT id, wallet FROM social_posts WHERE id = $1", post_id
+        )
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+
+        if post["wallet"] == wallet:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot report your own post",
+            )
+
+        inserted = await conn.fetchrow(
+            """INSERT INTO social_reports
+               (post_id, reporter_wallet, reason, details)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (post_id, reporter_wallet) DO NOTHING
+               RETURNING id""",
+            post_id,
+            wallet,
+            reason,
+            details or None,
+        )
+
+        return {
+            "success": True,
+            "reported": inserted is not None,
+            "post_id": post_id,
+            "message": "Report submitted" if inserted else "Already reported",
+        }
     finally:
         await release_conn(conn)
 
@@ -598,6 +832,84 @@ async def endorse_wallet(body: Dict[str, Any]):
             "to_handle": handle_row["handle"] if handle_row else None,
             "trust_boost": ENDORSE_TRUST_BOOST if inserted else 0,
             "message": "Endorsement recorded" if inserted else "Already endorsed",
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/followers/{wallet}")
+async def get_followers(wallet: str):
+    """
+    Get list of wallets that follow this wallet.
+    Returns: { followers: [...], count: int }
+    """
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT
+                sf.follower_wallet as wallet,
+                hr.handle,
+                (SELECT score FROM trust_scores
+                 WHERE trust_scores.wallet = sf.follower_wallet
+                 ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score
+            FROM social_follows sf
+            LEFT JOIN handle_registry hr
+                ON hr.owner_wallet = sf.follower_wallet
+            WHERE sf.following_wallet = $1
+            ORDER BY sf.created_at DESC
+            LIMIT 100
+            """,
+            wallet,
+        )
+        followers = [dict(r) for r in rows]
+        return {
+            "wallet": wallet,
+            "followers": followers,
+            "count": len(followers),
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/following/{wallet}")
+async def get_following(wallet: str):
+    """
+    Get list of wallets this wallet follows.
+    Returns: { following: [...], count: int }
+    """
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT
+                sf.following_wallet as wallet,
+                hr.handle,
+                (SELECT score FROM trust_scores
+                 WHERE trust_scores.wallet = sf.following_wallet
+                 ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score
+            FROM social_follows sf
+            LEFT JOIN handle_registry hr
+                ON hr.owner_wallet = sf.following_wallet
+            WHERE sf.follower_wallet = $1
+            ORDER BY sf.created_at DESC
+            LIMIT 100
+            """,
+            wallet,
+        )
+        following = [dict(r) for r in rows]
+        return {
+            "wallet": wallet,
+            "following": following,
+            "count": len(following),
         }
     finally:
         await release_conn(conn)
