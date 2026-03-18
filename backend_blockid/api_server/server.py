@@ -58,6 +58,7 @@ from backend_blockid.database.admin_history import log_admin_action
 from backend_blockid.api_server.identity_api import router as identity_router
 from backend_blockid.api_server.handle_api import router as handle_router
 from backend_blockid.api_server.linking_api import router as linking_router
+from backend_blockid.api_server.dm_api import router as dm_router
 from backend_blockid.api_server.privacy_api import router as privacy_router
 from backend_blockid.api_server.profile_api import router as profile_router
 from backend_blockid.api_server.social_api import router as social_router
@@ -243,6 +244,7 @@ app.include_router(identity_router)
 app.include_router(handle_router)
 app.include_router(linking_router)
 app.include_router(privacy_router)
+app.include_router(dm_router)
 app.include_router(profile_router)
 app.include_router(social_router)
 
