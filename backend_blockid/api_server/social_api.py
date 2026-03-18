@@ -1166,6 +1166,155 @@ async def get_wallet_posts(
         await release_conn(conn)
 
 
+@router.post("/bookmark")
+async def bookmark_post(body: Dict[str, Any]):
+    """
+    Add or remove bookmark (toggle).
+    Body: { wallet, post_id, signature }
+    """
+    wallet = (body.get("wallet") or "").strip()
+    post_id = body.get("post_id")
+
+    if not wallet or not post_id:
+        raise HTTPException(
+            status_code=400,
+            detail="wallet and post_id required",
+        )
+
+    conn = await get_conn()
+    try:
+        existing = await conn.fetchrow(
+            "SELECT id FROM post_bookmarks "
+            "WHERE wallet = $1 AND post_id = $2",
+            wallet,
+            int(post_id),
+        )
+
+        if existing:
+            await conn.execute(
+                "DELETE FROM post_bookmarks "
+                "WHERE wallet = $1 AND post_id = $2",
+                wallet,
+                int(post_id),
+            )
+            return {
+                "success": True,
+                "bookmarked": False,
+                "post_id": post_id,
+            }
+        else:
+            await conn.execute(
+                """
+                INSERT INTO post_bookmarks
+                    (wallet, post_id)
+                VALUES ($1, $2)
+                ON CONFLICT (wallet, post_id)
+                DO NOTHING
+                """,
+                wallet,
+                int(post_id),
+            )
+            return {
+                "success": True,
+                "bookmarked": True,
+                "post_id": post_id,
+            }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/bookmarks/{wallet}")
+async def get_bookmarks(wallet: str):
+    """
+    Get all bookmarked posts for a wallet.
+    """
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT
+                sp.id,
+                sp.wallet,
+                sp.content,
+                sp.like_count,
+                sp.reply_count,
+                sp.repost_count,
+                sp.created_at,
+                sp.is_hidden,
+                sp.trust_score,
+                hr.handle,
+                pb.created_at AS bookmarked_at
+            FROM post_bookmarks pb
+            JOIN social_posts sp ON sp.id = pb.post_id
+            LEFT JOIN handle_registry hr
+                ON hr.owner_wallet = sp.wallet
+            WHERE pb.wallet = $1
+              AND sp.is_hidden = FALSE
+            ORDER BY pb.created_at DESC
+            LIMIT 100
+            """,
+            wallet,
+        )
+
+        posts = [
+            {
+                "id": r["id"],
+                "wallet": r["wallet"],
+                "handle": r.get("handle"),
+                "content": r["content"],
+                "like_count": r["like_count"],
+                "reply_count": r["reply_count"],
+                "repost_count": r["repost_count"],
+                "created_at": r["created_at"].isoformat()
+                if r.get("created_at")
+                else None,
+                "is_hidden": r["is_hidden"],
+                "trust_score": r["trust_score"],
+                "bookmarked_at": r["bookmarked_at"].isoformat()
+                if r.get("bookmarked_at")
+                else None,
+            }
+            for r in rows
+        ]
+
+        return {
+            "wallet": wallet,
+            "posts": posts,
+            "total": len(posts),
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/bookmarks/{wallet}/ids")
+async def get_bookmark_ids(wallet: str):
+    """
+    Get just the post IDs that wallet has bookmarked.
+    Used for showing bookmark state in feed.
+    """
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT post_id FROM post_bookmarks "
+            "WHERE wallet = $1",
+            wallet,
+        )
+        return {
+            "wallet": wallet,
+            "post_ids": [r["post_id"] for r in rows],
+        }
+    finally:
+        await release_conn(conn)
+
+
 HELIUS_BASE = (os.getenv("HELIUS_BASE") or "https://api.helius.xyz").rstrip("/")
 ACTIVITY_FEED_MAX_WALLETS_PARALLEL = 3
 ACTIVITY_FEED_TX_PER_WALLET = 10
