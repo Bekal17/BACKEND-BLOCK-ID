@@ -305,10 +305,18 @@ async def get_following_feed(
 
         rows = await conn.fetch(
             f"""
-            SELECT p.*
+            SELECT
+                p.*,
+                orig.wallet AS original_wallet,
+                orig.handle AS original_handle,
+                orig.content AS original_content,
+                orig.trust_score AS original_trust_score,
+                orig.created_at AS original_created_at
             FROM social_posts p
             JOIN social_follows f
               ON f.following_wallet = p.wallet
+            LEFT JOIN social_posts orig
+              ON orig.id = p.repost_of
             WHERE f.follower_wallet = $1
               AND p.is_hidden = FALSE
               {before_clause}
@@ -317,7 +325,30 @@ async def get_following_feed(
             """,
             *params,
         )
-        posts = [dict(r) for r in rows]
+
+        posts = []
+        for r in rows:
+            post = dict(r)
+            original_wallet = post.get("original_wallet")
+
+            if post.get("is_repost") and post.get("repost_of") and original_wallet:
+                post["original_post"] = {
+                    "wallet": post.pop("original_wallet", None),
+                    "handle": post.pop("original_handle", None),
+                    "content": post.pop("original_content", None),
+                    "trust_score": post.pop("original_trust_score", None),
+                    "created_at": post.pop("original_created_at", None),
+                }
+            else:
+                post.pop("original_wallet", None)
+                post.pop("original_handle", None)
+                post.pop("original_content", None)
+                post.pop("original_trust_score", None)
+                post.pop("original_created_at", None)
+                post["original_post"] = None
+
+            posts.append(post)
+
         next_cursor = posts[-1]["created_at"].isoformat() if posts else None
 
         activity: List[Dict[str, Any]] = []
@@ -345,9 +376,18 @@ async def get_explore_feed(
 
         rows = await conn.fetch(
             f"""
-            SELECT p.*
+            SELECT
+                p.*,
+                orig.wallet AS original_wallet,
+                orig.handle AS original_handle,
+                orig.content AS original_content,
+                orig.trust_score AS original_trust_score,
+                orig.created_at AS original_created_at
             FROM social_posts p
-            LEFT JOIN user_privacy_settings ups ON ups.wallet = p.wallet
+            LEFT JOIN social_posts orig
+              ON orig.id = p.repost_of
+            LEFT JOIN user_privacy_settings ups
+              ON ups.wallet = p.wallet
             WHERE p.post_type = 'PUBLIC'
               AND p.is_hidden = FALSE
               AND COALESCE(p.trust_score, 0) >= $1
@@ -358,7 +398,30 @@ async def get_explore_feed(
             """,
             *params,
         )
-        posts = [dict(r) for r in rows]
+
+        posts = []
+        for r in rows:
+            post = dict(r)
+            original_wallet = post.get("original_wallet")
+
+            if post.get("is_repost") and post.get("repost_of") and original_wallet:
+                post["original_post"] = {
+                    "wallet": post.pop("original_wallet", None),
+                    "handle": post.pop("original_handle", None),
+                    "content": post.pop("original_content", None),
+                    "trust_score": post.pop("original_trust_score", None),
+                    "created_at": post.pop("original_created_at", None),
+                }
+            else:
+                post.pop("original_wallet", None)
+                post.pop("original_handle", None)
+                post.pop("original_content", None)
+                post.pop("original_trust_score", None)
+                post.pop("original_created_at", None)
+                post["original_post"] = None
+
+            posts.append(post)
+
         next_cursor = posts[-1]["created_at"].isoformat() if posts else None
         return {"posts": posts, "next_cursor": next_cursor}
     finally:
@@ -1151,18 +1214,53 @@ async def get_wallet_posts(
     try:
         rows = await conn.fetch(
             """
-            SELECT id, wallet, handle, content, image_url, post_type, parent_id,
-                   reply_count, like_count, repost_count, is_hidden, trust_score,
-                   risk_level, created_at, is_repost, repost_of, quote_content
-            FROM social_posts
-            WHERE wallet = $1 AND is_hidden = FALSE
-            ORDER BY created_at DESC
+            SELECT
+                sp.id, sp.wallet, sp.handle, sp.content,
+                sp.image_url, sp.post_type, sp.parent_id,
+                sp.reply_count, sp.like_count, sp.repost_count,
+                sp.is_hidden, sp.trust_score, sp.risk_level,
+                sp.created_at, sp.is_repost, sp.repost_of,
+                sp.quote_content,
+                orig.wallet AS original_wallet,
+                orig.handle AS original_handle,
+                orig.content AS original_content,
+                orig.trust_score AS original_trust_score,
+                orig.created_at AS original_created_at
+            FROM social_posts sp
+            LEFT JOIN social_posts orig
+                ON orig.id = sp.repost_of
+            WHERE sp.wallet = $1 AND sp.is_hidden = FALSE
+            ORDER BY sp.created_at DESC
             LIMIT $2
             """,
             wallet,
             limit,
         )
-        return {"wallet": wallet, "posts": [dict(r) for r in rows]}
+
+        posts = []
+        for r in rows:
+            post = dict(r)
+            original_wallet = post.get("original_wallet")
+
+            if post.get("is_repost") and post.get("repost_of") and original_wallet:
+                post["original_post"] = {
+                    "wallet": post.pop("original_wallet", None),
+                    "handle": post.pop("original_handle", None),
+                    "content": post.pop("original_content", None),
+                    "trust_score": post.pop("original_trust_score", None),
+                    "created_at": post.pop("original_created_at", None),
+                }
+            else:
+                post.pop("original_wallet", None)
+                post.pop("original_handle", None)
+                post.pop("original_content", None)
+                post.pop("original_trust_score", None)
+                post.pop("original_created_at", None)
+                post["original_post"] = None
+
+            posts.append(post)
+
+        return {"wallet": wallet, "posts": posts}
     finally:
         await release_conn(conn)
 
