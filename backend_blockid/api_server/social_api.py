@@ -1152,7 +1152,8 @@ async def get_wallet_posts(
         rows = await conn.fetch(
             """
             SELECT id, wallet, handle, content, image_url, post_type, parent_id,
-                   reply_count, like_count, is_hidden, trust_score, risk_level, created_at
+                   reply_count, like_count, repost_count, is_hidden, trust_score,
+                   risk_level, created_at, is_repost, repost_of, quote_content
             FROM social_posts
             WHERE wallet = $1 AND is_hidden = FALSE
             ORDER BY created_at DESC
