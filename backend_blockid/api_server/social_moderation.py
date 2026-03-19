@@ -14,6 +14,11 @@ Layer 2 — Community flag (weighted):
   < 20  = weight 0 (cannot flag)
 - Total weight >= 10 → auto-hidden
 
+Defense layers against coordinated reporting:
+- Layer 1: Reporter diversity (min 5 unconnected reporters to trigger hide)
+- Layer 2: Reporter cooldown (daily limits by trust tier)
+- Layer 3: Soft-hide (under_review) before hard hide
+
 Consequences:
 - 3 hides in 30 days → trust_score penalty -5, rate limited (3 posts/day)
 - 5 hides in 30 days → trust_score penalty -10, suspended 7 days
@@ -30,6 +35,16 @@ from typing import Any, Dict
 
 from backend_blockid.database.pg_connection import get_conn, release_conn
 
+# Flag thresholds
+FLAG_WEIGHT_UNDER_REVIEW = 15  # soft-hide threshold
+FLAG_WEIGHT_HIDDEN = 30  # hard-hide threshold
+FLAG_DIVERSITY_MIN = 5  # min unique unconnected reporters
+DAILY_REPORT_LIMITS = {
+    "HIGH": 3,  # score 80+
+    "MED": 2,  # score 50-79
+    "LOW": 1,  # score 20-49
+}
+
 
 def calculate_flag_weight(trust_score: float) -> int:
     """
@@ -43,6 +58,134 @@ def calculate_flag_weight(trust_score: float) -> int:
     if trust_score >= 20:
         return 1
     return 0
+
+
+async def check_reporter_cooldown(
+    wallet: str,
+    trust_score: float,
+    conn,
+) -> bool:
+    """
+    Returns True if wallet can still report today.
+    Logic: daily limit by trust tier; count flags in last 24h; return count < limit.
+    """
+    if trust_score >= 80:
+        limit = DAILY_REPORT_LIMITS["HIGH"]
+    elif trust_score >= 50:
+        limit = DAILY_REPORT_LIMITS["MED"]
+    elif trust_score >= 20:
+        limit = DAILY_REPORT_LIMITS["LOW"]
+    else:
+        return False
+
+    count = await conn.fetchval(
+        """
+        SELECT COUNT(*)::int FROM social_flags
+        WHERE wallet = $1
+          AND created_at >= NOW() - INTERVAL '24 hours'
+        """,
+        wallet,
+    )
+    return (count or 0) < limit
+
+
+async def check_reporter_diversity(post_id: int, conn) -> bool:
+    """
+    Returns True if reporters are sufficiently diverse (not a coordinated group).
+    Logic: need FLAG_DIVERSITY_MIN+ reporters; group by follow/endorse edges;
+    return True if independent_groups >= FLAG_DIVERSITY_MIN.
+    """
+    rows = await conn.fetch(
+        "SELECT DISTINCT wallet FROM social_flags WHERE post_id = $1",
+        post_id,
+    )
+    wallets = [r["wallet"] for r in rows]
+    if len(wallets) < FLAG_DIVERSITY_MIN:
+        return False
+
+    # Build adjacency: fetch follows and endorsements between flaggers
+    edges: list[tuple[str, str]] = []
+    for tbl, col_a, col_b in [
+        ("social_follows", "follower_wallet", "following_wallet"),
+        ("social_endorsements", "from_wallet", "to_wallet"),
+    ]:
+        rrows = await conn.fetch(
+            f"""
+            SELECT {col_a} AS a, {col_b} AS b
+            FROM {tbl}
+            WHERE {col_a} = ANY($1::text[]) AND {col_b} = ANY($1::text[])
+              AND {col_a} != {col_b}
+            """,
+            wallets,
+        )
+        for rr in rrows:
+            a, b = rr["a"], rr["b"]
+            if a and b:
+                edges.append((a, b))
+                edges.append((b, a))
+
+    # Union-find
+    parent: Dict[str, str] = {w: w for w in wallets}
+
+    def find(x: str) -> str:
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(a: str, b: str) -> None:
+        pa, pb = find(a), find(b)
+        if pa != pb:
+            parent[pa] = pb
+
+    for a, b in edges:
+        union(a, b)
+
+    roots = {find(w) for w in wallets}
+    return len(roots) >= FLAG_DIVERSITY_MIN
+
+
+async def apply_flag_consequence(
+    post_id: int,
+    flag_weight: int,
+    conn,
+) -> str:
+    """
+    Apply consequence based on flag_weight.
+    Returns status: "visible" | "under_review" | "hidden"
+
+    Under Review = post STILL VISIBLE with label.
+    No auto-hidden timer — only organic flag_weight increase moves status.
+    """
+    if flag_weight >= FLAG_WEIGHT_HIDDEN:
+        diverse = await check_reporter_diversity(post_id, conn)
+        if diverse:
+            await conn.execute(
+                """
+                UPDATE social_posts
+                SET is_hidden = TRUE,
+                    hide_reason = 'COMMUNITY_FLAG'
+                WHERE id = $1
+                """,
+                post_id,
+            )
+            return "hidden"
+        return "under_review"
+
+    if flag_weight >= FLAG_WEIGHT_UNDER_REVIEW:
+        diverse = await check_reporter_diversity(post_id, conn)
+        if diverse:
+            await conn.execute(
+                """
+                UPDATE social_posts
+                SET hide_reason = 'UNDER_REVIEW'
+                WHERE id = $1 AND is_hidden = FALSE
+                """,
+                post_id,
+            )
+            return "under_review"
+        return "visible"
+
+    return "visible"
 
 
 async def check_post_visibility(
@@ -199,88 +342,75 @@ async def process_flag(
 ) -> Dict[str, Any]:
     """
     Process a community flag on a post.
+    Uses 3 defense layers: cooldown, diversity, soft-hide.
     """
     flagger_wallet = (flagger_wallet or "").strip()
     if not flagger_wallet:
-        return {"flagged": False, "post_hidden": False, "reason": "INVALID_WALLET"}
+        return {"flagged": False, "reason": "INVALID_WALLET"}
 
-    # 1. Check flagger trust score (trust_scores uses "score" not "trust_score")
+    # 1. Get flagger trust_score
     ts_row = await conn.fetchrow(
-        "SELECT score AS trust_score FROM trust_scores WHERE wallet = $1",
+        """
+        SELECT score FROM trust_scores
+        WHERE wallet = $1
+        ORDER BY computed_at DESC NULLS LAST
+        LIMIT 1
+        """,
         flagger_wallet,
     )
-    trust_score = float(ts_row["trust_score"]) if ts_row and ts_row["trust_score"] is not None else 0.0
-    weight = calculate_flag_weight(trust_score)
-    if weight <= 0:
-        return {
-            "flagged": False,
-            "post_hidden": False,
-            "reason": "INSUFFICIENT_TRUST_SCORE",
-        }
+    trust_score = float(ts_row["score"]) if ts_row and ts_row["score"] is not None else 0.0
+    if trust_score < 20:
+        return {"flagged": False, "reason": "insufficient_trust"}
 
-    # 2. Check not already flagged by this wallet
+    # 2. Layer 2 — Cooldown check
+    if not await check_reporter_cooldown(flagger_wallet, trust_score, conn):
+        return {"flagged": False, "reason": "daily_limit_reached"}
+
+    # 3. Check not already flagged
     existing = await conn.fetchval(
         "SELECT 1 FROM social_flags WHERE post_id = $1 AND wallet = $2",
         post_id,
         flagger_wallet,
     )
     if existing:
-        return {
-            "flagged": False,
-            "post_hidden": False,
-            "reason": "ALREADY_FLAGGED",
-        }
+        return {"flagged": False, "reason": "already_flagged"}
 
-    # 3–6. Insert flag, update aggregate weight, hide if threshold reached
+    # 4. Calculate weight
+    weight = calculate_flag_weight(trust_score)
+
+    # 5. Insert flag
     await conn.execute(
         """
         INSERT INTO social_flags (post_id, wallet, reason, flag_weight)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (post_id, wallet) DO NOTHING
         """,
         post_id,
         flagger_wallet,
-        reason,
+        reason or None,
         weight,
     )
 
-    flags_row = await conn.fetchrow(
+    # 6. Update post flag_weight
+    row = await conn.fetchrow(
         """
-        SELECT COALESCE(SUM(flag_weight), 0) AS total_weight
-        FROM social_flags
-        WHERE post_id = $1
+        UPDATE social_posts
+        SET flag_weight = COALESCE(flag_weight, 0) + $1
+        WHERE id = $2
+        RETURNING flag_weight
         """,
+        weight,
         post_id,
     )
-    total_weight = int(flags_row["total_weight"]) if flags_row and flags_row["total_weight"] is not None else 0
+    new_flag_weight = int(row["flag_weight"]) if row and row["flag_weight"] is not None else weight
 
-    post_hidden = False
-    if total_weight >= 10:
-        await conn.execute(
-            """
-            UPDATE social_posts
-            SET is_hidden = TRUE,
-                hide_reason = COALESCE(hide_reason, 'FLAGGED'),
-                flag_weight = $2
-            WHERE id = $1
-            """,
-            post_id,
-            total_weight,
-        )
-        post_hidden = True
-    else:
-        await conn.execute(
-            "UPDATE social_posts SET flag_weight = $2 WHERE id = $1",
-            post_id,
-            total_weight,
-        )
+    # 7. Layer 1 + 3 — Apply consequence
+    new_status = await apply_flag_consequence(post_id, new_flag_weight, conn)
 
     return {
         "flagged": True,
-        "post_hidden": post_hidden,
-        "flag_weight_added": weight,
-        "total_weight": total_weight,
-        "reason": "OK",
+        "post_status": new_status,
+        "flag_weight": new_flag_weight,
+        "reason": reason or "",
     }
 
 

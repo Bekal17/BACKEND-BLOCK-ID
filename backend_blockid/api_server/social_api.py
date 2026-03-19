@@ -378,25 +378,30 @@ async def get_explore_feed(
             f"""
             SELECT
                 p.*,
+                COALESCE(ts.score, p.trust_score) AS trust_score,
                 orig.wallet AS original_wallet,
                 orig.handle AS original_handle,
                 orig.content AS original_content,
-                orig.trust_score AS original_trust_score,
+                COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                 orig.created_at AS original_created_at
             FROM social_posts p
             LEFT JOIN social_posts orig
               ON orig.id = p.repost_of
             LEFT JOIN user_privacy_settings ups
               ON ups.wallet = p.wallet
+            LEFT JOIN trust_scores ts
+              ON ts.wallet = p.wallet
+            LEFT JOIN trust_scores ts_orig
+              ON ts_orig.wallet = orig.wallet
             WHERE p.post_type = 'PUBLIC'
               AND p.is_hidden = FALSE
               AND (
                 p.is_repost = TRUE
-                OR COALESCE(p.trust_score, 0) >= $1
+                OR COALESCE(ts.score, p.trust_score, 0) >= $1
               )
               AND (ups.posts_visibility = 'PUBLIC' OR ups.posts_visibility IS NULL)
               {before_clause}
-            ORDER BY p.trust_score DESC, p.created_at DESC
+            ORDER BY COALESCE(ts.score, p.trust_score, 0) DESC, p.created_at DESC
             LIMIT $2
             """,
             *params,
@@ -1221,17 +1226,21 @@ async def get_wallet_posts(
                 sp.id, sp.wallet, sp.handle, sp.content,
                 sp.image_url, sp.post_type, sp.parent_id,
                 sp.reply_count, sp.like_count, sp.repost_count,
-                sp.is_hidden, sp.trust_score, sp.risk_level,
+                sp.is_hidden, COALESCE(ts.score, sp.trust_score) AS trust_score, sp.risk_level,
                 sp.created_at, sp.is_repost, sp.repost_of,
                 sp.quote_content,
                 orig.wallet AS original_wallet,
                 orig.handle AS original_handle,
                 orig.content AS original_content,
-                orig.trust_score AS original_trust_score,
+                COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                 orig.created_at AS original_created_at
             FROM social_posts sp
             LEFT JOIN social_posts orig
                 ON orig.id = sp.repost_of
+            LEFT JOIN trust_scores ts
+                ON ts.wallet = sp.wallet
+            LEFT JOIN trust_scores ts_orig
+                ON ts_orig.wallet = orig.wallet
             WHERE sp.wallet = $1 AND sp.is_hidden = FALSE
             ORDER BY sp.created_at DESC
             LIMIT $2
@@ -1347,13 +1356,15 @@ async def get_bookmarks(wallet: str):
                 sp.repost_count,
                 sp.created_at,
                 sp.is_hidden,
-                sp.trust_score,
+                COALESCE(ts.score, sp.trust_score) AS trust_score,
                 hr.handle,
                 pb.created_at AS bookmarked_at
             FROM post_bookmarks pb
             JOIN social_posts sp ON sp.id = pb.post_id
             LEFT JOIN handle_registry hr
                 ON hr.owner_wallet = sp.wallet
+            LEFT JOIN trust_scores ts
+                ON ts.wallet = sp.wallet
             WHERE pb.wallet = $1
               AND sp.is_hidden = FALSE
             ORDER BY pb.created_at DESC
