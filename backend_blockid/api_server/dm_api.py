@@ -8,6 +8,8 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException
 
+from backend_blockid.api_server.session_auth import verify_session_token
+from backend_blockid.api_server.signature_verify import BLOCKID_ENV, DEVNET_BYPASS
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 
@@ -52,12 +54,15 @@ async def send_dm(body: dict[str, Any] = Body(...)):
         wallet: str,          # sender
         to_wallet: str,       # recipient
         content: str,         # message text
+        session_token: str,   # JWT (PROD) or signature: devtest_signature_bypass (DEV)
         signature: str
     }
     """
     from_wallet = (body.get("wallet") or "").strip()
     to_wallet = (body.get("to_wallet") or "").strip()
     content = (body.get("content") or "").strip()
+    signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
 
     if not from_wallet or not to_wallet or not content:
         raise HTTPException(
@@ -76,6 +81,15 @@ async def send_dm(body: dict[str, Any] = Body(...)):
             status_code=400,
             detail="Message too long (max 1000 chars)",
         )
+
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != from_wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
 
     conn = await get_conn()
     try:

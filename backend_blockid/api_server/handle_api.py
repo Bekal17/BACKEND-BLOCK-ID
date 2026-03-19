@@ -16,6 +16,7 @@ from backend_blockid.api_server.handle_antiskwat import (
     check_layer2_behavioral,
     run_anti_squatting_check,
 )
+from backend_blockid.api_server.signature_verify import verify_or_raise
 from backend_blockid.api_server.handle_pricing import (
     get_handle_price,
     validate_handle_format,
@@ -148,6 +149,12 @@ async def claim_handle(body: ClaimRequest) -> dict[str, Any]:
     if not valid:
         raise HTTPException(400, detail=err)
     h = _normalize_handle(handle_raw)
+
+    # High-value: individual signature required. Message: "Claim @{handle} on BlockID"
+    expected_msg = f"Claim @{h} on BlockID"
+    if not body.signed_message or (body.signed_message or "").strip() != expected_msg:
+        raise HTTPException(400, detail=f"signed_message must be '{expected_msg}'")
+    verify_or_raise(wallet, body.signed_message.strip(), body.signature, detail="Invalid claim signature")
 
     conn = await get_conn()
     try:

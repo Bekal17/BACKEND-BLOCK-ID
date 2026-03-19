@@ -9,6 +9,8 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException
 
+from backend_blockid.api_server.session_auth import verify_session_token
+from backend_blockid.api_server.signature_verify import BLOCKID_ENV, DEVNET_BYPASS
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 
@@ -88,7 +90,7 @@ async def update_privacy_settings(wallet: str, body: dict[str, Any] = Body(...))
 
     Body example:
     {
-        "signature": "...",
+        "session_token": "...",
         "posts_visibility": "FOLLOWERS_ONLY",
         "balance_visibility": "HIDDEN",
         "profile_discoverable": false
@@ -98,11 +100,17 @@ async def update_privacy_settings(wallet: str, body: dict[str, Any] = Body(...))
     if not wallet:
         raise HTTPException(status_code=400, detail="wallet required")
 
-    # Dev bypass
     sig = (body.get("signature") or "").strip()
-    if sig != "devtest_signature_bypass":
-        # TODO: proper signature verification
-        pass
+    session_token = body.get("session_token", "")
+
+    bypass = BLOCKID_ENV == "DEV" and sig in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
 
     conn = await get_conn()
     try:

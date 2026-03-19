@@ -30,6 +30,7 @@ from backend_blockid.api_server.db_wallet_tracking import (
     init_db as wallet_tracking_init_db,
     list_wallets as tracking_list_wallets,
 )
+from backend_blockid.api_server.auth_api import router as auth_router
 from backend_blockid.api_server.badge_api import router as badge_router
 from backend_blockid.api_server.balance_api import router as balance_router
 from backend_blockid.api_server.graph_api import router as graph_router, investigation_router as graph_investigation_router
@@ -218,6 +219,7 @@ def metrics() -> Response:
     return Response(generate_metrics(), media_type="text/plain; charset=utf-8")
 
 
+app.include_router(auth_router)
 app.include_router(trust_router, prefix="/api", tags=["Trust Score"])
 app.include_router(balance_router)
 app.include_router(explain_router)

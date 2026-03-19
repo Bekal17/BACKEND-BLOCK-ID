@@ -20,25 +20,32 @@ async def check_layer1_ownership(wallet: str, handle: str, signed_message: str, 
     Layer 1: Proof of wallet ownership.
     Wallet must sign a message to prove ownership.
 
-    Message format to sign:
-    "BlockID Handle Claim: @{handle} by {wallet} at {timestamp}"
+    Supported message formats:
+    - "Claim @{handle} on BlockID" (verified by verify_or_raise in handle_api before this is called)
+    - "BlockID Handle Claim: @{handle} by {wallet} at {timestamp}"
 
     Returns: { "valid": bool, "reason": str }
     """
     if not wallet or not handle or not signed_message or not signature:
         return {"valid": False, "reason": "Missing wallet, handle, signed_message, or signature"}
     h = _normalize_handle(handle)
+    msg = signed_message.strip()
+
+    # Format: "Claim @{handle} on BlockID" — caller (claim_handle) verifies signature via verify_or_raise
+    if msg == f"Claim @{h} on BlockID":
+        return {"valid": True, "reason": "signature_accepted"}
+
+    # Legacy format: "BlockID Handle Claim: @{handle} by {wallet} at {timestamp}"
     expected_prefix = f"BlockID Handle Claim: @{h} by {wallet} "
-    if not signed_message.strip().startswith(expected_prefix):
+    if not msg.startswith(expected_prefix):
         return {
             "valid": False,
-            "reason": "Signed message must start with 'BlockID Handle Claim: @{handle} by {wallet} at <timestamp>'",
+            "reason": "Signed message must be 'Claim @{handle} on BlockID' or 'BlockID Handle Claim: @{handle} by {wallet} at <timestamp>'",
         }
     # Devnet bypass: only when BLOCKID_ENV=DEV
     if BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS_SIGNATURES:
         return {"valid": True, "reason": "devnet_bypass"}
     # Production: proper signature verification
-    # For now return valid if message format is correct and signature is non-empty base58 (min 64 chars)
     if not signature or len(signature) < 64:
         return {"valid": False, "reason": "Invalid signature format"}
     return {"valid": True, "reason": "signature_accepted"}

@@ -10,6 +10,8 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, Query, status
 from pydantic import BaseModel, Field
 
 from backend_blockid.api_server.identity_eligibility import get_score_tier
+from backend_blockid.api_server.session_auth import verify_session_token
+from backend_blockid.api_server.signature_verify import BLOCKID_ENV, DEVNET_BYPASS, verify_or_raise
 from backend_blockid.api_server.privacy_api import _ensure_privacy_settings
 from backend_blockid.api_server.social_moderation import (
     check_appeal,
@@ -52,6 +54,7 @@ class CreatePostRequest(BaseModel):
     parent_id: Optional[int] = None
     signed_message: str = ""
     signature: str = ""
+    session_token: str = ""
 
 
 async def _has_identity_nft(wallet: str) -> bool:
@@ -108,12 +111,19 @@ async def create_post(body: CreatePostRequest):
     parent_id = body.parent_id
     signed_message = body.signed_message
     signature = body.signature
+    session_token = getattr(body, "session_token", "") or ""
 
     if not wallet:
         raise HTTPException(status_code=400, detail="Wallet is required")
 
-    # Dev bypass
-    if signature != "devtest_signature_bypass":
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
         await _require_identity_nft(wallet)
 
     if not content:
@@ -441,11 +451,19 @@ async def follow_wallet(body: Dict[str, Any]):
     follower_wallet = body.get("follower_wallet", "").strip()
     following_wallet = body.get("following_wallet", "").strip()
     signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
 
     if not follower_wallet or not following_wallet:
         raise HTTPException(status_code=400, detail="Invalid follower/following wallet")
 
-    if signature != "devtest_signature_bypass":
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != follower_wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
         await _require_identity_nft(follower_wallet)
 
     conn = await get_conn()
@@ -523,11 +541,19 @@ async def like_post(body: Dict[str, Any]):
     wallet = body.get("wallet", "").strip()
     post_id = int(body.get("post_id", 0))
     signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
 
     if not wallet or not post_id:
         raise HTTPException(status_code=400, detail="Invalid wallet/post_id")
 
-    if signature != "devtest_signature_bypass":
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
         await _require_identity_nft(wallet)
 
     conn = await get_conn()
@@ -603,12 +629,20 @@ async def repost_post(body: Dict[str, Any]):
     wallet = (body.get("wallet") or "").strip()
     post_id = body.get("post_id")
     quote_content = (body.get("quote_content") or "").strip()
+    signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
 
     if not wallet or not post_id:
         raise HTTPException(status_code=400, detail="wallet and post_id required")
 
-    signature = body.get("signature", "")
-    if signature != "devtest_signature_bypass":
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
         await _require_identity_nft(wallet)
 
     conn = await get_conn()
@@ -725,11 +759,19 @@ async def flag_post(body: Dict[str, Any]):
     post_id = int(body.get("post_id", 0))
     reason = body.get("reason", "") or ""
     signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
 
     if not wallet or not post_id:
         raise HTTPException(status_code=400, detail="Invalid wallet/post_id")
 
-    if signature != "devtest_signature_bypass":
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
         await _require_identity_nft(wallet)
 
     conn = await get_conn()
@@ -755,7 +797,16 @@ async def report_post(body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="wallet and post_id required")
 
     signature = body.get("signature", "")
-    if signature != "devtest_signature_bypass":
+    session_token = body.get("session_token", "")
+
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
         await _require_identity_nft(wallet)
 
     conn = await get_conn()
@@ -801,12 +852,18 @@ async def endorse_wallet(body: Dict[str, Any]):
     to_wallet = (body.get("to_wallet") or "").strip()
     message = (body.get("message") or "").strip()
     signature = (body.get("signature") or "").strip()
+    signed_message = (body.get("signed_message") or "").strip()
 
     if not from_wallet or not to_wallet:
         raise HTTPException(status_code=400, detail="Invalid from_wallet or to_wallet")
 
-    if signature != "devtest_signature_bypass":
-        await _require_identity_nft(from_wallet)
+    # High-value: individual signature required. Message: "BlockID Endorse:{to_wallet}:{from_wallet}"
+    expected_msg = f"BlockID Endorse:{to_wallet}:{from_wallet}"
+    if not signed_message or signed_message.strip() != expected_msg:
+        raise HTTPException(400, detail="signed_message must be 'BlockID Endorse:{to_wallet}:{from_wallet}'")
+    verify_or_raise(from_wallet, signed_message.strip(), signature, detail="Invalid endorse signature")
+
+    await _require_identity_nft(from_wallet)
 
     if from_wallet == to_wallet:
         raise HTTPException(status_code=400, detail="Cannot endorse yourself")
@@ -1281,16 +1338,27 @@ async def get_wallet_posts(
 async def bookmark_post(body: Dict[str, Any]):
     """
     Add or remove bookmark (toggle).
-    Body: { wallet, post_id, signature }
+    Body: { wallet, post_id, session_token }
     """
     wallet = (body.get("wallet") or "").strip()
     post_id = body.get("post_id")
+    signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
 
     if not wallet or not post_id:
         raise HTTPException(
             status_code=400,
             detail="wallet and post_id required",
         )
+
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
 
     conn = await get_conn()
     try:
