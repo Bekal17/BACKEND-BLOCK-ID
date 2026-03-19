@@ -390,7 +390,10 @@ async def get_explore_feed(
               ON ups.wallet = p.wallet
             WHERE p.post_type = 'PUBLIC'
               AND p.is_hidden = FALSE
-              AND COALESCE(p.trust_score, 0) >= $1
+              AND (
+                p.is_repost = TRUE
+                OR COALESCE(p.trust_score, 0) >= $1
+              )
               AND (ups.posts_visibility = 'PUBLIC' OR ups.posts_visibility IS NULL)
               {before_clause}
             ORDER BY p.trust_score DESC, p.created_at DESC
