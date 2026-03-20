@@ -16,6 +16,7 @@ from backend_blockid.integrations.helius_das import (
     verify_nft_ownership,
 )
 from backend_blockid.integrations.r2_client import upload_profile_photo, validate_photo
+from backend_blockid.api_server.vision_moderation import check_image_safe
 
 logger = get_logger(__name__)
 
@@ -595,6 +596,13 @@ async def set_avatar_photo(
     if not is_valid:
         raise HTTPException(status_code=400, detail=error)
 
+    vision_result = await check_image_safe(file_bytes)
+    if not vision_result["safe"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image rejected: {vision_result['reason']}",
+        )
+
     try:
         upload_res = await upload_profile_photo(file_bytes, content_type, wallet, "avatar")
     except ValueError as e:
@@ -668,6 +676,13 @@ async def set_banner_photo(
     is_valid, error = validate_photo(file_bytes, content_type)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error)
+
+    vision_result = await check_image_safe(file_bytes)
+    if not vision_result["safe"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image rejected: {vision_result['reason']}",
+        )
 
     try:
         upload_res = await upload_profile_photo(file_bytes, content_type, wallet, "banner")
