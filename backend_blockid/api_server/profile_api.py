@@ -4,9 +4,11 @@ import os
 from datetime import datetime
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
+from backend_blockid.api_server.session_auth import verify_session_token
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.integrations.helius_das import (
@@ -46,6 +48,277 @@ class SetAvatarRequest(BaseModel):
 class RemoveAvatarRequest(BaseModel):
     wallet: str
     signature: str = ""
+
+
+class ProfileUpdateRequest(BaseModel):
+    wallet: str
+    session_token: str
+    display_name: Optional[str] = None
+    display_name_source: Optional[str] = None
+    bio: Optional[str] = None
+    website: Optional[str] = None
+    location: Optional[str] = None
+
+
+@router.get("/profile/names/{wallet}")
+async def get_wallet_names(wallet: str) -> dict:
+    """
+    Detect all on-chain names/handles owned by wallet.
+    Returns list of names from all supported name services.
+
+    Sources:
+    1. BlockID handle (from handle_registry table)
+    2. SNS .sol domains (Bonfida API)
+    3. ANS .abc domains (AllDomains API)
+    4. ENS .eth domains (skip for now — ETH chain)
+
+    Response:
+    {
+        "wallet": "...",
+        "names": [
+            {"name": "@bee121", "source": "BLOCKID", "display": "@bee121", "icon": "blockid"},
+            {"name": "bee121.sol", "source": "SNS", "display": "bee121.sol", "icon": "sol"},
+            {"name": "bee.abc", "source": "ANS", "display": "bee.abc", "icon": "abc"}
+        ],
+        "fallback": "CJGGn82f...7XiQ"
+    }
+    """
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    names = []
+    conn = await get_conn()
+
+    try:
+        # 1. BlockID handle
+        handle_row = await conn.fetchrow(
+            "SELECT handle FROM handle_registry "
+            "WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1",
+            wallet,
+        )
+        if handle_row and handle_row["handle"]:
+            names.append({
+                "name": f"@{handle_row['handle']}",
+                "source": "BLOCKID",
+                "display": f"@{handle_row['handle']}",
+                "icon": "blockid",
+            })
+
+        # 2. SNS .sol domains (Bonfida)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(
+                    f"https://sns-sdk-proxy.bonfida.workers.dev/domains/{wallet}",
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    domains = data.get("result", [])
+                    for domain in domains[:3]:
+                        name = domain if isinstance(domain, str) else domain.get("domain", "")
+                        if name:
+                            if not name.endswith(".sol"):
+                                name = f"{name}.sol"
+                            names.append({
+                                "name": name,
+                                "source": "SNS",
+                                "display": name,
+                                "icon": "sol",
+                            })
+        except Exception:
+            pass
+
+        # 3. ANS .abc domains (AllDomains)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(
+                    f"https://api.alldomains.id/v1/owner/{wallet}",
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    domains = data.get("domains", data if isinstance(data, list) else [])
+                    for domain in domains[:3]:
+                        name = domain if isinstance(domain, str) else domain.get("name", "")
+                        if name:
+                            if not name.endswith(".abc"):
+                                name = f"{name}.abc"
+                            names.append({
+                                "name": name,
+                                "source": "ANS",
+                                "display": name,
+                                "icon": "abc",
+                            })
+        except Exception:
+            pass
+
+        fallback = f"{wallet[:4]}...{wallet[-4:]}"
+        return {
+            "wallet": wallet,
+            "names": names,
+            "fallback": fallback,
+            "total": len(names),
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.put("/profile/update")
+async def update_profile(body: ProfileUpdateRequest) -> dict:
+    """
+    Update user profile fields.
+    Requires valid session token.
+
+    Validates:
+    - session_token must be valid JWT for body.wallet
+    - display_name max 50 chars
+    - bio max 160 chars
+    - website max 255 chars, must start with http
+    - location max 100 chars
+    - display_name_source must be one of: WALLET | BLOCKID | SNS | ENS | ANS
+
+    Returns updated profile fields.
+    """
+    wallet = (body.wallet or "").strip()
+
+    # Verify session
+    if BLOCKID_ENV != "DEV":
+        verified = verify_session_token(body.session_token)
+        if verified != wallet:
+            raise HTTPException(status_code=401, detail="Invalid session")
+
+    # Validate fields
+    if body.display_name is not None and len(body.display_name) > 50:
+        raise HTTPException(status_code=400, detail="display_name max 50 chars")
+    if body.bio is not None and len(body.bio) > 160:
+        raise HTTPException(status_code=400, detail="bio max 160 chars")
+    if body.website is not None:
+        if not body.website.startswith("http"):
+            raise HTTPException(status_code=400, detail="website must start with http")
+        if len(body.website) > 255:
+            raise HTTPException(status_code=400, detail="website max 255 chars")
+    if body.location is not None and len(body.location) > 100:
+        raise HTTPException(status_code=400, detail="location max 100 chars")
+    valid_sources = {"WALLET", "BLOCKID", "SNS", "ENS", "ANS"}
+    if body.display_name_source is not None and body.display_name_source not in valid_sources:
+        raise HTTPException(
+            status_code=400,
+            detail=f"display_name_source must be one of {valid_sources}",
+        )
+
+    conn = await get_conn()
+    try:
+        set_clauses = []
+        values = []
+        idx = 1
+        if body.display_name is not None:
+            set_clauses.append(f"display_name = ${idx}")
+            values.append(body.display_name)
+            idx += 1
+        if body.display_name_source is not None:
+            set_clauses.append(f"display_name_source = ${idx}")
+            values.append(body.display_name_source)
+            idx += 1
+        if body.bio is not None:
+            set_clauses.append(f"bio = ${idx}")
+            values.append(body.bio)
+            idx += 1
+        if body.website is not None:
+            set_clauses.append(f"website = ${idx}")
+            values.append(body.website)
+            idx += 1
+        if body.location is not None:
+            set_clauses.append(f"location = ${idx}")
+            values.append(body.location)
+            idx += 1
+
+        if not set_clauses:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        set_clauses.append("updated_at = NOW()")
+        values.append(wallet)
+
+        await conn.execute(
+            "INSERT INTO social_profiles (wallet, updated_at) VALUES ($1, NOW()) "
+            "ON CONFLICT (wallet) DO NOTHING",
+            wallet,
+        )
+        await conn.execute(
+            f"UPDATE social_profiles SET {', '.join(set_clauses)} WHERE wallet = ${idx}",
+            *values,
+        )
+
+        updated_fields = [c.split(" = ")[0] for c in set_clauses[:-1]]
+        return {
+            "success": True,
+            "wallet": wallet,
+            "updated_fields": updated_fields,
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/profile/{wallet}")
+async def get_profile(wallet: str) -> dict:
+    """
+    Get full profile for a wallet, including display_name, bio, website, location.
+    """
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                wallet, handle,
+                display_name, display_name_source, bio, website, location,
+                avatar_type, avatar_url, avatar_nft_mint, avatar_nft_name,
+                avatar_nft_collection, avatar_is_animated,
+                banner_type, banner_url, banner_is_animated,
+                updated_at
+            FROM social_profiles
+            WHERE wallet = $1
+            """,
+            wallet,
+        )
+    finally:
+        await release_conn(conn)
+
+    if not row:
+        return {
+            "wallet": wallet,
+            "handle": None,
+            "display_name": None,
+            "display_name_source": None,
+            "bio": None,
+            "website": None,
+            "location": None,
+            "avatar_type": "NONE",
+            "avatar_url": None,
+            "banner_type": "NONE",
+            "banner_url": None,
+        }
+
+    return {
+        "wallet": row["wallet"],
+        "handle": row["handle"],
+        "display_name": row.get("display_name"),
+        "display_name_source": row.get("display_name_source"),
+        "bio": row.get("bio"),
+        "website": row.get("website"),
+        "location": row.get("location"),
+        "avatar_type": row.get("avatar_type") or "NONE",
+        "avatar_url": row.get("avatar_url"),
+        "avatar_nft_mint": row.get("avatar_nft_mint"),
+        "avatar_nft_name": row.get("avatar_nft_name"),
+        "avatar_nft_collection": row.get("avatar_nft_collection"),
+        "avatar_is_animated": bool(row.get("avatar_is_animated")),
+        "banner_type": row.get("banner_type") or "NONE",
+        "banner_url": row.get("banner_url"),
+        "banner_is_animated": bool(row.get("banner_is_animated")),
+        "updated_at": row.get("updated_at"),
+    }
 
 
 @router.get("/nfts/{wallet}")
