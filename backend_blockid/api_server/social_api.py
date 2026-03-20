@@ -6,13 +6,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile, Query, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Query, status
 from pydantic import BaseModel, Field
 
 from backend_blockid.api_server.identity_eligibility import get_score_tier
 from backend_blockid.api_server.session_auth import verify_session_token
 from backend_blockid.api_server.signature_verify import BLOCKID_ENV, DEVNET_BYPASS, verify_or_raise
 from backend_blockid.api_server.privacy_api import _ensure_privacy_settings
+from backend_blockid.api_server.vision_moderation import check_image_safe
+from backend_blockid.integrations.r2_client import upload_image
 from backend_blockid.api_server.social_moderation import (
     check_appeal,
     check_post_visibility,
@@ -293,6 +295,253 @@ async def create_post(body: CreatePostRequest):
             )
             if parent_row and parent_row["wallet"] != wallet:
                 await _notify(conn, parent_row["wallet"], "REPLY", wallet, parent_id)
+
+        return PostResponse(**dict(row))
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/post/with-image", response_model=PostResponse)
+async def create_post_with_image(
+    wallet: str = Form(...),
+    content: str = Form(...),
+    post_type: str = Form(default="PUBLIC"),
+    parent_id: Optional[str] = Form(default=None),
+    session_token: str = Form(default=""),
+    signature: str = Form(default=""),
+    image: Optional[UploadFile] = File(default=None),
+):
+    """
+    Create a post with optional image upload.
+    Image is uploaded to R2 and moderated via Vision API.
+
+    Flow:
+    1. Verify session token
+    2. If image provided:
+       a. Read image bytes
+       b. Check file size (max 5MB)
+       c. Check content type (jpeg/png/gif/webp)
+       d. Vision API moderation check
+       e. Upload to R2 -> get image_url, image_key
+    3. Create post with same logic as create_post.
+
+    Returns same response as create_post.
+    """
+    wallet = (wallet or "").strip()
+    content = (content or "").strip()
+    post_type = post_type or "PUBLIC"
+
+    if not wallet:
+        raise HTTPException(status_code=400, detail="Wallet is required")
+
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(status_code=401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(status_code=401, detail="Invalid session")
+        await _require_identity_nft(wallet)
+
+    if not content:
+        raise HTTPException(status_code=400, detail="Content is required")
+    if len(content) > 500:
+        raise HTTPException(status_code=400, detail="Content too long")
+
+    parent_id_val: Optional[int] = None
+    if parent_id and str(parent_id).strip():
+        try:
+            parent_id_val = int(parent_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid parent_id")
+
+    image_url: Optional[str] = None
+    image_key: Optional[str] = None
+
+    if image and image.filename:
+        content_type = image.content_type or ""
+        if content_type not in {"image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid image type. Use JPEG, PNG, GIF or WebP",
+            )
+        if content_type == "image/jpg":
+            content_type = "image/jpeg"
+
+        image_bytes = await image.read()
+        if len(image_bytes) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large. Max 5MB")
+
+        vision_result = await check_image_safe(image_bytes)
+        if not vision_result["safe"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Image rejected: {vision_result['reason']}",
+            )
+
+        try:
+            upload_res = await upload_image(
+                file_bytes=image_bytes,
+                content_type=content_type,
+                wallet=wallet,
+            )
+            image_url = upload_res["url"]
+            image_key = upload_res["key"]
+        except Exception as e:
+            logger.warning("post_image_upload_failed", error=str(e))
+            raise HTTPException(status_code=500, detail="Failed to upload image")
+
+    conn = await get_conn()
+    try:
+        ts = await conn.fetchrow(
+            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        )
+        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
+        tier = get_score_tier(score)
+
+        if tier == "BLOCKED":
+            raise HTTPException(
+                status_code=403,
+                detail="Trust score too low to post. Score 30+ required for basic access.",
+            )
+        if tier == "READ_ONLY":
+            raise HTTPException(
+                status_code=403,
+                detail="Score 40+ required to create posts.",
+            )
+
+        if tier == "BASIC":
+            today_count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM social_posts
+                WHERE wallet = $1 AND created_at > NOW() - INTERVAL '24 hours'
+                """,
+                wallet,
+            )
+            if (today_count or 0) >= 3:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily post limit reached (3/day for your score tier). Reach score 50+ for unlimited posting.",
+                )
+
+        visibility = await check_post_visibility(wallet, conn)
+        if not visibility["can_post"]:
+            raise HTTPException(status_code=403, detail=visibility.get("reason") or "NOT_ALLOWED")
+
+        user_stats = await conn.fetchrow(
+            """
+            SELECT
+                ts.score AS trust_score,
+                COALESCE(inft.wallet_age_days, 0) AS wallet_age_days,
+                (SELECT COUNT(*) FROM social_posts sp WHERE sp.wallet = ts.wallet) AS post_count
+            FROM trust_scores ts
+            LEFT JOIN identity_nft inft ON inft.wallet = ts.wallet
+            WHERE ts.wallet = $1
+            """,
+            wallet,
+        )
+        trust_score_val = float(user_stats["trust_score"] or 0) if user_stats else 0.0
+        wallet_age_days_val = int(user_stats["wallet_age_days"] or 0) if user_stats else 0
+        post_count_val = int(user_stats["post_count"] or 0) if user_stats else 0
+
+        from backend_blockid.api_server.content_moderation import (
+            check_content,
+            apply_content_penalty,
+            log_violation,
+        )
+        moderation = await check_content(
+            content,
+            trust_score=trust_score_val,
+            wallet_age_days=wallet_age_days_val,
+            post_count=post_count_val,
+        )
+
+        if moderation.get("downgraded"):
+            logger.info(
+                "content_moderation_downgraded",
+                wallet=wallet[:16],
+                original_level=moderation["violation_level"] + 1,
+                downgraded_to=moderation["violation_level"],
+                context=moderation.get("context"),
+            )
+
+        if moderation["action"] == "REJECT":
+            await apply_content_penalty(wallet, moderation["violation_level"], conn)
+            await log_violation(wallet, content[:100], moderation["violation_level"], conn)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "CONTENT_VIOLATION",
+                    "level": moderation["violation_level"],
+                    "message": "Post contains inappropriate content",
+                    "violations": moderation["violations"],
+                },
+            )
+
+        if moderation["action"] == "BLOCK":
+            await apply_content_penalty(wallet, 4, conn)
+            await log_violation(wallet, content[:100], 4, conn)
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "ACCOUNT_BLOCKED",
+                    "message": "Account permanently disabled for content violations",
+                },
+            )
+
+        if moderation["action"] == "ALLOW_CENSORED":
+            content = moderation["cleaned_text"]
+            await apply_content_penalty(wallet, 1, conn)
+            await log_violation(wallet, content[:100], 1, conn)
+
+        ts_row = await conn.fetchrow(
+            "SELECT score AS trust_score, risk_level FROM trust_scores WHERE wallet = $1",
+            wallet,
+        )
+        trust_score = float(ts_row["trust_score"]) if ts_row and ts_row["trust_score"] is not None else None
+        risk_level = (ts_row["risk_level"] or "").upper() if ts_row and ts_row["risk_level"] else None
+        auto_hide = bool(visibility.get("auto_hide"))
+        hide_reason = visibility.get("hide_reason")
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO social_posts (
+                wallet, handle, content, image_url, image_key,
+                post_type, parent_id, is_hidden, hide_reason,
+                trust_score, risk_level
+            )
+            VALUES (
+                $1,
+                (SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1),
+                $2, $3, $4,
+                $5, $6, $7, $8,
+                $9, $10
+            )
+            RETURNING id, wallet, handle, content, image_url, post_type,
+                      trust_score, risk_level, is_hidden, created_at
+            """,
+            wallet,
+            content,
+            image_url,
+            image_key,
+            post_type,
+            parent_id_val,
+            auto_hide,
+            hide_reason,
+            trust_score,
+            risk_level,
+        )
+        if parent_id_val:
+            await conn.execute(
+                "UPDATE social_posts SET reply_count = reply_count + 1 WHERE id = $1",
+                parent_id_val,
+            )
+            parent_row = await conn.fetchrow(
+                "SELECT wallet FROM social_posts WHERE id = $1", parent_id_val
+            )
+            if parent_row and parent_row["wallet"] != wallet:
+                await _notify(conn, parent_row["wallet"], "REPLY", wallet, parent_id_val)
 
         return PostResponse(**dict(row))
     finally:
