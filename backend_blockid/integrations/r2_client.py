@@ -35,11 +35,18 @@ def get_r2_client():
     """Get boto3 S3 client configured for Cloudflare R2."""
     import boto3
 
+    endpoint = os.getenv("R2_ENDPOINT", "")
+    access_key = os.getenv("R2_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("R2_SECRET_ACCESS_KEY", "")
+
+    if not endpoint:
+        raise ValueError("R2_ENDPOINT not configured")
+
     return boto3.client(
         "s3",
-        endpoint_url=R2_ENDPOINT,
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
         region_name="auto",
     )
 
