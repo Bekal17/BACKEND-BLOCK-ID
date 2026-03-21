@@ -38,10 +38,14 @@ async def get_subscription_status(wallet: str) -> dict:
     try:
         sub = await conn.fetchrow(
             """
-            SELECT tier, status, paddle_subscription_id,
-                   current_period_end, cancel_at_period_end
+            SELECT
+                COALESCE(tier, plan, 'FREE') as tier,
+                status,
+                paddle_subscription_id,
+                current_period_end,
+                cancel_at_period_end
             FROM subscriptions
-            WHERE wallet = $1
+            WHERE user_id = $1
             """,
             wallet,
         )
@@ -102,7 +106,10 @@ async def increment_scan_usage(wallet: str) -> dict:
     conn = await get_conn()
     try:
         sub = await conn.fetchrow(
-            "SELECT tier, status FROM subscriptions WHERE wallet = $1",
+            """
+            SELECT COALESCE(tier, plan, 'FREE') as tier, status
+            FROM subscriptions WHERE user_id = $1
+            """,
             wallet,
         )
         tier = "FREE"
@@ -209,29 +216,50 @@ async def paddle_webhook(body: PaddleWebhookBody) -> dict:
                 )
                 logger.info("subscription_updated", subscription_id=sub_id)
             elif wallet:
-                await conn.execute(
-                    """
-                    INSERT INTO subscriptions
-                      (wallet, tier, paddle_subscription_id, paddle_customer_id,
-                       status, current_period_start, current_period_end, updated_at)
-                    VALUES ($1, $2, $3, $4, 'active', $5, $6, NOW())
-                    ON CONFLICT (wallet) DO UPDATE SET
-                      tier = EXCLUDED.tier,
-                      paddle_subscription_id = EXCLUDED.paddle_subscription_id,
-                      paddle_customer_id = EXCLUDED.paddle_customer_id,
-                      status = 'active',
-                      current_period_start = EXCLUDED.current_period_start,
-                      current_period_end = EXCLUDED.current_period_end,
-                      cancel_at_period_end = FALSE,
-                      updated_at = NOW()
-                    """,
+                period_start = _parse_date((data.get("current_billing_period") or {}).get("starts_at"))
+                period_end = _parse_date((data.get("current_billing_period") or {}).get("ends_at"))
+                existing = await conn.fetchrow(
+                    "SELECT id FROM subscriptions WHERE user_id = $1",
                     wallet,
-                    tier,
-                    data.get("id"),
-                    data.get("customer_id"),
-                    _parse_date((data.get("current_billing_period") or {}).get("starts_at")),
-                    _parse_date((data.get("current_billing_period") or {}).get("ends_at")),
                 )
+                if existing:
+                    await conn.execute(
+                        """
+                        UPDATE subscriptions SET
+                          tier = $2,
+                          paddle_subscription_id = $3,
+                          paddle_customer_id = $4,
+                          status = 'active',
+                          current_period_start = $5,
+                          current_period_end = $6,
+                          cancel_at_period_end = FALSE,
+                          updated_at = NOW()
+                        WHERE user_id = $1
+                        """,
+                        wallet,
+                        tier,
+                        data.get("id"),
+                        data.get("customer_id"),
+                        period_start,
+                        period_end,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO subscriptions
+                          (user_id, tier, plan, paddle_subscription_id,
+                           paddle_customer_id, status,
+                           current_period_start, current_period_end,
+                           created_at, updated_at)
+                        VALUES ($1, $2, $2, $3, $4, 'active', $5, $6, NOW(), NOW())
+                        """,
+                        wallet,
+                        tier,
+                        data.get("id"),
+                        data.get("customer_id"),
+                        period_start,
+                        period_end,
+                    )
                 logger.info("subscription_upsert", wallet=wallet, tier=tier, event=event_type)
 
         elif event_type == "subscription.canceled":
