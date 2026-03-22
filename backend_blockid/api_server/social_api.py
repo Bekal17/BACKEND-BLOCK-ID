@@ -1668,20 +1668,30 @@ async def get_bookmarks(wallet: str):
                 sp.id,
                 sp.wallet,
                 sp.content,
+                sp.image_url,
                 sp.like_count,
                 sp.reply_count,
                 sp.repost_count,
                 sp.created_at,
                 sp.is_hidden,
+                sp.is_repost,
+                sp.repost_of,
+                sp.quote_content,
                 COALESCE(ts.score, sp.trust_score) AS trust_score,
                 hr.handle,
-                pb.created_at AS bookmarked_at
+                pb.created_at AS bookmarked_at,
+                orig.wallet AS original_wallet,
+                orig.handle AS original_handle,
+                orig.content AS original_content,
+                orig.image_url AS original_image_url,
+                COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
+                orig.created_at AS original_created_at
             FROM post_bookmarks pb
             JOIN social_posts sp ON sp.id = pb.post_id
-            LEFT JOIN handle_registry hr
-                ON hr.owner_wallet = sp.wallet
-            LEFT JOIN trust_scores ts
-                ON ts.wallet = sp.wallet
+            LEFT JOIN social_posts orig ON orig.id = sp.repost_of
+            LEFT JOIN handle_registry hr ON hr.owner_wallet = sp.wallet
+            LEFT JOIN trust_scores ts ON ts.wallet = sp.wallet
+            LEFT JOIN trust_scores ts_orig ON ts_orig.wallet = orig.wallet
             WHERE pb.wallet = $1
               AND sp.is_hidden = FALSE
             ORDER BY pb.created_at DESC
@@ -1690,12 +1700,14 @@ async def get_bookmarks(wallet: str):
             wallet,
         )
 
-        posts = [
-            {
+        posts = []
+        for r in rows:
+            post = {
                 "id": r["id"],
                 "wallet": r["wallet"],
                 "handle": r.get("handle"),
                 "content": r["content"],
+                "image_url": r.get("image_url"),
                 "like_count": r["like_count"],
                 "reply_count": r["reply_count"],
                 "repost_count": r["repost_count"],
@@ -1703,13 +1715,29 @@ async def get_bookmarks(wallet: str):
                 if r.get("created_at")
                 else None,
                 "is_hidden": r["is_hidden"],
+                "is_repost": r.get("is_repost", False),
+                "repost_of": r.get("repost_of"),
+                "quote_content": r.get("quote_content"),
                 "trust_score": r["trust_score"],
                 "bookmarked_at": r["bookmarked_at"].isoformat()
                 if r.get("bookmarked_at")
                 else None,
             }
-            for r in rows
-        ]
+            original_wallet = r.get("original_wallet")
+            if r.get("is_repost") and r.get("repost_of") and original_wallet:
+                post["original_post"] = {
+                    "wallet": original_wallet,
+                    "handle": r.get("original_handle"),
+                    "content": r.get("original_content"),
+                    "image_url": r.get("original_image_url"),
+                    "trust_score": r.get("original_trust_score"),
+                    "created_at": r["original_created_at"].isoformat()
+                    if r.get("original_created_at")
+                    else None,
+                }
+            else:
+                post["original_post"] = None
+            posts.append(post)
 
         return {
             "wallet": wallet,
