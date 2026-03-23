@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -642,89 +643,97 @@ async def get_explore_feed(
     min_trust_score: float = Query(40.0),
     before: Optional[datetime] = Query(None),
 ):
-    conn = await get_conn()
     try:
-        before_clause = "AND p.created_at < $3" if before else ""
-        params: List[Any] = [min_trust_score, limit]
-        if before:
-            params.append(before)
+        conn = await get_conn()
+        try:
+            before_clause = "AND p.created_at < $3" if before else ""
+            params: List[Any] = [min_trust_score, limit]
+            if before:
+                params.append(before)
 
-        rows = await conn.fetch(
-            f"""
-            SELECT
-                p.*,
-                COALESCE(ts.score, p.trust_score) AS trust_score,
-                orig.wallet AS original_wallet,
-                orig.handle AS original_handle,
-                orig.content AS original_content,
-                COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
-                orig.created_at AS original_created_at,
-                COALESCE(sub.plan, 'free') AS plan,
-                COALESCE(sub_orig.plan, 'free') AS original_plan
-            FROM social_posts p
-            LEFT JOIN social_posts orig
-              ON orig.id = p.repost_of
-            LEFT JOIN user_privacy_settings ups
-              ON ups.wallet = p.wallet
-            LEFT JOIN trust_scores ts
-              ON ts.wallet = p.wallet
-            LEFT JOIN trust_scores ts_orig
-              ON ts_orig.wallet = orig.wallet
-            LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
-                FROM subscriptions
-                WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = p.wallet
-            LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
-                FROM subscriptions
-                WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub_orig ON sub_orig.wallet_address = orig.wallet
-            WHERE p.post_type = 'PUBLIC'
-              AND p.is_hidden = FALSE
-              AND (
-                p.is_repost = TRUE
-                OR COALESCE(ts.score, p.trust_score, 0) >= $1
-              )
-              AND (ups.posts_visibility = 'PUBLIC' OR ups.posts_visibility IS NULL)
-              {before_clause}
-            ORDER BY COALESCE(ts.score, p.trust_score, 0) DESC, p.created_at DESC
-            LIMIT $2
-            """,
-            *params,
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    p.*,
+                    COALESCE(ts.score, p.trust_score) AS trust_score,
+                    orig.wallet AS original_wallet,
+                    orig.handle AS original_handle,
+                    orig.content AS original_content,
+                    COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
+                    orig.created_at AS original_created_at,
+                    COALESCE(sub.plan, 'free') AS plan,
+                    COALESCE(sub_orig.plan, 'free') AS original_plan
+                FROM social_posts p
+                LEFT JOIN social_posts orig
+                  ON orig.id = p.repost_of
+                LEFT JOIN user_privacy_settings ups
+                  ON ups.wallet = p.wallet
+                LEFT JOIN trust_scores ts
+                  ON ts.wallet = p.wallet
+                LEFT JOIN trust_scores ts_orig
+                  ON ts_orig.wallet = orig.wallet
+                LEFT JOIN (
+                    SELECT DISTINCT ON (user_id) user_id, plan
+                    FROM subscriptions
+                    WHERE status = 'active'
+                    ORDER BY user_id, created_at DESC NULLS LAST
+                ) sub ON sub.user_id = p.wallet
+                LEFT JOIN (
+                    SELECT DISTINCT ON (user_id) user_id, plan
+                    FROM subscriptions
+                    WHERE status = 'active'
+                    ORDER BY user_id, created_at DESC NULLS LAST
+                ) sub_orig ON sub_orig.user_id = orig.wallet
+                WHERE p.post_type = 'PUBLIC'
+                  AND p.is_hidden = FALSE
+                  AND (
+                    p.is_repost = TRUE
+                    OR COALESCE(ts.score, p.trust_score, 0) >= $1
+                  )
+                  AND (ups.posts_visibility = 'PUBLIC' OR ups.posts_visibility IS NULL)
+                  {before_clause}
+                ORDER BY COALESCE(ts.score, p.trust_score, 0) DESC, p.created_at DESC
+                LIMIT $2
+                """,
+                *params,
+            )
+
+            posts = []
+            for r in rows:
+                post = dict(r)
+                original_wallet = post.get("original_wallet")
+
+                if post.get("is_repost") and post.get("repost_of") and original_wallet:
+                    post["original_post"] = {
+                        "wallet": post.pop("original_wallet", None),
+                        "handle": post.pop("original_handle", None),
+                        "content": post.pop("original_content", None),
+                        "trust_score": post.pop("original_trust_score", None),
+                        "created_at": post.pop("original_created_at", None),
+                        "plan": post.pop("original_plan", "free"),
+                    }
+                else:
+                    post.pop("original_wallet", None)
+                    post.pop("original_handle", None)
+                    post.pop("original_content", None)
+                    post.pop("original_trust_score", None)
+                    post.pop("original_created_at", None)
+                    post.pop("original_plan", None)
+                    post["original_post"] = None
+
+                posts.append(post)
+
+            next_cursor = posts[-1]["created_at"].isoformat() if posts else None
+            return {"posts": posts, "next_cursor": next_cursor}
+        finally:
+            await release_conn(conn)
+    except Exception as e:
+        logger.error(
+            "explore_feed_error",
+            error=str(e),
+            traceback=traceback.format_exc(),
         )
-
-        posts = []
-        for r in rows:
-            post = dict(r)
-            original_wallet = post.get("original_wallet")
-
-            if post.get("is_repost") and post.get("repost_of") and original_wallet:
-                post["original_post"] = {
-                    "wallet": post.pop("original_wallet", None),
-                    "handle": post.pop("original_handle", None),
-                    "content": post.pop("original_content", None),
-                    "trust_score": post.pop("original_trust_score", None),
-                    "created_at": post.pop("original_created_at", None),
-                    "plan": post.pop("original_plan", "free"),
-                }
-            else:
-                post.pop("original_wallet", None)
-                post.pop("original_handle", None)
-                post.pop("original_content", None)
-                post.pop("original_trust_score", None)
-                post.pop("original_created_at", None)
-                post.pop("original_plan", None)
-                post["original_post"] = None
-
-            posts.append(post)
-
-        next_cursor = posts[-1]["created_at"].isoformat() if posts else None
-        return {"posts": posts, "next_cursor": next_cursor}
-    finally:
-        await release_conn(conn)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/follow")
@@ -1744,6 +1753,7 @@ async def get_wallet_posts(
             "get_wallet_posts_error",
             wallet=wallet[:16] if wallet else "",
             error=str(e),
+            traceback=traceback.format_exc(),
         )
         raise HTTPException(status_code=500, detail=str(e))
 
