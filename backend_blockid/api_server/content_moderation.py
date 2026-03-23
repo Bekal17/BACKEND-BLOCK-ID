@@ -24,6 +24,29 @@ try:
 except ImportError:
     profanity = None
 
+SAFE_WORDS = [
+    "reputation", "reputations", "reputable",
+    "classic", "assumption", "assumptions",
+    "passionate", "compassion", "passion",
+    "masculine", "association", "associations",
+    "documentation", "communication",
+    "scunthorpe", "essex", "sussex", "middlesex",
+    "cockatoo", "cockerel", "cocktail", "cocoa",
+    "assassin", "harassment", "therapist",
+    "mastermind", "fundamentals",
+]
+
+if profanity is not None:
+    try:
+        profanity.add_censor_words([])  # ensure initialized
+        # Whitelist safe words by loading custom list without them
+        current = set(profanity.CENSOR_WORDSET)
+        for word in SAFE_WORDS:
+            current.discard(word.lower())
+        profanity.CENSOR_WORDSET = current
+    except Exception:
+        pass
+
 # ============================================================
 # INDONESIAN (expanded)
 # ============================================================
