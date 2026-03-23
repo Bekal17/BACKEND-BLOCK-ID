@@ -570,12 +570,26 @@ async def get_following_feed(
                 orig.handle AS original_handle,
                 orig.content AS original_content,
                 orig.trust_score AS original_trust_score,
-                orig.created_at AS original_created_at
+                orig.created_at AS original_created_at,
+                COALESCE(sub.plan, 'free') AS plan,
+                COALESCE(sub_orig.plan, 'free') AS original_plan
             FROM social_posts p
             JOIN social_follows f
               ON f.following_wallet = p.wallet
             LEFT JOIN social_posts orig
               ON orig.id = p.repost_of
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = p.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub_orig ON sub_orig.wallet_address = orig.wallet
             WHERE f.follower_wallet = $1
               AND p.is_hidden = FALSE
               {before_clause}
@@ -597,6 +611,7 @@ async def get_following_feed(
                     "content": post.pop("original_content", None),
                     "trust_score": post.pop("original_trust_score", None),
                     "created_at": post.pop("original_created_at", None),
+                    "plan": post.pop("original_plan", "free"),
                 }
             else:
                 post.pop("original_wallet", None)
@@ -604,6 +619,7 @@ async def get_following_feed(
                 post.pop("original_content", None)
                 post.pop("original_trust_score", None)
                 post.pop("original_created_at", None)
+                post.pop("original_plan", None)
                 post["original_post"] = None
 
             posts.append(post)
@@ -642,7 +658,9 @@ async def get_explore_feed(
                 orig.handle AS original_handle,
                 orig.content AS original_content,
                 COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
-                orig.created_at AS original_created_at
+                orig.created_at AS original_created_at,
+                COALESCE(sub.plan, 'free') AS plan,
+                COALESCE(sub_orig.plan, 'free') AS original_plan
             FROM social_posts p
             LEFT JOIN social_posts orig
               ON orig.id = p.repost_of
@@ -652,6 +670,18 @@ async def get_explore_feed(
               ON ts.wallet = p.wallet
             LEFT JOIN trust_scores ts_orig
               ON ts_orig.wallet = orig.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = p.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub_orig ON sub_orig.wallet_address = orig.wallet
             WHERE p.post_type = 'PUBLIC'
               AND p.is_hidden = FALSE
               AND (
@@ -678,6 +708,7 @@ async def get_explore_feed(
                     "content": post.pop("original_content", None),
                     "trust_score": post.pop("original_trust_score", None),
                     "created_at": post.pop("original_created_at", None),
+                    "plan": post.pop("original_plan", "free"),
                 }
             else:
                 post.pop("original_wallet", None)
@@ -685,6 +716,7 @@ async def get_explore_feed(
                 post.pop("original_content", None)
                 post.pop("original_trust_score", None)
                 post.pop("original_created_at", None)
+                post.pop("original_plan", None)
                 post["original_post"] = None
 
             posts.append(post)
@@ -1244,10 +1276,17 @@ async def get_followers(wallet: str):
                 hr.handle,
                 (SELECT score FROM trust_scores
                  WHERE trust_scores.wallet = sf.follower_wallet
-                 ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score
+                 ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score,
+                COALESCE(sub.plan, 'free') as plan
             FROM social_follows sf
             LEFT JOIN handle_registry hr
                 ON hr.owner_wallet = sf.follower_wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = sf.follower_wallet
             WHERE sf.following_wallet = $1
             ORDER BY sf.created_at DESC
             LIMIT 100
@@ -1283,10 +1322,17 @@ async def get_following(wallet: str):
                 hr.handle,
                 (SELECT score FROM trust_scores
                  WHERE trust_scores.wallet = sf.following_wallet
-                 ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score
+                 ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score,
+                COALESCE(sub.plan, 'free') as plan
             FROM social_follows sf
             LEFT JOIN handle_registry hr
                 ON hr.owner_wallet = sf.following_wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = sf.following_wallet
             WHERE sf.follower_wallet = $1
             ORDER BY sf.created_at DESC
             LIMIT 100
@@ -1345,11 +1391,19 @@ async def get_profile(
         )
         posts_rows = await conn.fetch(
             """
-            SELECT id, wallet, handle, content, image_url, post_type, reply_count, like_count,
-                   trust_score, risk_level, is_hidden, created_at
-            FROM social_posts
-            WHERE wallet = $1 AND is_hidden = FALSE AND post_type = 'PUBLIC'
-            ORDER BY created_at DESC
+            SELECT sp.id, sp.wallet, sp.handle, sp.content, sp.image_url, sp.post_type,
+                   sp.reply_count, sp.like_count, sp.trust_score, sp.risk_level,
+                   sp.is_hidden, sp.created_at,
+                   COALESCE(sub.plan, 'free') AS plan
+            FROM social_posts sp
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = sp.wallet
+            WHERE sp.wallet = $1 AND sp.is_hidden = FALSE AND sp.post_type = 'PUBLIC'
+            ORDER BY sp.created_at DESC
             LIMIT 10
             """,
             wallet,
@@ -1368,9 +1422,23 @@ async def get_profile(
         )
         badges = [r["reason_code"] for r in reason_rows] if reason_rows else []
 
+        plan = "free"
+        try:
+            sub = await conn.fetchrow(
+                """SELECT plan FROM subscriptions
+                   WHERE wallet_address = $1 AND status = 'active'
+                   ORDER BY created_at DESC NULLS LAST LIMIT 1""",
+                wallet,
+            )
+            if sub:
+                plan = (sub["plan"] or "free").lower()
+        except Exception:
+            pass
+
         return {
             "wallet": wallet,
             "handle": handle_row["handle"] if handle_row else None,
+            "plan": plan,
             "trust_score": float(ts["trust_score"]) if ts and ts["trust_score"] is not None else None,
             "risk_level": ts["risk_level"] if ts else None,
             "identity_nft": id_row["mint_address"] if id_row else None,
@@ -1382,6 +1450,64 @@ async def get_profile(
             "is_following": is_following,
             "badges": badges,
             "joined_at": id_row["minted_at"].isoformat() if id_row and id_row.get("minted_at") else None,
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/subscription/{wallet}")
+async def get_user_subscription(wallet: str):
+    """Get B2C subscription info for a wallet. Plans: free (10/mo), explorer (100/mo), pro (unlimited)."""
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        plan = "free"
+        scans_used = 0
+        status_val = "free"
+
+        # Check subscriptions table (user_id or wallet column depending on schema)
+        try:
+            sub = await conn.fetchrow(
+                """
+                SELECT COALESCE(tier, plan, 'free') as plan, status
+                FROM subscriptions
+                WHERE (user_id = $1 OR wallet = $1) AND (status = 'active' OR status IS NULL)
+                ORDER BY created_at DESC NULLS LAST, updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                wallet,
+            )
+            if sub:
+                plan = (sub["plan"] or "free").lower()
+                status_val = (sub["status"] or "active").lower()
+        except Exception:
+            pass  # Table may not exist
+
+        # Get scan usage this month (wallet_scan_usage: wallet, month, scan_count)
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            usage = await conn.fetchrow(
+                """
+                SELECT scan_count FROM wallet_scan_usage
+                WHERE wallet = $1 AND month = $2
+                """,
+                wallet,
+                current_month,
+            )
+            if usage:
+                scans_used = int(usage["scan_count"] or 0)
+        except Exception:
+            pass  # Table may not exist
+
+        return {
+            "wallet": wallet,
+            "plan": plan,
+            "scans_used": scans_used,
+            "wallet_scan_usage": scans_used,
+            "status": status_val,
         }
     finally:
         await release_conn(conn)
@@ -1490,26 +1616,41 @@ async def get_post(post_id: int):
     try:
         row = await conn.fetchrow(
             """
-            SELECT id, wallet, handle, content, image_url, post_type, parent_id,
-                   reply_count, like_count, repost_count, is_hidden, trust_score, risk_level, created_at
-            FROM social_posts
-            WHERE id = $1
+            SELECT sp.id, sp.wallet, sp.handle, sp.content, sp.image_url, sp.post_type,
+                   sp.parent_id, sp.reply_count, sp.like_count, sp.repost_count,
+                   sp.is_hidden, sp.trust_score, sp.risk_level, sp.created_at,
+                   COALESCE(sub.plan, 'free') AS plan
+            FROM social_posts sp
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = sp.wallet
+            WHERE sp.id = $1
             """,
             post_id,
         )
         if not row:
             raise HTTPException(status_code=404, detail="Post not found")
-        replies = await conn.fetch(
+        replies_rows = await conn.fetch(
             """
-            SELECT id, wallet, handle, content, image_url, post_type, parent_id,
-                   reply_count, like_count, is_hidden, created_at
-            FROM social_posts
-            WHERE parent_id = $1 AND is_hidden = FALSE
-            ORDER BY created_at ASC
+            SELECT r.id, r.wallet, r.handle, r.content, r.image_url, r.post_type,
+                   r.parent_id, r.reply_count, r.like_count, r.is_hidden, r.created_at,
+                   COALESCE(sub.plan, 'free') AS plan
+            FROM social_posts r
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = r.wallet
+            WHERE r.parent_id = $1 AND r.is_hidden = FALSE
+            ORDER BY r.created_at ASC
             """,
             post_id,
         )
-        return {"post": dict(row), "replies": [dict(r) for r in replies]}
+        return {"post": dict(row), "replies": [dict(r) for r in replies_rows]}
     finally:
         await release_conn(conn)
 
@@ -1539,7 +1680,9 @@ async def get_wallet_posts(
                 orig.handle AS original_handle,
                 orig.content AS original_content,
                 COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
-                orig.created_at AS original_created_at
+                orig.created_at AS original_created_at,
+                COALESCE(sub.plan, 'free') AS plan,
+                COALESCE(sub_orig.plan, 'free') AS original_plan
             FROM social_posts sp
             LEFT JOIN social_posts orig
                 ON orig.id = sp.repost_of
@@ -1547,6 +1690,18 @@ async def get_wallet_posts(
                 ON ts.wallet = sp.wallet
             LEFT JOIN trust_scores ts_orig
                 ON ts_orig.wallet = orig.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = sp.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub_orig ON sub_orig.wallet_address = orig.wallet
             WHERE sp.wallet = $1 AND sp.is_hidden = FALSE
             ORDER BY sp.created_at DESC
             LIMIT $2
@@ -1567,6 +1722,7 @@ async def get_wallet_posts(
                     "content": post.pop("original_content", None),
                     "trust_score": post.pop("original_trust_score", None),
                     "created_at": post.pop("original_created_at", None),
+                    "plan": post.pop("original_plan", "free"),
                 }
             else:
                 post.pop("original_wallet", None)
@@ -1574,6 +1730,7 @@ async def get_wallet_posts(
                 post.pop("original_content", None)
                 post.pop("original_trust_score", None)
                 post.pop("original_created_at", None)
+                post.pop("original_plan", None)
                 post["original_post"] = None
 
             posts.append(post)
@@ -1685,13 +1842,27 @@ async def get_bookmarks(wallet: str):
                 orig.content AS original_content,
                 orig.image_url AS original_image_url,
                 COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
-                orig.created_at AS original_created_at
+                orig.created_at AS original_created_at,
+                COALESCE(sub.plan, 'free') AS plan,
+                COALESCE(sub_orig.plan, 'free') AS original_plan
             FROM post_bookmarks pb
             JOIN social_posts sp ON sp.id = pb.post_id
             LEFT JOIN social_posts orig ON orig.id = sp.repost_of
             LEFT JOIN handle_registry hr ON hr.owner_wallet = sp.wallet
             LEFT JOIN trust_scores ts ON ts.wallet = sp.wallet
             LEFT JOIN trust_scores ts_orig ON ts_orig.wallet = orig.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub ON sub.wallet_address = sp.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY wallet_address, created_at DESC NULLS LAST
+            ) sub_orig ON sub_orig.wallet_address = orig.wallet
             WHERE pb.wallet = $1
               AND sp.is_hidden = FALSE
             ORDER BY pb.created_at DESC
@@ -1722,6 +1893,7 @@ async def get_bookmarks(wallet: str):
                 "bookmarked_at": r["bookmarked_at"].isoformat()
                 if r.get("bookmarked_at")
                 else None,
+                "plan": r.get("plan", "free"),
             }
             original_wallet = r.get("original_wallet")
             if r.get("is_repost") and r.get("repost_of") and original_wallet:
@@ -1734,6 +1906,7 @@ async def get_bookmarks(wallet: str):
                     "created_at": r["original_created_at"].isoformat()
                     if r.get("original_created_at")
                     else None,
+                    "plan": r.get("original_plan", "free"),
                 }
             else:
                 post["original_post"] = None
