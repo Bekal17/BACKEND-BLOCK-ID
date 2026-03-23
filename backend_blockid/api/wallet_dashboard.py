@@ -86,7 +86,8 @@ async def get_wallet_dashboard(wallet: str) -> dict:
     conn = await get_conn()
     try:
         row = await conn.fetchrow(
-            "SELECT score, risk_level FROM trust_scores WHERE wallet=$1 ORDER BY computed_at DESC LIMIT 1",
+            """SELECT score, risk_level, wallet_age_days AS ts_wallet_age_days
+               FROM trust_scores WHERE wallet=$1 ORDER BY computed_at DESC NULLS LAST LIMIT 1""",
             wallet,
         )
         if row is None:
@@ -96,7 +97,8 @@ async def get_wallet_dashboard(wallet: str) -> dict:
                 pass
 
             row = await conn.fetchrow(
-                "SELECT score, risk_level FROM trust_scores WHERE wallet=$1 ORDER BY computed_at DESC LIMIT 1",
+                """SELECT score, risk_level, wallet_age_days AS ts_wallet_age_days
+                   FROM trust_scores WHERE wallet=$1 ORDER BY computed_at DESC NULLS LAST LIMIT 1""",
                 wallet,
             )
 
@@ -106,14 +108,27 @@ async def get_wallet_dashboard(wallet: str) -> dict:
             trust_score = int(round(float(row.get("score") or 0)))
             risk_tier = str(row.get("risk_level") or "unknown").strip()
 
-        wallet_age_days = 0
-        if await _table_exists(conn, "wallet_profiles"):
+        wallet_age_days = int(row.get("ts_wallet_age_days") or 0) if row else 0
+        wallet_first_seen = None
+
+        if wallet_age_days == 0 and await _table_exists(conn, "wallet_meta"):
+            r = await conn.fetchrow(
+                "SELECT wallet_age_days, first_tx_ts FROM wallet_meta WHERE wallet=$1",
+                wallet,
+            )
+            if r and (r.get("wallet_age_days") or 0) > 0:
+                wallet_age_days = int(r["wallet_age_days"])
+                if r.get("first_tx_ts"):
+                    wallet_first_seen = int(r["first_tx_ts"])
+
+        if wallet_age_days == 0 and await _table_exists(conn, "wallet_profiles"):
             r = await conn.fetchrow(
                 "SELECT first_seen_at FROM wallet_profiles WHERE wallet=$1", wallet
             )
             if r and r.get("first_seen_at") is not None:
                 first_ts = int(r["first_seen_at"])
                 wallet_age_days = max(0, (int(time.time()) - first_ts) // 86400)
+                wallet_first_seen = first_ts
 
         if wallet_age_days == 0 and await _table_exists(conn, "transactions"):
             from_col, to_col, _ = await _detect_tx_columns(conn)
@@ -124,6 +139,13 @@ async def get_wallet_dashboard(wallet: str) -> dict:
             if r and r.get("min_ts") is not None:
                 first_ts = int(r["min_ts"])
                 wallet_age_days = max(0, (int(time.time()) - first_ts) // 86400)
+                wallet_first_seen = first_ts
+
+        wallet_age_months = (wallet_age_days // 30) if wallet_age_days else 0
+        wallet_first_seen_iso = (
+            time.strftime("%Y-%m-%d", time.gmtime(wallet_first_seen))
+            if wallet_first_seen else None
+        )
 
         total_transactions = 0
         unique_counterparties = 0
@@ -231,6 +253,8 @@ async def get_wallet_dashboard(wallet: str) -> dict:
             "risk_tier": risk_tier,
             "profile": {
                 "wallet_age_days": wallet_age_days,
+                "wallet_age_months": wallet_age_months,
+                "wallet_first_seen": wallet_first_seen_iso,
                 "total_transactions": total_transactions,
                 "unique_counterparties": unique_counterparties,
                 "volume_30d": round(volume_30d, 2),

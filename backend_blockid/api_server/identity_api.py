@@ -94,7 +94,7 @@ async def _get_top_positive_reasons(conn, wallet: str, limit: int = 5) -> list[s
 
 
 async def _get_trust_score_row(conn, wallet: str) -> dict | None:
-    """Get latest trust_scores row for wallet."""
+    """Get latest trust_scores row for wallet. Enriches wallet_age_days from wallet_meta if trust_scores has 0."""
     row = await conn.fetchrow(
         """
         SELECT score, risk_level, wallet_age_days, metadata_json
@@ -105,7 +105,18 @@ async def _get_trust_score_row(conn, wallet: str) -> dict | None:
         """,
         wallet,
     )
-    return dict(row) if row else None
+    out = dict(row) if row else None
+    if out and (int(out.get("wallet_age_days") or 0) == 0):
+        try:
+            meta = await conn.fetchrow(
+                "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
+                wallet,
+            )
+            if meta and (meta.get("wallet_age_days") or 0) > 0:
+                out["wallet_age_days"] = int(meta["wallet_age_days"])
+        except Exception:
+            pass  # wallet_meta may not exist
+    return out
 
 
 @router.delete("/burn")
@@ -405,6 +416,18 @@ async def get_identity_metadata(wallet: str) -> dict[str, Any]:
             last_updated.strftime("%Y-%m-%d") if hasattr(last_updated, "strftime") else str(last_updated or "")
         )
 
+        wallet_age_days = int(row.get("wallet_age_days") or 0)
+        if wallet_age_days == 0:
+            try:
+                meta = await conn.fetchrow(
+                    "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
+                    wallet,
+                )
+                if meta and (meta.get("wallet_age_days") or 0) > 0:
+                    wallet_age_days = int(meta["wallet_age_days"])
+            except Exception:
+                pass  # wallet_meta may not exist
+
         return {
             "wallet": row["wallet"],
             "token_id": row.get("token_id"),
@@ -412,7 +435,7 @@ async def get_identity_metadata(wallet: str) -> dict[str, Any]:
             "risk_level": row.get("risk_level") or "",
             "handle": row.get("handle"),
             "badges": badges,
-            "wallet_age_days": int(row.get("wallet_age_days") or 0),
+            "wallet_age_days": wallet_age_days,
             "behavioral_fingerprint": row.get("behavioral_fingerprint") or "",
             "is_sanctioned": bool(row.get("is_sanctioned") or False),
             "daemon_risk_score": row.get("daemon_risk_score"),
