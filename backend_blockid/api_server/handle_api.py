@@ -217,6 +217,23 @@ async def claim_handle(body: ClaimRequest) -> dict[str, Any]:
             challenge_expires_at,
             now_utc,
         )
+        # Sync handle to social_profiles
+        try:
+            await conn.execute(
+                """
+                INSERT INTO social_profiles (wallet, handle, created_at, updated_at)
+                VALUES ($1, $2, $3, $3)
+                ON CONFLICT (wallet) DO UPDATE SET
+                    handle = EXCLUDED.handle,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                wallet,
+                h,
+                now_utc,
+            )
+        except Exception as e:
+            logger.warning("handle_social_profile_sync_failed", handle=h, error=str(e))
+
         logger.info("handle_claimed", handle=h, wallet=wallet[:16])
         return {
             "success": True,
