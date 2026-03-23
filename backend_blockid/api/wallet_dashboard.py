@@ -186,6 +186,21 @@ async def get_wallet_dashboard(wallet: str) -> dict:
             volume_30d = float(vol) if vol else 0.0
             if amount_col == "amount_lamports":
                 volume_30d = volume_30d / 1e9
+            # Convert SOL to USD
+            try:
+                import httpx
+                price_resp = httpx.get(
+                    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+                    timeout=5.0,
+                )
+                if price_resp.status_code == 200:
+                    sol_price = float(
+                        price_resp.json().get("solana", {}).get("usd", 0) or 0
+                    )
+                    if sol_price > 0:
+                        volume_30d = round(volume_30d * sol_price, 2)
+            except Exception:
+                pass  # fallback: keep SOL value
 
         reasons: list[str] = []
         if await _table_exists(conn, "wallet_reasons"):
