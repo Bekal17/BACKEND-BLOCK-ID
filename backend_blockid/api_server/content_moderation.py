@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -35,6 +36,31 @@ SAFE_WORDS = [
     "assassin", "harassment", "therapist",
     "mastermind", "fundamentals",
 ]
+
+# Extended set for Layer 2 skip logic (text-only-contains-safe check)
+SAFE_WORDS_LAYER2 = {
+    "reputation", "reputations", "reputable",
+    "passionate", "compassion", "passion",
+    "classic", "classics", "classical",
+    "assumption", "assumptions",
+    "association", "associations",
+    "documentation", "communication",
+    "mastermind", "fundamentals",
+    "assassin", "assassination",
+    "harassment", "therapist",
+    "cocktail", "cockatoo", "cockerel",
+    "masculine", "masculinity",
+    "scunthorpe", "essex", "sussex",
+}
+
+
+def _text_after_removing_safe_words(text: str) -> str:
+    """Remove safe words from text before profanity check."""
+    result = text
+    for word in SAFE_WORDS_LAYER2:
+        result = re.sub(re.escape(word), "", result, flags=re.IGNORECASE)
+    return result
+
 
 if profanity is not None:
     try:
@@ -501,19 +527,21 @@ async def check_content(
             "layer": 1,
         }
 
-    # Step 5: better-profanity (English) severe
-    if profanity is not None and profanity.contains_profanity(text):
-        violations.append("profanity_en")
-        return {
-            "is_clean": False,
-            "violation_level": LEVEL_MODERATE,
-            "cleaned_text": text,
-            "violations": violations,
-            "action": "REJECT",
-            "context": "PROFANITY_SEVERE",
-            "downgraded": False,
-            "layer": 2,
-        }
+    # Step 5: better-profanity (English) severe (Layer 2)
+    if profanity is not None:
+        _text_for_check = _text_after_removing_safe_words(text)
+        if profanity.contains_profanity(_text_for_check):
+            violations.append("profanity_en")
+            return {
+                "is_clean": False,
+                "violation_level": LEVEL_MODERATE,
+                "cleaned_text": text,
+                "violations": violations,
+                "action": "REJECT",
+                "context": "PROFANITY_SEVERE",
+                "downgraded": False,
+                "layer": 2,
+            }
 
     # Step 6: Minor combined list → level 1 → ALLOW_CENSORED
     minor_found = _contains_any(text, ALL_MINOR_WORDS)
@@ -530,19 +558,23 @@ async def check_content(
             "layer": 1,
         }
 
-    # Step 7: better-profanity mild → level 1
-    if profanity is not None and profanity.contains_profanity(text):
-        cleaned = profanity.censor(text)
-        return {
-            "is_clean": False,
-            "violation_level": LEVEL_MINOR,
-            "cleaned_text": cleaned,
-            "violations": ["profanity_en"],
-            "action": "ALLOW_CENSORED",
-            "context": "PROFANITY",
-            "downgraded": False,
-            "layer": 2,
-        }
+    # Step 7: better-profanity mild → level 1 (Layer 2)
+    # Skip Layer 2 entirely if remaining text (after removing safe words)
+    # has no profanity — prevents false positives like "reputation"
+    if profanity is not None:
+        _text_for_check = _text_after_removing_safe_words(text)
+        if profanity.contains_profanity(_text_for_check):
+            cleaned = profanity.censor(_text_for_check)
+            return {
+                "is_clean": False,
+                "violation_level": LEVEL_MINOR,
+                "cleaned_text": cleaned,
+                "violations": ["profanity_detected"],
+                "action": "ALLOW_CENSORED",
+                "context": "PROFANITY",
+                "downgraded": False,
+                "layer": 2,
+            }
 
     # Layer 3: OpenAI Moderation API (if available)
     openai_result = await check_openai_moderation(text)
