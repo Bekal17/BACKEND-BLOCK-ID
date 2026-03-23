@@ -111,15 +111,16 @@ async def get_wallet_dashboard(wallet: str) -> dict:
         wallet_age_days = int(row.get("ts_wallet_age_days") or 0) if row else 0
         wallet_first_seen = None
 
-        if wallet_age_days == 0 and await _table_exists(conn, "wallet_meta"):
-            r = await conn.fetchrow(
+        wm_row = None
+        if await _table_exists(conn, "wallet_meta"):
+            wm_row = await conn.fetchrow(
                 "SELECT wallet_age_days, first_tx_ts FROM wallet_meta WHERE wallet=$1",
                 wallet,
             )
-            if r and (r.get("wallet_age_days") or 0) > 0:
-                wallet_age_days = int(r["wallet_age_days"])
-                if r.get("first_tx_ts"):
-                    wallet_first_seen = int(r["first_tx_ts"])
+            if wm_row and (wm_row.get("wallet_age_days") or 0) > 0:
+                wallet_age_days = int(wm_row["wallet_age_days"])
+                if wm_row.get("first_tx_ts"):
+                    wallet_first_seen = int(wm_row["first_tx_ts"])
 
         if wallet_age_days == 0 and await _table_exists(conn, "wallet_profiles"):
             r = await conn.fetchrow(

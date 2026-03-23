@@ -273,6 +273,19 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
                 now,
             )
 
+        try:
+            await conn.execute(
+                """
+                UPDATE trust_scores ts
+                SET wallet_age_days = wm.wallet_age_days
+                FROM wallet_meta wm
+                WHERE ts.wallet = wm.wallet AND wm.wallet = $1 AND wm.wallet_age_days > 0
+                """,
+                wallet,
+            )
+        except Exception:
+            pass  # wallet_meta may not exist
+
         if dynamic_risk > DYNAMIC_RISK_THRESHOLD:
             await update_priority(wallet, +20)
         if details["days_inactive"] >= 30:

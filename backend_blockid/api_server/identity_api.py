@@ -106,16 +106,17 @@ async def _get_trust_score_row(conn, wallet: str) -> dict | None:
         wallet,
     )
     out = dict(row) if row else None
-    if out and (int(out.get("wallet_age_days") or 0) == 0):
-        try:
-            meta = await conn.fetchrow(
-                "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
-                wallet,
-            )
-            if meta and (meta.get("wallet_age_days") or 0) > 0:
-                out["wallet_age_days"] = int(meta["wallet_age_days"])
-        except Exception:
-            pass  # wallet_meta may not exist
+    try:
+        meta = await conn.fetchrow(
+            "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
+            wallet,
+        )
+        if meta and (meta.get("wallet_age_days") or 0) > 0:
+            if out is None:
+                out = {}
+            out["wallet_age_days"] = int(meta["wallet_age_days"])
+    except Exception:
+        pass  # wallet_meta may not exist
     return out
 
 
