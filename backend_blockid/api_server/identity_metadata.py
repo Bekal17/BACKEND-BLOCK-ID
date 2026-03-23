@@ -17,6 +17,7 @@ def build_metadata(
     is_sanctioned: bool = False,
     daemon_risk_score: int | None = None,
     daemon_risk_level: str | None = None,
+    wallet_age_days: int | None = None,
 ) -> dict:
     """
     Build NFT metadata from trust_scores + wallet_reasons.
@@ -33,7 +34,11 @@ def build_metadata(
     """
     score = float(trust_score_row.get("score") or 0)
     risk_level = str(trust_score_row.get("risk_level") or "").strip()
-    wallet_age_days = int(trust_score_row.get("wallet_age_days") or 0)
+    age_days = (
+        wallet_age_days
+        if wallet_age_days is not None and wallet_age_days > 0
+        else int(trust_score_row.get("wallet_age_days") or 0)
+    )
 
     reason_set = {r.upper() for r in reasons if r}
 
@@ -56,7 +61,7 @@ def build_metadata(
         "risk_level": risk_level,
         "handle": None,
         "badges": list(reasons[:5]) if isinstance(reasons, list) else [],
-        "wallet_age_days": wallet_age_days,
+        "wallet_age_days": age_days,
         "behavioral_fingerprint": behavioral_fingerprint,
         "is_sanctioned": is_sanctioned,
         "daemon_risk_score": daemon_risk_score,

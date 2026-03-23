@@ -305,7 +305,18 @@ async def mint_identity_nft(body: MintRequest) -> dict[str, Any]:
 
         # Build metadata and badges
         reasons = await _get_top_positive_reasons(conn, wallet)
-        metadata = build_metadata(wallet, ts_row or {}, reasons)
+        wm = None
+        try:
+            wm = await conn.fetchrow(
+                "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
+                wallet,
+            )
+        except Exception:
+            pass
+        age_days = int(wm["wallet_age_days"]) if wm and wm.get("wallet_age_days") else None
+        metadata = build_metadata(
+            wallet, ts_row or {}, reasons, wallet_age_days=age_days
+        )
         badges = metadata.get("badges", [])[:5]
         metadata_uri = f"{METADATA_BASE_URL}/{wallet}"
 

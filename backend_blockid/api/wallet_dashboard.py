@@ -7,6 +7,7 @@ Powers the entire dashboard with one request. For new wallets, triggers realtime
 
 from __future__ import annotations
 
+import datetime
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -108,45 +109,49 @@ async def get_wallet_dashboard(wallet: str) -> dict:
             trust_score = int(round(float(row.get("score") or 0)))
             risk_tier = str(row.get("risk_level") or "unknown").strip()
 
-        wallet_age_days = int(row.get("ts_wallet_age_days") or 0) if row else 0
-        wallet_first_seen = None
-
-        wm_row = None
-        if await _table_exists(conn, "wallet_meta"):
-            wm_row = await conn.fetchrow(
-                "SELECT wallet_age_days, first_tx_ts FROM wallet_meta WHERE wallet=$1",
+        wm = None
+        try:
+            wm = await conn.fetchrow(
+                "SELECT wallet_age_days, first_tx_ts FROM wallet_meta WHERE wallet = $1",
                 wallet,
             )
-            if wm_row and (wm_row.get("wallet_age_days") or 0) > 0:
-                wallet_age_days = int(wm_row["wallet_age_days"])
-                if wm_row.get("first_tx_ts"):
-                    wallet_first_seen = int(wm_row["first_tx_ts"])
+        except Exception:
+            pass
 
-        if wallet_age_days == 0 and await _table_exists(conn, "wallet_profiles"):
-            r = await conn.fetchrow(
-                "SELECT first_seen_at FROM wallet_profiles WHERE wallet=$1", wallet
-            )
-            if r and r.get("first_seen_at") is not None:
-                first_ts = int(r["first_seen_at"])
-                wallet_age_days = max(0, (int(time.time()) - first_ts) // 86400)
-                wallet_first_seen = first_ts
+        ts_wallet_age = int(row.get("ts_wallet_age_days") or 0) if row else 0
+        age_days = (
+            int(wm["wallet_age_days"]) if wm and wm.get("wallet_age_days") else 0
+        ) or ts_wallet_age
 
-        if wallet_age_days == 0 and await _table_exists(conn, "transactions"):
+        if age_days == 0 and await _table_exists(conn, "transactions"):
             from_col, to_col, _ = await _detect_tx_columns(conn)
             r = await conn.fetchrow(
                 f"SELECT MIN(timestamp) AS min_ts FROM transactions WHERE ({from_col}=$1 OR {to_col}=$2) AND timestamp IS NOT NULL",
                 wallet, wallet,
             )
             if r and r.get("min_ts") is not None:
-                first_ts = int(r["min_ts"])
-                wallet_age_days = max(0, (int(time.time()) - first_ts) // 86400)
-                wallet_first_seen = first_ts
+                age_days = max(0, (int(time.time()) - int(r["min_ts"])) // 86400)
 
+        wp = None
+        if await _table_exists(conn, "wallet_profiles"):
+            wp = await conn.fetchrow(
+                "SELECT first_seen_at FROM wallet_profiles WHERE wallet = $1",
+                wallet,
+            )
+
+        first_seen = None
+        if wp and wp.get("first_seen_at"):
+            first_seen = datetime.datetime.utcfromtimestamp(
+                int(wp["first_seen_at"])
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif wm and wm.get("first_tx_ts"):
+            first_seen = datetime.datetime.utcfromtimestamp(
+                int(wm["first_tx_ts"])
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        wallet_age_days = age_days
         wallet_age_months = (wallet_age_days // 30) if wallet_age_days else 0
-        wallet_first_seen_iso = (
-            time.strftime("%Y-%m-%d", time.gmtime(wallet_first_seen))
-            if wallet_first_seen else None
-        )
+        wallet_first_seen_iso = first_seen
 
         total_transactions = 0
         unique_counterparties = 0
