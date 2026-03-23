@@ -65,6 +65,10 @@ target/
 tmp.json
 w1.json
 
+# Allow mint service config (overrides *.json)
+!mint_service/package.json
+!mint_service/railway.json
+
 # ==============================
 # IDE / OS
 # ==============================

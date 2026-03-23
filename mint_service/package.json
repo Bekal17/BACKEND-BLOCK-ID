@@ -1,0 +1,20 @@
+{
+  "name": "blockid-mint-service",
+  "version": "1.0.0",
+  "description": "BlockID Identity NFT mint service - Metaplex Core soul-bound",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@metaplex-foundation/mpl-core": "latest",
+    "@metaplex-foundation/umi": "latest",
+    "@metaplex-foundation/umi-bundle-defaults": "latest",
+    "@metaplex-foundation/umi-web3js-adapters": "latest",
+    "@solana/web3.js": "^1.95.0",
+    "express": "^4.21.0",
+    "bs58": "^5.0.0"
+  }
+}

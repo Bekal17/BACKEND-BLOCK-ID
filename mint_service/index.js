@@ -26,7 +26,8 @@ import bs58 from "bs58";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
-const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const RPC_URL = SOLANA_RPC_URL;
 const MINT_KEYPAIR_PATH = process.env.MINT_KEYPAIR_PATH || path.join(__dirname, "keypair.json");
 const BLOCKID_MINT_AUTHORITY = process.env.BLOCKID_MINT_AUTHORITY || "";
 
@@ -131,7 +132,7 @@ app.post("/mint-handle", async (req, res) => {
   try {
     const umiInstance = getUmi();
     const assetSigner = generateSigner(umiInstance);
-    await create(umiInstance, {
+    const result = await create(umiInstance, {
       asset: assetSigner,
       name: `@${handleNorm}`,
       uri,
@@ -140,10 +141,16 @@ app.post("/mint-handle", async (req, res) => {
     }).sendAndConfirm(umiInstance);
 
     const mintAddress = assetSigner.publicKey.toString();
+    const sig =
+      typeof result.signature === "string"
+        ? result.signature
+        : result.signature != null
+          ? bs58.encode(Buffer.from(result.signature))
+          : mintAddress;
     console.log(`[mint_service] Handle minted: @${handleNorm} → ${mintAddress}`);
     res.json({
       mint_address: mintAddress,
-      signature: mintAddress,
+      signature: sig,
     });
   } catch (err) {
     console.error("[mint_service] mint-handle error:", err.message);
@@ -152,7 +159,13 @@ app.post("/mint-handle", async (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", keypair_loaded: keypairLoaded });
+  res.json({
+    status: "ok",
+    service: "blockid-mint-service",
+    keypair_loaded: keypairLoaded,
+    network: SOLANA_RPC_URL.includes("devnet") ? "devnet" : "mainnet",
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.listen(PORT, () => {
@@ -161,6 +174,7 @@ app.listen(PORT, () => {
     getUmi();
     console.log("[mint_service] Keypair loaded successfully");
   } catch (e) {
-    console.warn("[mint_service] Keypair not loaded - /mint will fail until configured");
+    console.error("[mint_service] ERROR: No keypair configured. Set BLOCKID_MINT_AUTHORITY or MINT_KEYPAIR_PATH");
+    process.exit(1);
   }
 });
