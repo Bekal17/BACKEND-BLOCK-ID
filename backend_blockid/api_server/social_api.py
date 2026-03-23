@@ -1664,6 +1664,39 @@ async def get_post(post_id: int):
         await release_conn(conn)
 
 
+@router.delete("/post/{post_id}")
+async def delete_post(
+    post_id: int,
+    wallet: str,
+    session_token: str = "",
+) -> dict:
+    """Delete a post. Only the post owner can delete their own post."""
+    conn = await get_conn()
+    try:
+        # Verify post exists and belongs to wallet
+        post = await conn.fetchrow(
+            "SELECT id, wallet FROM social_posts WHERE id = $1",
+            post_id,
+        )
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        if post["wallet"] != wallet:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this post")
+
+        # Delete related data first
+        await conn.execute("DELETE FROM social_likes WHERE post_id = $1", post_id)
+        await conn.execute("DELETE FROM post_bookmarks WHERE post_id = $1", post_id)
+        await conn.execute("DELETE FROM social_posts WHERE parent_id = $1", post_id)
+
+        # Delete the post
+        await conn.execute("DELETE FROM social_posts WHERE id = $1", post_id)
+
+        logger.info("post_deleted", post_id=post_id, wallet=wallet[:16])
+        return {"success": True, "message": "Post deleted successfully"}
+    finally:
+        await release_conn(conn)
+
+
 @router.get("/posts/{wallet}")
 async def get_wallet_posts(
     wallet: str,
