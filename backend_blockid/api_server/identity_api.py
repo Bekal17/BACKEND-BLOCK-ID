@@ -15,7 +15,10 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from backend_blockid.api_server.identity_eligibility import check_eligibility
-from backend_blockid.api_server.identity_metadata import build_metadata
+from backend_blockid.api_server.identity_metadata import (
+    build_metadata,
+    get_wallet_age_days_from_meta,
+)
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
@@ -428,17 +431,9 @@ async def get_identity_metadata(wallet: str) -> dict[str, Any]:
             last_updated.strftime("%Y-%m-%d") if hasattr(last_updated, "strftime") else str(last_updated or "")
         )
 
-        wallet_age_days = int(row.get("wallet_age_days") or 0)
+        wallet_age_days = await get_wallet_age_days_from_meta(conn, wallet)
         if wallet_age_days == 0:
-            try:
-                meta = await conn.fetchrow(
-                    "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
-                    wallet,
-                )
-                if meta and (meta.get("wallet_age_days") or 0) > 0:
-                    wallet_age_days = int(meta["wallet_age_days"])
-            except Exception:
-                pass  # wallet_meta may not exist
+            wallet_age_days = int(row.get("wallet_age_days") or 0)
 
         return {
             "wallet": row["wallet"],

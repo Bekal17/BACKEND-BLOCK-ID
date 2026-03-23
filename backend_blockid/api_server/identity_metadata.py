@@ -9,6 +9,22 @@ from __future__ import annotations
 from datetime import date
 
 
+async def get_wallet_age_days_from_meta(conn, wallet: str) -> int:
+    """Fetch wallet_age_days from wallet_meta table (source of truth)."""
+    try:
+        age_row = await conn.fetchrow(
+            "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
+            wallet,
+        )
+        return (
+            int(age_row["wallet_age_days"])
+            if age_row and age_row.get("wallet_age_days")
+            else 0
+        )
+    except Exception:
+        return 0
+
+
 def build_metadata(
     wallet: str,
     trust_score_row: dict,
