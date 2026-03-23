@@ -14,7 +14,7 @@
 
 import express from "express";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
-import { mplCore, create } from "@metaplex-foundation/mpl-core";
+import { mplCore, create, update, fetchAsset } from "@metaplex-foundation/mpl-core";
 import { generateSigner, keypairIdentity, publicKey } from "@metaplex-foundation/umi";
 import { fromWeb3JsKeypair } from "@metaplex-foundation/umi-web3js-adapters";
 import { Keypair } from "@solana/web3.js";
@@ -184,6 +184,36 @@ app.post("/mint-handle", async (req, res) => {
     });
   } catch (err) {
     console.error("[mint_service] mint-handle error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /update-uri — Update metadata URI of an existing NFT (fix wrong METADATA_BASE_URL)
+app.post("/update-uri", async (req, res) => {
+  const { mint_address, new_uri } = req.body || {};
+  if (!mint_address || !new_uri) {
+    return res.status(400).json({ error: "mint_address and new_uri required" });
+  }
+
+  try {
+    const umiInstance = getUmi();
+    const assetAddress = publicKey(mint_address);
+    const asset = await fetchAsset(umiInstance, assetAddress);
+
+    await update(umiInstance, {
+      asset,
+      uri: new_uri,
+    }).sendAndConfirm(umiInstance);
+
+    console.log(`[mint_service] Updated URI for ${mint_address.slice(0, 16)}... → ${new_uri}`);
+    res.json({
+      success: true,
+      mint_address,
+      new_uri,
+      message: "Metadata URI updated successfully",
+    });
+  } catch (err) {
+    console.error("[mint_service] update-uri error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
