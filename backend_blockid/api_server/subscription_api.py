@@ -34,6 +34,27 @@ async def get_subscription_status(wallet: str) -> dict:
     if not wallet:
         raise HTTPException(status_code=400, detail="wallet required")
 
+    # Founder bypass — always return unlimited PRO
+    FOUNDER_WALLETS = {
+        w.strip()
+        for w in (os.getenv("FOUNDER_WALLETS") or "").split(",")
+        if w.strip()
+    }
+    if wallet in FOUNDER_WALLETS:
+        return {
+            "wallet": wallet,
+            "tier": "PRO",
+            "status": "active",
+            "scan_limit": None,
+            "scans_used": 0,
+            "scans_remaining": None,
+            "handle_limit": None,
+            "wallet_graph": True,
+            "current_period_end": None,
+            "cancel_at_period_end": False,
+            "paddle_subscription_id": None,
+        }
+
     conn = await get_conn()
     try:
         sub = await conn.fetchrow(
