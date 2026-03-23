@@ -653,10 +653,10 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                     logger.info(
                         "auto_mint_identity_nft_skip",
                         wallet=wallet[:16],
-                        reason="not_eligible",
+                        skip_reason="not_eligible",
+                        eligibility_reason=elig.get("reason", ""),
                         trust_score=elig.get("trust_score"),
                         score_tier=elig.get("score_tier"),
-                        reason=elig.get("reason", ""),
                     )
                 else:
                     logger.info(
