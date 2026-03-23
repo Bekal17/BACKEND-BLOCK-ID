@@ -34,6 +34,11 @@ CHALLENGE_PERIOD_DAYS = int(os.getenv("CHALLENGE_PERIOD_DAYS", "30").strip() or 
 MIN_TRUST_SCORE_TO_CHALLENGE = int(os.getenv("MIN_TRUST_SCORE_TO_CHALLENGE", "50").strip() or "50")
 MINT_TIMEOUT = float(os.getenv("MINT_TIMEOUT", "30"))
 ADMIN_KEY = (os.getenv("ADMIN_KEY") or "").strip()
+FOUNDER_WALLETS = {
+    w.strip()
+    for w in (os.getenv("FOUNDER_WALLETS") or "").split(",")
+    if w.strip()
+}
 
 
 def _normalize_handle(handle: str) -> str:
@@ -54,7 +59,7 @@ class ClaimRequest(BaseModel):
     wallet: str = Field(..., description="Solana wallet address")
     handle: str = Field(..., description="Handle with or without @")
     signed_message: str = Field(..., description="Message signed by wallet")
-    signature: str = Field(..., description="Base58 signature")
+    signature: str = Field(default="", description="Base58 signature")
 
 
 class LinkWalletRequest(BaseModel):
@@ -150,11 +155,13 @@ async def claim_handle(body: ClaimRequest) -> dict[str, Any]:
         raise HTTPException(400, detail=err)
     h = _normalize_handle(handle_raw)
 
-    # High-value: individual signature required. Message: "Claim @{handle} on BlockID"
-    expected_msg = f"Claim @{h} on BlockID"
-    if not body.signed_message or (body.signed_message or "").strip() != expected_msg:
-        raise HTTPException(400, detail=f"signed_message must be '{expected_msg}'")
-    verify_or_raise(wallet, body.signed_message.strip(), body.signature, detail="Invalid claim signature")
+    is_founder = wallet in FOUNDER_WALLETS
+    if not is_founder:
+        # High-value: individual signature required.
+        expected_msg = f"Claim @{h} on BlockID"
+        if not body.signed_message or (body.signed_message or "").strip() != expected_msg:
+            raise HTTPException(400, detail=f"signed_message must be '{expected_msg}'")
+        verify_or_raise(wallet, body.signed_message.strip(), body.signature, detail="Invalid claim signature")
 
     conn = await get_conn()
     try:
