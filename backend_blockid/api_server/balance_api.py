@@ -99,7 +99,8 @@ async def get_wallet_balance(wallet: str):
                     # Helius v1 returns balance already adjusted for decimals
                     actual_bal = bal
 
-                    if mint == SOL_MINT:
+                    symbol_upper = (t.get("symbol") or "").strip().upper()
+                    if mint == SOL_MINT or mint == "So11111111111111111111111111111111111111111" or symbol_upper == "SOL":
                         sol_usd = float(t.get("usdValue", 0) or 0)
                         continue
 
