@@ -580,17 +580,17 @@ async def get_following_feed(
             LEFT JOIN social_posts orig
               ON orig.id = p.repost_of
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = p.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = p.wallet
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub_orig ON sub_orig.wallet_address = orig.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub_orig ON sub_orig.user_id = orig.wallet
             WHERE f.follower_wallet = $1
               AND p.is_hidden = FALSE
               {before_clause}
@@ -1291,11 +1291,11 @@ async def get_followers(wallet: str):
             LEFT JOIN handle_registry hr
                 ON hr.owner_wallet = sf.follower_wallet
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = sf.follower_wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = sf.follower_wallet
             WHERE sf.following_wallet = $1
             ORDER BY sf.created_at DESC
             LIMIT 100
@@ -1337,11 +1337,11 @@ async def get_following(wallet: str):
             LEFT JOIN handle_registry hr
                 ON hr.owner_wallet = sf.following_wallet
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = sf.following_wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = sf.following_wallet
             WHERE sf.follower_wallet = $1
             ORDER BY sf.created_at DESC
             LIMIT 100
@@ -1406,11 +1406,11 @@ async def get_profile(
                    COALESCE(sub.plan, 'free') AS plan
             FROM social_posts sp
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = sp.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = sp.wallet
             WHERE sp.wallet = $1 AND sp.is_hidden = FALSE AND sp.post_type = 'PUBLIC'
             ORDER BY sp.created_at DESC
             LIMIT 10
@@ -1435,7 +1435,7 @@ async def get_profile(
         try:
             sub = await conn.fetchrow(
                 """SELECT plan FROM subscriptions
-                   WHERE wallet_address = $1 AND status = 'active'
+                   WHERE user_id = $1 AND status = 'active'
                    ORDER BY created_at DESC NULLS LAST LIMIT 1""",
                 wallet,
             )
@@ -1631,11 +1631,11 @@ async def get_post(post_id: int):
                    COALESCE(sub.plan, 'free') AS plan
             FROM social_posts sp
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = sp.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = sp.wallet
             WHERE sp.id = $1
             """,
             post_id,
@@ -1649,11 +1649,11 @@ async def get_post(post_id: int):
                    COALESCE(sub.plan, 'free') AS plan
             FROM social_posts r
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = r.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = r.wallet
             WHERE r.parent_id = $1 AND r.is_hidden = FALSE
             ORDER BY r.created_at ASC
             """,
@@ -1870,17 +1870,17 @@ async def get_bookmarks(wallet: str):
             LEFT JOIN trust_scores ts ON ts.wallet = sp.wallet
             LEFT JOIN trust_scores ts_orig ON ts_orig.wallet = orig.wallet
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = sp.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = sp.wallet
             LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
+                SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
                 WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub_orig ON sub_orig.wallet_address = orig.wallet
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub_orig ON sub_orig.user_id = orig.wallet
             WHERE pb.wallet = $1
               AND sp.is_hidden = FALSE
             ORDER BY pb.created_at DESC
