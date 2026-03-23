@@ -134,10 +134,10 @@ def _fetch_transactions(wallet: str) -> list[dict[str, Any]]:
         data = resp.json()
         helius_request("addresses/transactions", wallet, request_count=1)
         result = data if isinstance(data, list) else []
-        logger.info("fetch_transactions_done", wallet=wallet[:16], count=len(result))
+        logger.debug("fetch_transactions_done", wallet=wallet[:16], count=len(result))
         if result:
             first = result[0]
-            logger.info(
+            logger.debug(
                 "fetch_transactions_sample",
                 wallet=wallet[:16],
                 has_nativeTransfers=bool(first.get("nativeTransfers")),
@@ -223,7 +223,7 @@ async def _insert_transactions(conn, wallet: str, records: list[dict[str, Any]])
                 error=str(e),
                 signature=r.get("signature", "")[:16],
             )
-    logger.info(
+    logger.debug(
         "insert_transactions_done",
         wallet=wallet[:16],
         inserted=inserted,
@@ -289,7 +289,7 @@ async def _run_daemon_enrichment(wallet: str) -> dict[str, Any] | None:
             logger.warning("daemon_enrichment_skipped", wallet=wallet[:16], reason="no result")
             return None
 
-        logger.info(
+        logger.debug(
             "daemon_enrichment_done",
             wallet=wallet[:16],
             daemon_risk_score=daemon.risk_score,
@@ -368,7 +368,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     await _ensure_wallet_in_trust_scores(wallet)
 
     # Step 1: scan_wallet
-    logger.info("realtime_pipeline_step", step="scan_wallet", wallet=wallet[:16])
+    logger.debug("realtime_pipeline_step", step="scan_wallet", wallet=wallet[:16])
     try:
         from backend_blockid.oracle.incremental_wallet_meta_scanner import scan_wallet
         await scan_wallet(wallet)
@@ -376,7 +376,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         logger.debug("realtime_scan_wallet_skip", wallet=wallet[:16], error=str(e))
 
     # Step 1.5: build_wallet_profile
-    logger.info("realtime_pipeline_step", step="build_wallet_profile", wallet=wallet[:16])
+    logger.debug("realtime_pipeline_step", step="build_wallet_profile", wallet=wallet[:16])
     try:
         from backend_blockid.oracle.wallet_profile_builder import build_wallet_profile
         await build_wallet_profile(wallet)
@@ -398,7 +398,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             await _insert_transactions(conn, wallet, records)
 
         # Step 2: flow_features
-        logger.info("realtime_pipeline_step", step="flow_features", wallet=wallet[:16])
+        logger.debug("realtime_pipeline_step", step="flow_features", wallet=wallet[:16])
         try:
             from backend_blockid.config.env import get_solana_rpc_url
             from backend_blockid.oracle.flow_features import flow_features_for_wallet
@@ -413,7 +413,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             logger.debug("realtime_flow_skip", wallet=wallet[:16], error=str(e))
 
         # Step 3: drainer_detection
-        logger.info("realtime_pipeline_step", step="drainer_detection", wallet=wallet[:16])
+        logger.debug("realtime_pipeline_step", step="drainer_detection", wallet=wallet[:16])
         try:
             from backend_blockid.config.env import get_solana_rpc_url
             from backend_blockid.oracle.drainer_detection import drainer_features_for_wallet
@@ -428,7 +428,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             logger.debug("realtime_drainer_skip", wallet=wallet[:16], error=str(e))
 
         # Step 4: auto_evidence_collector
-        logger.info("realtime_pipeline_step", step="auto_evidence_collector", wallet=wallet[:16])
+        logger.debug("realtime_pipeline_step", step="auto_evidence_collector", wallet=wallet[:16])
         from backend_blockid.oracle.scan_wallet_transactions import load_scam_wallets, _scan_wallet
         scam_set = load_scam_wallets()
         evidence = await asyncio.get_event_loop().run_in_executor(
@@ -457,7 +457,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         await _apply_reason_weights(wallet, evidence)
 
         # Step 5: reason_aggregator
-        logger.info("realtime_pipeline_step", step="reason_aggregator", wallet=wallet[:16])
+        logger.debug("realtime_pipeline_step", step="reason_aggregator", wallet=wallet[:16])
         try:
             from backend_blockid.oracle.reason_aggregator import main_async as reason_aggregator_main
             await reason_aggregator_main()
@@ -465,7 +465,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             logger.debug("realtime_reason_aggregator_skip", wallet=wallet[:16], error=str(e))
 
         # Step 5b: detect_positive_reasons — insert positive reasons AFTER 4b so DELETE does not wipe them
-        logger.info("realtime_pipeline_step", step="detect_positive_reasons", wallet=wallet[:16])
+        logger.debug("realtime_pipeline_step", step="detect_positive_reasons", wallet=wallet[:16])
         try:
             from backend_blockid.ai_engine.positive_reasons import detect_positive_reasons
             positive = await detect_positive_reasons(wallet)
@@ -502,7 +502,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         _append_wallet_to_csv(cluster_path, wallet, default_row)
 
         # Step 7: predict_wallet_score
-        logger.info("realtime_pipeline_step", step="predict_wallet_score", wallet=wallet[:16])
+        logger.debug("realtime_pipeline_step", step="predict_wallet_score", wallet=wallet[:16])
         try:
             from backend_blockid.ml.predict_wallet_score import predict_wallet_score_for_wallet
             await predict_wallet_score_for_wallet(wallet)
@@ -515,11 +515,11 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     # Step 8: [NEW] Daemon Protocol enrichment
     # Runs AFTER ML scoring — enriches trust_scores with external risk/sanctions data
     # Non-blocking: pipeline completes normally even if Daemon is down
-    logger.info("realtime_pipeline_step", step="daemon_enrichment", wallet=wallet[:16])
+    logger.debug("realtime_pipeline_step", step="daemon_enrichment", wallet=wallet[:16])
     await _run_daemon_enrichment(wallet)
 
     # Step 9: [NEW] Behavioral linking scan (suggestions only; user must confirm)
-    logger.info("realtime_pipeline_step", step="behavioral_linking", wallet=wallet[:16])
+    logger.debug("realtime_pipeline_step", step="behavioral_linking", wallet=wallet[:16])
     try:
         from backend_blockid.ml.behavioral_linking import run_linking_scan, save_suggestions
         link_conn = await get_conn()
@@ -532,7 +532,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                 )
                 handle = handle_row["handle"] if handle_row else None
                 saved = await save_suggestions(wallet, suggestions, handle, link_conn)
-                logger.info(
+                logger.debug(
                     "behavioral_linking_done",
                     wallet=wallet[:16],
                     suggestions_found=len(suggestions),
@@ -575,7 +575,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
 
                     # Step 2: log LINKING change BEFORE UPDATE (non-fatal)
                     try:
-                        logger.info(
+                        logger.debug(
                             "score_history_linking_hook",
                             wallet=wallet[:16],
                             boost=boost,
@@ -611,7 +611,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                         wallet,
                     )
 
-                logger.info(
+                logger.debug(
                     "linking_boost_applied",
                     wallet=wallet[:16],
                     boost=boost,
@@ -623,7 +623,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         logger.debug("linking_boost_skip", wallet=wallet[:16], error=str(e))
 
     # Step 10: update_wallet_score_async (uses Daemon-enriched data if persisted)
-    logger.info("realtime_pipeline_step", step="update_wallet_score_async", wallet=wallet[:16])
+    logger.debug("realtime_pipeline_step", step="update_wallet_score_async", wallet=wallet[:16])
     await update_wallet_score_async(wallet)
 
     # AUTO-MINT: Trigger Identity NFT mint if eligible
@@ -650,7 +650,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             else:
                 elig = await check_eligibility(wallet, auto_mint_conn)
                 if not elig["eligible"]:
-                    logger.info(
+                    logger.debug(
                         "auto_mint_identity_nft_skip",
                         wallet=wallet[:16],
                         skip_reason="not_eligible",
@@ -659,7 +659,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                         score_tier=elig.get("score_tier"),
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "auto_mint_identity_nft_triggered",
                         wallet=wallet[:16],
                         trust_score=elig["trust_score"],
@@ -672,7 +672,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                     )
                     mint_req = MintRequest(wallet=wallet)
                     mint_result = await mint_identity_nft(mint_req)
-                    logger.info(
+                    logger.debug(
                         "auto_mint_identity_nft_done",
                         wallet=wallet[:16],
                         success=mint_result.get("success", False),
@@ -689,7 +689,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         )
 
     inserted_count = 1 if not existed_before else 0
-    logger.info(
+    logger.debug(
         "realtime_pipeline_done",
         wallet=wallet[:16],
         trust_inserted=inserted_count,

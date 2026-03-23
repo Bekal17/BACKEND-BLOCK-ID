@@ -206,7 +206,7 @@ async def create_post(body: CreatePostRequest):
         )
 
         if moderation.get("downgraded"):
-            logger.info(
+            logger.debug(
                 "content_moderation_downgraded",
                 wallet=wallet[:16],
                 original_level=moderation["violation_level"] + 1,
@@ -458,7 +458,7 @@ async def create_post_with_image(
         )
 
         if moderation.get("downgraded"):
-            logger.info(
+            logger.debug(
                 "content_moderation_downgraded",
                 wallet=wallet[:16],
                 original_level=moderation["violation_level"] + 1,
@@ -1197,7 +1197,7 @@ async def endorse_wallet(body: Dict[str, Any]):
                     total_endorsements_row["c"] if total_endorsements_row and total_endorsements_row["c"] is not None else 0
                 )
 
-                logger.info(
+                logger.debug(
                     "score_history_social_hook",
                     wallet=to_wallet[:16],
                     endorser=from_wallet[:16],
@@ -1665,79 +1665,87 @@ async def get_wallet_posts(
     if not wallet:
         raise HTTPException(status_code=400, detail="Invalid wallet")
 
-    conn = await get_conn()
     try:
-        rows = await conn.fetch(
-            """
-            SELECT
-                sp.id, sp.wallet, sp.handle, sp.content,
-                sp.image_url, sp.post_type, sp.parent_id,
-                sp.reply_count, sp.like_count, sp.repost_count,
-                sp.is_hidden, COALESCE(ts.score, sp.trust_score) AS trust_score, sp.risk_level,
-                sp.created_at, sp.is_repost, sp.repost_of,
-                sp.quote_content,
-                orig.wallet AS original_wallet,
-                orig.handle AS original_handle,
-                orig.content AS original_content,
-                COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
-                orig.created_at AS original_created_at,
-                COALESCE(sub.plan, 'free') AS plan,
-                COALESCE(sub_orig.plan, 'free') AS original_plan
-            FROM social_posts sp
-            LEFT JOIN social_posts orig
-                ON orig.id = sp.repost_of
-            LEFT JOIN trust_scores ts
-                ON ts.wallet = sp.wallet
-            LEFT JOIN trust_scores ts_orig
-                ON ts_orig.wallet = orig.wallet
-            LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
-                FROM subscriptions
-                WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub ON sub.wallet_address = sp.wallet
-            LEFT JOIN (
-                SELECT DISTINCT ON (wallet_address) wallet_address, plan
-                FROM subscriptions
-                WHERE status = 'active'
-                ORDER BY wallet_address, created_at DESC NULLS LAST
-            ) sub_orig ON sub_orig.wallet_address = orig.wallet
-            WHERE sp.wallet = $1 AND sp.is_hidden = FALSE
-            ORDER BY sp.created_at DESC
-            LIMIT $2
-            """,
-            wallet,
-            limit,
+        conn = await get_conn()
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    sp.id, sp.wallet, sp.handle, sp.content,
+                    sp.image_url, sp.post_type, sp.parent_id,
+                    sp.reply_count, sp.like_count, sp.repost_count,
+                    sp.is_hidden, COALESCE(ts.score, sp.trust_score) AS trust_score, sp.risk_level,
+                    sp.created_at, sp.is_repost, sp.repost_of,
+                    sp.quote_content,
+                    orig.wallet AS original_wallet,
+                    orig.handle AS original_handle,
+                    orig.content AS original_content,
+                    COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
+                    orig.created_at AS original_created_at,
+                    COALESCE(sub.plan, 'free') AS plan,
+                    COALESCE(sub_orig.plan, 'free') AS original_plan
+                FROM social_posts sp
+                LEFT JOIN social_posts orig
+                    ON orig.id = sp.repost_of
+                LEFT JOIN trust_scores ts
+                    ON ts.wallet = sp.wallet
+                LEFT JOIN trust_scores ts_orig
+                    ON ts_orig.wallet = orig.wallet
+                LEFT JOIN (
+                    SELECT DISTINCT ON (user_id) user_id, plan
+                    FROM subscriptions
+                    WHERE status = 'active'
+                    ORDER BY user_id, created_at DESC NULLS LAST
+                ) sub ON sub.user_id = sp.wallet
+                LEFT JOIN (
+                    SELECT DISTINCT ON (user_id) user_id, plan
+                    FROM subscriptions
+                    WHERE status = 'active'
+                    ORDER BY user_id, created_at DESC NULLS LAST
+                ) sub_orig ON sub_orig.user_id = orig.wallet
+                WHERE sp.wallet = $1 AND sp.is_hidden = FALSE
+                ORDER BY sp.created_at DESC
+                LIMIT $2
+                """,
+                wallet,
+                limit,
+            )
+
+            posts = []
+            for r in rows:
+                post = dict(r)
+                original_wallet = post.get("original_wallet")
+
+                if post.get("is_repost") and post.get("repost_of") and original_wallet:
+                    post["original_post"] = {
+                        "wallet": post.pop("original_wallet", None),
+                        "handle": post.pop("original_handle", None),
+                        "content": post.pop("original_content", None),
+                        "trust_score": post.pop("original_trust_score", None),
+                        "created_at": post.pop("original_created_at", None),
+                        "plan": post.pop("original_plan", "free"),
+                    }
+                else:
+                    post.pop("original_wallet", None)
+                    post.pop("original_handle", None)
+                    post.pop("original_content", None)
+                    post.pop("original_trust_score", None)
+                    post.pop("original_created_at", None)
+                    post.pop("original_plan", None)
+                    post["original_post"] = None
+
+                posts.append(post)
+
+            return {"wallet": wallet, "posts": posts}
+        finally:
+            await release_conn(conn)
+    except Exception as e:
+        logger.error(
+            "get_wallet_posts_error",
+            wallet=wallet[:16] if wallet else "",
+            error=str(e),
         )
-
-        posts = []
-        for r in rows:
-            post = dict(r)
-            original_wallet = post.get("original_wallet")
-
-            if post.get("is_repost") and post.get("repost_of") and original_wallet:
-                post["original_post"] = {
-                    "wallet": post.pop("original_wallet", None),
-                    "handle": post.pop("original_handle", None),
-                    "content": post.pop("original_content", None),
-                    "trust_score": post.pop("original_trust_score", None),
-                    "created_at": post.pop("original_created_at", None),
-                    "plan": post.pop("original_plan", "free"),
-                }
-            else:
-                post.pop("original_wallet", None)
-                post.pop("original_handle", None)
-                post.pop("original_content", None)
-                post.pop("original_trust_score", None)
-                post.pop("original_created_at", None)
-                post.pop("original_plan", None)
-                post["original_post"] = None
-
-            posts.append(post)
-
-        return {"wallet": wallet, "posts": posts}
-    finally:
-        await release_conn(conn)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/bookmark")
