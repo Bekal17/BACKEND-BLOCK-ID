@@ -7,7 +7,7 @@
  *
  * Environment variables:
  *   MINT_KEYPAIR_PATH - path to BlockID authority keypair JSON
- *   BLOCKID_MINT_AUTHORITY - alternative: base58 private key
+ *   BLOCKID_MINT_AUTHORITY - alternative: base64 (64 bytes) or base58 private key
  *   SOLANA_RPC_URL - RPC endpoint
  *   PORT - server port (default 3001)
  */
@@ -31,15 +31,45 @@ const RPC_URL = SOLANA_RPC_URL;
 const MINT_KEYPAIR_PATH = process.env.MINT_KEYPAIR_PATH || path.join(__dirname, "keypair.json");
 const BLOCKID_MINT_AUTHORITY = process.env.BLOCKID_MINT_AUTHORITY || "";
 
-/** Load raw secret key (64 bytes) for Solana Keypair. */
+/** Load raw secret key (64 bytes) for Solana Keypair. Supports base64 or base58. */
 function loadSecretKey() {
   if (BLOCKID_MINT_AUTHORITY) {
-    const secret = bs58.decode(BLOCKID_MINT_AUTHORITY);
-    return new Uint8Array(secret);
+    const raw = BLOCKID_MINT_AUTHORITY.trim();
+    let secretKey;
+
+    // Try base64 first
+    try {
+      const decoded = Buffer.from(raw, "base64");
+      if (decoded.length === 64) {
+        secretKey = new Uint8Array(decoded);
+      }
+    } catch {}
+
+    // Fallback: try bs58
+    if (!secretKey) {
+      try {
+        const decoded = bs58.decode(raw);
+        if (decoded && decoded.length === 64) {
+          secretKey = new Uint8Array(decoded);
+        }
+      } catch {}
+    }
+
+    if (!secretKey || secretKey.length !== 64) {
+      console.error(
+        "[mint_service] ERROR: BLOCKID_MINT_AUTHORITY invalid. Use base64 (64 bytes) or base58 format. Or set MINT_KEYPAIR_PATH.",
+      );
+      process.exit(1);
+    }
+    return secretKey;
   }
+
   const keyPath = path.resolve(MINT_KEYPAIR_PATH);
   if (!fs.existsSync(keyPath)) {
-    throw new Error(`Mint keypair not found: ${keyPath}. Set MINT_KEYPAIR_PATH or BLOCKID_MINT_AUTHORITY.`);
+    console.error(
+      "[mint_service] ERROR: No keypair configured. Set BLOCKID_MINT_AUTHORITY or MINT_KEYPAIR_PATH",
+    );
+    process.exit(1);
   }
   const raw = JSON.parse(fs.readFileSync(keyPath, "utf8"));
   return new Uint8Array(raw);
@@ -169,7 +199,7 @@ app.get("/health", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[mint_service] BlockID Mint Service listening on port ${PORT}`);
+  console.log(`BlockID Mint Service listening on port ${PORT}`);
   try {
     getUmi();
     console.log("[mint_service] Keypair loaded successfully");
