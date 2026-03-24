@@ -13,8 +13,8 @@ Steps (same modules as run_full_pipeline):
   5. reason_aggregator (main_async)
   6. reason_weight_engine — skip for single wallet (applied inline)
   7. predict_wallet_score_for_wallet — ML scoring
-  8. [NEW] daemon_enrichment — Daemon Protocol risk + sanctions check
-  9. update_wallet_score_async (dynamic_risk_v2) — uses Daemon-enriched score
+  8. daemon_enrichment — removed (DAEMON_API_KEY 404); replaced by Cyclops
+  9. update_wallet_score_async (dynamic_risk_v2)
 
 Target runtime: < 3 seconds.
 """
@@ -268,80 +268,9 @@ async def _apply_reason_weights(wallet: str, evidence: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# [NEW] Daemon Protocol enrichment
+# Daemon enrichment removed (DAEMON_API_KEY 404)
+# Replaced by Cyclops: backend_blockid.integrations.cyclops_client
 # ---------------------------------------------------------------------------
-
-async def _run_daemon_enrichment(wallet: str) -> dict[str, Any] | None:
-    """
-    Query Daemon Protocol for risk score + sanctions data.
-    Runs in executor (httpx is sync). Returns dict to store in PostgreSQL,
-    or None if Daemon is unavailable (graceful degradation).
-
-    Stores result in trust_scores.daemon_risk_score, daemon_is_sanctioned,
-    daemon_risk_level if those columns exist — otherwise logs only.
-    """
-    try:
-        from backend_blockid.integrations.daemon_client import get_wallet_risk
-        loop = asyncio.get_event_loop()
-        daemon = await loop.run_in_executor(None, lambda: get_wallet_risk(wallet))
-
-        if daemon is None:
-            logger.warning("daemon_enrichment_skipped", wallet=wallet[:16], reason="no result")
-            return None
-
-        logger.debug(
-            "daemon_enrichment_done",
-            wallet=wallet[:16],
-            daemon_risk_score=daemon.risk_score,
-            daemon_risk_level=daemon.risk_level,
-            daemon_is_sanctioned=daemon.is_sanctioned,
-            daemon_is_critical=daemon.is_critical,
-            daemon_penalty=daemon.penalty_score,
-        )
-
-        # Persist Daemon data to trust_scores (best-effort — skip if columns don't exist yet)
-        try:
-            conn = await get_conn()
-            try:
-                await conn.execute(
-                    """
-                    UPDATE trust_scores
-                    SET
-                        daemon_risk_score    = $1,
-                        daemon_is_sanctioned = $2,
-                        daemon_risk_level    = $3,
-                        daemon_labels        = $4,
-                        daemon_updated_at    = CURRENT_TIMESTAMP
-                    WHERE wallet = $5
-                    """,
-                    daemon.risk_score,
-                    daemon.is_sanctioned,
-                    daemon.risk_level,
-                    ",".join(daemon.labels) if daemon.labels else None,
-                    wallet,
-                )
-            finally:
-                await release_conn(conn)
-        except Exception as db_err:
-            # Columns may not exist yet — non-fatal
-            logger.debug(
-                "daemon_enrichment_db_skip",
-                wallet=wallet[:16],
-                error=str(db_err),
-            )
-
-        return {
-            "risk_score": daemon.risk_score,
-            "risk_level": daemon.risk_level,
-            "is_sanctioned": daemon.is_sanctioned,
-            "is_critical": daemon.is_critical,
-            "penalty": daemon.penalty_score,
-            "labels": daemon.labels,
-        }
-
-    except Exception as e:
-        logger.warning("daemon_enrichment_error", wallet=wallet[:16], error=str(e))
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -512,11 +441,8 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     finally:
         await release_conn(conn)
 
-    # Step 8: [NEW] Daemon Protocol enrichment
-    # Runs AFTER ML scoring — enriches trust_scores with external risk/sanctions data
-    # Non-blocking: pipeline completes normally even if Daemon is down
-    logger.debug("realtime_pipeline_step", step="daemon_enrichment", wallet=wallet[:16])
-    await _run_daemon_enrichment(wallet)
+    # Daemon enrichment removed (DAEMON_API_KEY 404)
+    # Replaced by Cyclops: backend_blockid.integrations.cyclops_client
 
     # Step 9: [NEW] Behavioral linking scan (suggestions only; user must confirm)
     logger.debug("realtime_pipeline_step", step="behavioral_linking", wallet=wallet[:16])
@@ -853,9 +779,9 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
     finally:
         await release_conn(conn)
 
-    # Step 5 (streaming): daemon_enrichment — [NEW]
-    yield ("daemon_check", "Checking sanctions & external risk", {"wallet": wallet[:16]})
-    daemon_data = await _run_daemon_enrichment(wallet)
+    # Daemon enrichment removed (DAEMON_API_KEY 404)
+    # Replaced by Cyclops: backend_blockid.integrations.cyclops_client
+    daemon_data = None
 
     # Step 5.5 (streaming): behavioral_linking
     yield ("behavioral_linking", "Scanning for linked wallets", {"wallet": wallet[:16]})
