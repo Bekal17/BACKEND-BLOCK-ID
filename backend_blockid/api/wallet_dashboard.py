@@ -268,10 +268,31 @@ async def get_wallet_dashboard(wallet: str) -> dict:
                 if b and b not in badges:
                     badges.append(b)
 
+        # Fetch Cyclops data from wallet_meta
+        cyclops = None
+        try:
+            cyclops_row = await conn.fetchrow(
+                """SELECT cyclops_risk_score, cyclops_risk_level,
+                   cyclops_is_sanctioned, cyclops_updated_at
+                   FROM wallet_meta WHERE wallet = $1""",
+                wallet,
+            )
+            if cyclops_row:
+                cyclops = {
+                    "risk_score": float(cyclops_row["cyclops_risk_score"] or 0),
+                    "risk_level": cyclops_row["cyclops_risk_level"] or "UNKNOWN",
+                    "is_sanctioned": bool(cyclops_row["cyclops_is_sanctioned"]),
+                    "updated_at": cyclops_row["cyclops_updated_at"].isoformat()
+                    if cyclops_row["cyclops_updated_at"] else None,
+                }
+        except Exception:
+            pass
+
         return {
             "wallet": wallet,
             "trust_score": trust_score,
             "risk_tier": risk_tier,
+            "cyclops": cyclops,
             "profile": {
                 "wallet_age_days": wallet_age_days,
                 "wallet_age_months": wallet_age_months,
