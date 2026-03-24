@@ -182,7 +182,7 @@ async def verify_nft_ownership(
         ownership = result.get("ownership") or {}
         owner = ownership.get("owner") or ""
 
-        is_owner = owner == wallet
+        is_owner = owner.lower() == wallet.lower()
         logger.info(
             "helius_das_ownership_verified",
             wallet=wallet[:16],
