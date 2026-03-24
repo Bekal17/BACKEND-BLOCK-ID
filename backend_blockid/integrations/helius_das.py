@@ -169,9 +169,6 @@ async def verify_nft_ownership(
                     "method": "getAsset",
                     "params": {
                         "id": nft_mint,
-                        "displayOptions": {
-                            "showOwnership": True,
-                        },
                     },
                 },
             )
