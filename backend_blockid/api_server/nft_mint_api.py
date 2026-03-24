@@ -118,7 +118,7 @@ async def mint_nft_avatar(
         # Call mint service
         async with httpx.AsyncClient(timeout=60.0) as client:
             mint_res = await client.post(
-                f"{MINT_SERVICE_URL}/mint",
+                f"{MINT_SERVICE_URL}/mint-avatar",
                 json={
                     "wallet": wallet,
                     "image_url": image_url,
