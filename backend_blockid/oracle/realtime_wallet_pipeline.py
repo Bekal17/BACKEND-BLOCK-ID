@@ -36,6 +36,7 @@ from backend_blockid.database.score_history import log_score_change
 from backend_blockid.ml.reason_codes import get_reason_weights
 from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score_async
 from backend_blockid.api_server.identity_eligibility import check_eligibility
+from backend_blockid.integrations.cyclops_client import analyze_wallet as cyclops_analyze
 from backend_blockid.tools.helius_client import helius_request
 
 logger = get_logger(__name__)
@@ -441,8 +442,62 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     finally:
         await release_conn(conn)
 
-    # Daemon enrichment removed (DAEMON_API_KEY 404)
-    # Replaced by Cyclops: backend_blockid.integrations.cyclops_client
+    # Step 8: Cyclops risk enrichment
+    try:
+        cyclops_data = await cyclops_analyze(wallet, max_depth=2)
+        if cyclops_data:
+            logger.info(
+                "cyclops_enrichment_done",
+                wallet=wallet[:16],
+                risk_score=cyclops_data.get("risk_score"),
+                risk_level=cyclops_data.get("risk_level"),
+                is_sanctioned=cyclops_data.get("is_sanctioned"),
+                nodes=cyclops_data.get("nodes_count"),
+            )
+            # Apply sanctions penalty
+            if cyclops_data.get("is_sanctioned"):
+                logger.warning("cyclops_sanctioned_wallet", wallet=wallet[:16])
+                # Will be used in score adjustment below
+            # Apply high risk penalty if Cyclops risk is HIGH or CRITICAL
+            cyclops_risk_level = cyclops_data.get("risk_level", "")
+            if cyclops_risk_level in ("HIGH", "CRITICAL"):
+                logger.warning(
+                    "cyclops_high_risk",
+                    wallet=wallet[:16],
+                    risk_level=cyclops_risk_level,
+                    risk_score=cyclops_data.get("risk_score"),
+                )
+        else:
+            cyclops_data = None
+            logger.info("cyclops_enrichment_skipped", wallet=wallet[:16], reason="no result")
+    except Exception as _e:
+        cyclops_data = None
+        logger.warning("cyclops_enrichment_error", wallet=wallet[:16], error=str(_e))
+
+    # Persist Cyclops data to wallet_meta (best-effort)
+    try:
+        meta_conn = await get_conn()
+        try:
+            await meta_conn.execute(
+                """
+                INSERT INTO wallet_meta (wallet, cyclops_risk_score, cyclops_risk_level,
+                    cyclops_is_sanctioned, cyclops_updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (wallet) DO UPDATE SET
+                    cyclops_risk_score = EXCLUDED.cyclops_risk_score,
+                    cyclops_risk_level = EXCLUDED.cyclops_risk_level,
+                    cyclops_is_sanctioned = EXCLUDED.cyclops_is_sanctioned,
+                    cyclops_updated_at = NOW()
+                """,
+                wallet,
+                cyclops_data.get("risk_score") if cyclops_data else None,
+                cyclops_data.get("risk_level") if cyclops_data else None,
+                cyclops_data.get("is_sanctioned", False) if cyclops_data else False,
+            )
+        finally:
+            await release_conn(meta_conn)
+    except Exception:
+        pass  # Column might not exist yet, non-fatal
 
     # Step 9: [NEW] Behavioral linking scan (suggestions only; user must confirm)
     logger.debug("realtime_pipeline_step", step="behavioral_linking", wallet=wallet[:16])
@@ -779,9 +834,62 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
     finally:
         await release_conn(conn)
 
-    # Daemon enrichment removed (DAEMON_API_KEY 404)
-    # Replaced by Cyclops: backend_blockid.integrations.cyclops_client
-    daemon_data = None
+    # Step 8: Cyclops risk enrichment
+    try:
+        cyclops_data = await cyclops_analyze(wallet, max_depth=2)
+        if cyclops_data:
+            logger.info(
+                "cyclops_enrichment_done",
+                wallet=wallet[:16],
+                risk_score=cyclops_data.get("risk_score"),
+                risk_level=cyclops_data.get("risk_level"),
+                is_sanctioned=cyclops_data.get("is_sanctioned"),
+                nodes=cyclops_data.get("nodes_count"),
+            )
+            # Apply sanctions penalty
+            if cyclops_data.get("is_sanctioned"):
+                logger.warning("cyclops_sanctioned_wallet", wallet=wallet[:16])
+                # Will be used in score adjustment below
+            # Apply high risk penalty if Cyclops risk is HIGH or CRITICAL
+            cyclops_risk_level = cyclops_data.get("risk_level", "")
+            if cyclops_risk_level in ("HIGH", "CRITICAL"):
+                logger.warning(
+                    "cyclops_high_risk",
+                    wallet=wallet[:16],
+                    risk_level=cyclops_risk_level,
+                    risk_score=cyclops_data.get("risk_score"),
+                )
+        else:
+            cyclops_data = None
+            logger.info("cyclops_enrichment_skipped", wallet=wallet[:16], reason="no result")
+    except Exception as _e:
+        cyclops_data = None
+        logger.warning("cyclops_enrichment_error", wallet=wallet[:16], error=str(_e))
+
+    # Persist Cyclops data to wallet_meta (best-effort)
+    try:
+        meta_conn = await get_conn()
+        try:
+            await meta_conn.execute(
+                """
+                INSERT INTO wallet_meta (wallet, cyclops_risk_score, cyclops_risk_level,
+                    cyclops_is_sanctioned, cyclops_updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (wallet) DO UPDATE SET
+                    cyclops_risk_score = EXCLUDED.cyclops_risk_score,
+                    cyclops_risk_level = EXCLUDED.cyclops_risk_level,
+                    cyclops_is_sanctioned = EXCLUDED.cyclops_is_sanctioned,
+                    cyclops_updated_at = NOW()
+                """,
+                wallet,
+                cyclops_data.get("risk_score") if cyclops_data else None,
+                cyclops_data.get("risk_level") if cyclops_data else None,
+                cyclops_data.get("is_sanctioned", False) if cyclops_data else False,
+            )
+        finally:
+            await release_conn(meta_conn)
+    except Exception:
+        pass  # Column might not exist yet, non-fatal
 
     # Step 5.5 (streaming): behavioral_linking
     yield ("behavioral_linking", "Scanning for linked wallets", {"wallet": wallet[:16]})
@@ -811,8 +919,8 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
         {
             "wallet": wallet[:16],
             "trust_inserted": 1 if not existed_before else 0,
-            "daemon_risk_score": daemon_data.get("risk_score") if daemon_data else None,
-            "daemon_is_sanctioned": daemon_data.get("is_sanctioned") if daemon_data else None,
-            "daemon_risk_level": daemon_data.get("risk_level") if daemon_data else None,
+            "cyclops_risk_score": cyclops_data.get("risk_score") if cyclops_data else None,
+            "cyclops_is_sanctioned": cyclops_data.get("is_sanctioned") if cyclops_data else None,
+            "cyclops_risk_level": cyclops_data.get("risk_level") if cyclops_data else None,
         },
     )
