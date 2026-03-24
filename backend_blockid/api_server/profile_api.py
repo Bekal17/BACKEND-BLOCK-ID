@@ -300,6 +300,14 @@ async def get_profile(wallet: str) -> dict:
             """,
             wallet,
         )
+        fc = await conn.fetchrow(
+            "SELECT COUNT(*) AS c FROM social_follows WHERE following_wallet = $1",
+            wallet,
+        )
+        fg = await conn.fetchrow(
+            "SELECT COUNT(*) AS c FROM social_follows WHERE follower_wallet = $1",
+            wallet,
+        )
     finally:
         await release_conn(conn)
 
@@ -316,6 +324,8 @@ async def get_profile(wallet: str) -> dict:
             "avatar_url": None,
             "banner_type": "NONE",
             "banner_url": None,
+            "follower_count": int(fc["c"]) if fc else 0,
+            "following_count": int(fg["c"]) if fg else 0,
         }
 
     return {
@@ -335,6 +345,8 @@ async def get_profile(wallet: str) -> dict:
         "banner_type": row.get("banner_type") or "NONE",
         "banner_url": row.get("banner_url"),
         "banner_is_animated": bool(row.get("banner_is_animated")),
+        "follower_count": int(fc["c"]) if fc else 0,
+        "following_count": int(fg["c"]) if fg else 0,
         "updated_at": row.get("updated_at"),
     }
 
