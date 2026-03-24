@@ -229,6 +229,39 @@ app.post("/mint-handle", async (req, res) => {
   }
 });
 
+// POST /mint-avatar — transferable avatar NFT via createV1 (no freeze/immutable plugins)
+app.post("/mint-avatar", async (req, res) => {
+  const { wallet, metadata_url, name } = req.body || {};
+
+  if (!wallet || !metadata_url) {
+    return res.status(400).json({ success: false, error: "wallet and metadata_url are required" });
+  }
+
+  try {
+    const umiInstance = getUmiHelius();
+    const assetSigner = generateSigner(umiInstance);
+
+    await createV1(umiInstance, {
+      asset: assetSigner,
+      name: name ?? "BlockID Avatar NFT",
+      uri: metadata_url,
+      owner: publicKey(wallet),
+    }).sendAndConfirm(umiInstance);
+
+    const mintAddress =
+      typeof assetSigner.publicKey === "string"
+        ? assetSigner.publicKey
+        : assetSigner.publicKey.toString();
+
+    console.log("[mint_service] Avatar NFT minted for " + wallet.slice(0, 8) + "... mint=" + mintAddress);
+
+    return res.json({ success: true, mint_address: mintAddress });
+  } catch (err) {
+    console.error("[mint_service] mint-avatar error:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // POST /update-uri — Update metadata URI of an existing NFT (fix wrong METADATA_BASE_URL)
 app.post("/update-uri", async (req, res) => {
   const { mint_address, new_uri } = req.body || {};
