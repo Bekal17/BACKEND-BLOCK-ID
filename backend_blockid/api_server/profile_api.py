@@ -192,7 +192,7 @@ async def update_profile(body: ProfileUpdateRequest) -> dict:
         raise HTTPException(status_code=400, detail="display_name max 50 chars")
     if body.bio is not None and len(body.bio) > 160:
         raise HTTPException(status_code=400, detail="bio max 160 chars")
-    if body.website is not None:
+    if body.website is not None and body.website.strip() != "":
         if not body.website.startswith("http"):
             raise HTTPException(status_code=400, detail="website must start with http")
         if len(body.website) > 255:
