@@ -14,7 +14,7 @@
 
 import express from "express";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
-import { mplCore, create, update, fetchAsset } from "@metaplex-foundation/mpl-core";
+import { mplCore, create, createV1, update, fetchAsset } from "@metaplex-foundation/mpl-core";
 import { generateSigner, keypairIdentity, publicKey } from "@metaplex-foundation/umi";
 import { fromWeb3JsKeypair } from "@metaplex-foundation/umi-web3js-adapters";
 import { Keypair } from "@solana/web3.js";
@@ -28,6 +28,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
 const RPC_URL = SOLANA_RPC_URL;
+const HELIUS_RPC_URL = (process.env.HELIUS_RPC_URL || "").trim() || RPC_URL;
 const MINT_KEYPAIR_PATH = process.env.MINT_KEYPAIR_PATH || path.join(__dirname, "keypair.json");
 const BLOCKID_MINT_AUTHORITY = process.env.BLOCKID_MINT_AUTHORITY || "";
 
@@ -84,6 +85,8 @@ const app = express();
 app.use(express.json());
 
 let umi = null;
+/** UMI bound to HELIUS_RPC_URL (or fallback) for generic createV1 mints */
+let umiHelius = null;
 let keypairLoaded = false;
 
 function getUmi() {
@@ -102,8 +105,46 @@ function getUmi() {
   return umi;
 }
 
+function getUmiHelius() {
+  if (!umiHelius) {
+    umiHelius = createUmi(HELIUS_RPC_URL).use(mplCore());
+    const keypair = loadKeypair();
+    umiHelius.use(keypairIdentity(fromWeb3JsKeypair(keypair)));
+  }
+  return umiHelius;
+}
+
 app.post("/mint", async (req, res) => {
-  const { wallet, metadata_uri } = req.body || {};
+  const body = req.body || {};
+
+  // Generic user NFT mint (body uses metadata_url) — createV1 on Helius mainnet RPC
+  if (body.metadata_url && typeof body.metadata_url === "string") {
+    const { wallet, metadata_url, name } = body;
+    if (!wallet || typeof wallet !== "string") {
+      return res.json({ success: false, error: "wallet is required" });
+    }
+    try {
+      const umiInstance = getUmiHelius();
+      const assetSigner = generateSigner(umiInstance);
+      await createV1(umiInstance, {
+        asset: assetSigner,
+        name: name ?? "BlockID NFT",
+        uri: metadata_url,
+        owner: publicKey(wallet),
+      }).sendAndConfirm(umiInstance);
+      const mintAddress =
+        typeof assetSigner.publicKey === "string"
+          ? assetSigner.publicKey
+          : assetSigner.publicKey.toString();
+      console.log(`[mint_service] createV1 mint for ${wallet.slice(0, 16)}... mint=${mintAddress}`);
+      return res.json({ success: true, mint_address: mintAddress });
+    } catch (e) {
+      console.error("[mint_service] createV1 mint failed:", e.message);
+      return res.json({ success: false, error: e.message || String(e) });
+    }
+  }
+
+  const { wallet, metadata_uri } = body;
   if (!wallet || typeof wallet !== "string") {
     return res.status(400).json({ error: "Missing wallet" });
   }
