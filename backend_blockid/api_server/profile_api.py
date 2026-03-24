@@ -267,6 +267,23 @@ async def get_profile(wallet: str) -> dict:
     if not wallet:
         raise HTTPException(status_code=400, detail="wallet required")
 
+    # Resolve @handle to wallet address
+    if wallet.startswith("@") or (len(wallet) < 32 and not wallet.startswith("0x")):
+        handle = wallet.lstrip("@").lower()
+        conn_temp = await get_conn()
+        try:
+            row = await conn_temp.fetchrow(
+                "SELECT owner_wallet FROM handle_registry "
+                "WHERE LOWER(handle) = $1 AND status = 'ACTIVE'",
+                handle,
+            )
+            if row:
+                wallet = row["owner_wallet"]
+            else:
+                raise HTTPException(status_code=404, detail="Handle not found")
+        finally:
+            await release_conn(conn_temp)
+
     conn = await get_conn()
     try:
         row = await conn.fetchrow(
