@@ -92,9 +92,23 @@ async def get_wallet_nfts(
 
             if not image_url and files:
                 for f in files:
+                    if not isinstance(f, dict):
+                        continue
                     mime = (f.get("mime") or "").lower()
-                    if mime in ("image/jpeg", "image/png", "image/gif", "image/webp"):
-                        image_url = f.get("uri") or ""
+                    # Accept PNG, JPEG, GIF, WebP, SVG
+                    if mime in ("image/jpeg", "image/png", "image/gif",
+                                "image/webp", "image/svg+xml"):
+                        # Prefer CDN URI for faster loading
+                        image_url = f.get("cdn_uri") or f.get("uri") or ""
+                        break
+
+            # Also use CDN URI if available from links
+            if image_url and files:
+                for f in files:
+                    if not isinstance(f, dict):
+                        continue
+                    if f.get("uri") == image_url and f.get("cdn_uri"):
+                        image_url = f.get("cdn_uri")
                         break
 
             if not image_url:
