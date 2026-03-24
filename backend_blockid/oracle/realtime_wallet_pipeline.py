@@ -37,6 +37,7 @@ from backend_blockid.ml.reason_codes import get_reason_weights
 from backend_blockid.ai_engine.dynamic_risk_v2 import update_wallet_score_async
 from backend_blockid.api_server.identity_eligibility import check_eligibility
 from backend_blockid.integrations.cyclops_client import analyze_wallet as cyclops_analyze
+from backend_blockid.integrations.daemon_ai_client import explain_wallet_risk
 from backend_blockid.tools.helius_client import helius_request
 
 logger = get_logger(__name__)
@@ -499,6 +500,59 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
     except Exception:
         pass  # Column might not exist yet, non-fatal
 
+    # Step 8b: Daemon-AI explanation
+    try:
+        if cyclops_data or True:  # always try to explain
+            # Get current reasons from DB
+            reason_conn = await get_conn()
+            try:
+                reason_rows = await reason_conn.fetch(
+                    "SELECT reason_code FROM wallet_reasons WHERE wallet = $1 LIMIT 10",
+                    wallet,
+                )
+                reasons = [r["reason_code"] for r in reason_rows]
+                score_row = await reason_conn.fetchrow(
+                    "SELECT score, risk_level FROM trust_scores WHERE wallet = $1 ORDER BY computed_at DESC LIMIT 1",
+                    wallet,
+                )
+                current_score = float(score_row["score"]) if score_row else 50.0
+                current_tier = str(score_row["risk_level"]) if score_row else "MEDIUM"
+            finally:
+                await release_conn(reason_conn)
+
+            ai_explanation = await explain_wallet_risk(
+                wallet=wallet,
+                trust_score=current_score,
+                risk_tier=current_tier,
+                reasons=reasons,
+                cyclops_risk_level=cyclops_data.get("risk_level") if cyclops_data else None,
+                cyclops_risk_score=cyclops_data.get("risk_score") if cyclops_data else None,
+                is_sanctioned=cyclops_data.get("is_sanctioned", False) if cyclops_data else False,
+            )
+
+            if ai_explanation:
+                # Store in wallet_meta
+                explain_conn = await get_conn()
+                try:
+                    await explain_conn.execute(
+                        """
+                        INSERT INTO wallet_meta (wallet, ai_explanation, ai_explanation_updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (wallet) DO UPDATE SET
+                            ai_explanation = EXCLUDED.ai_explanation,
+                            ai_explanation_updated_at = NOW()
+                        """,
+                        wallet,
+                        ai_explanation,
+                    )
+                    logger.info("daemon_ai_explanation_stored", wallet=wallet[:16])
+                except Exception:
+                    pass
+                finally:
+                    await release_conn(explain_conn)
+    except Exception as _e:
+        logger.warning("daemon_ai_pipeline_error", wallet=wallet[:16], error=str(_e))
+
     # Step 9: [NEW] Behavioral linking scan (suggestions only; user must confirm)
     logger.debug("realtime_pipeline_step", step="behavioral_linking", wallet=wallet[:16])
     try:
@@ -890,6 +944,59 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
             await release_conn(meta_conn)
     except Exception:
         pass  # Column might not exist yet, non-fatal
+
+    # Step 8b: Daemon-AI explanation
+    try:
+        if cyclops_data or True:  # always try to explain
+            # Get current reasons from DB
+            reason_conn = await get_conn()
+            try:
+                reason_rows = await reason_conn.fetch(
+                    "SELECT reason_code FROM wallet_reasons WHERE wallet = $1 LIMIT 10",
+                    wallet,
+                )
+                reasons = [r["reason_code"] for r in reason_rows]
+                score_row = await reason_conn.fetchrow(
+                    "SELECT score, risk_level FROM trust_scores WHERE wallet = $1 ORDER BY computed_at DESC LIMIT 1",
+                    wallet,
+                )
+                current_score = float(score_row["score"]) if score_row else 50.0
+                current_tier = str(score_row["risk_level"]) if score_row else "MEDIUM"
+            finally:
+                await release_conn(reason_conn)
+
+            ai_explanation = await explain_wallet_risk(
+                wallet=wallet,
+                trust_score=current_score,
+                risk_tier=current_tier,
+                reasons=reasons,
+                cyclops_risk_level=cyclops_data.get("risk_level") if cyclops_data else None,
+                cyclops_risk_score=cyclops_data.get("risk_score") if cyclops_data else None,
+                is_sanctioned=cyclops_data.get("is_sanctioned", False) if cyclops_data else False,
+            )
+
+            if ai_explanation:
+                # Store in wallet_meta
+                explain_conn = await get_conn()
+                try:
+                    await explain_conn.execute(
+                        """
+                        INSERT INTO wallet_meta (wallet, ai_explanation, ai_explanation_updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (wallet) DO UPDATE SET
+                            ai_explanation = EXCLUDED.ai_explanation,
+                            ai_explanation_updated_at = NOW()
+                        """,
+                        wallet,
+                        ai_explanation,
+                    )
+                    logger.info("daemon_ai_explanation_stored", wallet=wallet[:16])
+                except Exception:
+                    pass
+                finally:
+                    await release_conn(explain_conn)
+    except Exception as _e:
+        logger.warning("daemon_ai_pipeline_error", wallet=wallet[:16], error=str(_e))
 
     # Step 5.5 (streaming): behavioral_linking
     yield ("behavioral_linking", "Scanning for linked wallets", {"wallet": wallet[:16]})
