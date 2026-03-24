@@ -1383,11 +1383,11 @@ async def get_profile(
             wallet,
         )
         fc = await conn.fetchrow(
-            "SELECT COUNT(*) AS c FROM social_follows WHERE follower_wallet = $1",
+            "SELECT COUNT(*) AS c FROM social_follows WHERE following_wallet = $1",
             wallet,
         )
         fg = await conn.fetchrow(
-            "SELECT COUNT(*) AS c FROM social_follows WHERE following_wallet = $1",
+            "SELECT COUNT(*) AS c FROM social_follows WHERE follower_wallet = $1",
             wallet,
         )
         pc = await conn.fetchrow(
