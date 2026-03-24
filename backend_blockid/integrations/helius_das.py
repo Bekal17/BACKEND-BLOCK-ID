@@ -111,6 +111,19 @@ async def get_wallet_nfts(
                         image_url = f.get("cdn_uri")
                         break
 
+            # Fallback: fetch metadata from json_uri for MplCoreAsset
+            if not image_url:
+                json_uri = content.get("json_uri") or ""
+                if json_uri:
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as meta_client:
+                            meta_resp = await meta_client.get(json_uri)
+                            meta_resp.raise_for_status()
+                            meta_json = meta_resp.json()
+                            image_url = meta_json.get("image") or ""
+                    except Exception:
+                        pass
+
             if not image_url:
                 continue
 
