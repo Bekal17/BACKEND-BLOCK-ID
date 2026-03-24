@@ -1267,7 +1267,7 @@ async def endorse_wallet(body: Dict[str, Any]):
 
 
 @router.get("/followers/{wallet}")
-async def get_followers(wallet: str):
+async def get_followers(wallet: str, viewer_wallet: Optional[str] = Query(None)):
     """
     Get list of wallets that follow this wallet.
     Returns: { followers: [...], count: int }
@@ -1302,7 +1302,29 @@ async def get_followers(wallet: str):
             """,
             wallet,
         )
-        followers = [dict(r) for r in rows]
+        followers = []
+        for r in rows:
+            f = dict(r)
+            followers.append(f)
+        if viewer_wallet:
+            for f in followers:
+                w = f.get("wallet", "")
+                # viewer already follows this person?
+                viewer_follows = await conn.fetchval(
+                    "SELECT 1 FROM social_follows WHERE follower_wallet = $1 AND following_wallet = $2",
+                    viewer_wallet, w,
+                )
+                # this person follows viewer?
+                they_follow_viewer = await conn.fetchval(
+                    "SELECT 1 FROM social_follows WHERE follower_wallet = $1 AND following_wallet = $2",
+                    w, viewer_wallet,
+                )
+                f["viewer_follows"] = viewer_follows is not None
+                f["follows_viewer"] = they_follow_viewer is not None
+        else:
+            for f in followers:
+                f["viewer_follows"] = None
+                f["follows_viewer"] = None
         return {
             "wallet": wallet,
             "followers": followers,
@@ -1313,7 +1335,7 @@ async def get_followers(wallet: str):
 
 
 @router.get("/following/{wallet}")
-async def get_following(wallet: str):
+async def get_following(wallet: str, viewer_wallet: Optional[str] = Query(None)):
     """
     Get list of wallets this wallet follows.
     Returns: { following: [...], count: int }
@@ -1348,7 +1370,29 @@ async def get_following(wallet: str):
             """,
             wallet,
         )
-        following = [dict(r) for r in rows]
+        following = []
+        for r in rows:
+            f = dict(r)
+            following.append(f)
+        if viewer_wallet:
+            for f in following:
+                w = f.get("wallet", "")
+                # viewer already follows this person?
+                viewer_follows = await conn.fetchval(
+                    "SELECT 1 FROM social_follows WHERE follower_wallet = $1 AND following_wallet = $2",
+                    viewer_wallet, w,
+                )
+                # this person follows viewer?
+                they_follow_viewer = await conn.fetchval(
+                    "SELECT 1 FROM social_follows WHERE follower_wallet = $1 AND following_wallet = $2",
+                    w, viewer_wallet,
+                )
+                f["viewer_follows"] = viewer_follows is not None
+                f["follows_viewer"] = they_follow_viewer is not None
+        else:
+            for f in following:
+                f["viewer_follows"] = None
+                f["follows_viewer"] = None
         return {
             "wallet": wallet,
             "following": following,
