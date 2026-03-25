@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Query, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Query, Request, status
 from pydantic import BaseModel, Field
 
 from backend_blockid.api_server.identity_eligibility import get_score_tier
@@ -35,6 +35,19 @@ router = APIRouter(prefix="/social", tags=["social"])
 ENDORSE_TRUST_BOOST = 5
 SOCIAL_MIN_SCORE_TO_ENDORSE = 50
 SCORE_CAP = 97
+
+TREASURY_WALLET = os.getenv(
+    "TREASURY_WALLET",
+    "4DdLPRDiLRY8Q2E4Fv31kvcfMf3XJf11HgaSaW7tKVcx",
+)
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+PLAN_PRICES = {
+    "explorer": {"monthly": 9.0, "annual": 86.4},
+    "pro": {"monthly": 29.0, "annual": 278.4},
+}
+
+SOL_TOLERANCE = 0.03  # 3% tolerance for SOL price slippage
 
 
 class PostResponse(BaseModel):
@@ -1561,6 +1574,188 @@ async def get_user_subscription(wallet: str):
             "scans_used": scans_used,
             "wallet_scan_usage": scans_used,
             "status": status_val,
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/subscription/pay")
+async def pay_subscription(req: Request):
+    body = await req.json()
+    wallet = (body.get("wallet") or "").strip()
+    plan = (body.get("plan") or "").strip().lower()  # "explorer" | "pro"
+    period = (body.get("period") or "").strip().lower()  # "monthly" | "annual"
+    tx_sig = (body.get("tx_signature") or "").strip()
+    token = (body.get("token") or "").strip().upper()  # "USDC" | "SOL"
+
+    if not all([wallet, plan, period, tx_sig, token]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    if plan not in ("explorer", "pro"):
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    if period not in ("monthly", "annual"):
+        raise HTTPException(status_code=400, detail="Invalid period")
+    if token not in ("USDC", "SOL"):
+        raise HTTPException(status_code=400, detail="Invalid token")
+
+    conn = await get_conn()
+    try:
+        # 1. Replay protection — check tx not already used
+        existing = await conn.fetchrow(
+            "SELECT id FROM subscriptions WHERE tx_signature = $1",
+            tx_sig,
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="Transaction already used")
+
+        # 2. Verify tx on Solana via Helius
+        helius_key = (os.getenv("HELIUS_API_KEY") or "").strip()
+        if not helius_key:
+            raise HTTPException(status_code=500, detail="Missing HELIUS_API_KEY")
+        helius_url = f"https://mainnet.helius-rpc.com/?api-key={helius_key}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                helius_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTransaction",
+                    "params": [
+                        tx_sig,
+                        {
+                            "encoding": "jsonParsed",
+                            "maxSupportedTransactionVersion": 0,
+                        },
+                    ],
+                },
+            )
+
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Helius error status={resp.status_code}",
+            )
+
+        payload = resp.json()
+        tx_data = payload.get("result")
+        if not tx_data:
+            raise HTTPException(status_code=400, detail="Transaction not found on chain")
+
+        # 3. Check tx succeeded
+        if tx_data.get("meta", {}).get("err") is not None:
+            raise HTTPException(status_code=400, detail="Transaction failed on chain")
+
+        # 4. Verify payment amount
+        expected_usd = float(PLAN_PRICES[plan][period])
+        verified = False
+
+        if token == "USDC":
+            # Check SPL token transfer
+            instructions = (
+                tx_data.get("transaction", {})
+                .get("message", {})
+                .get("instructions", [])
+            )
+            for ix in instructions:
+                parsed = ix.get("parsed", {})
+                info = parsed.get("info", {})
+                if (
+                    parsed.get("type") == "transferChecked"
+                    and info.get("mint") == USDC_MINT
+                    and info.get("destination")  # treasury ATA
+                    and float(info.get("tokenAmount", {}).get("uiAmount", 0)) >= expected_usd * 0.99
+                ):
+                    verified = True
+                    break
+
+        elif token == "SOL":
+            # Verify SOL transfer — fetch SOL price from Jupiter
+            async with httpx.AsyncClient(timeout=10) as client:
+                price_resp = await client.get(
+                    "https://price.jup.ag/v6/price?ids=SOL&vsToken=USDC"
+                )
+            if price_resp.status_code != 200:
+                raise HTTPException(status_code=500, detail="Could not fetch SOL price")
+
+            sol_price = (
+                price_resp.json()
+                .get("data", {})
+                .get("SOL", {})
+                .get("price", 0)
+            )
+            sol_price = float(sol_price or 0)
+            if not sol_price:
+                raise HTTPException(status_code=500, detail="Could not fetch SOL price")
+
+            expected_sol = expected_usd / sol_price
+            min_sol = expected_sol * (1 - SOL_TOLERANCE)
+
+            pre_bal = tx_data.get("meta", {}).get("preBalances", [])
+            post_bal = tx_data.get("meta", {}).get("postBalances", [])
+            accounts = tx_data.get("transaction", {}).get("message", {}).get(
+                "accountKeys", []
+            )
+
+            for i, acc in enumerate(accounts):
+                acc_key = acc if isinstance(acc, str) else acc.get("pubkey", "")
+                if acc_key == TREASURY_WALLET:
+                    if i < len(pre_bal) and i < len(post_bal):
+                        received_sol = (post_bal[i] - pre_bal[i]) / 1e9
+                        if received_sol >= min_sol:
+                            verified = True
+                    break
+
+        if not verified:
+            raise HTTPException(
+                status_code=400, detail="Payment amount insufficient or not found"
+            )
+
+        # 5. Upsert subscription
+        if period == "monthly":
+            valid_until = datetime.utcnow() + timedelta(days=31)
+        else:
+            valid_until = datetime.utcnow() + timedelta(days=366)
+
+        await conn.execute(
+            """
+            INSERT INTO subscriptions
+              (user_id, plan, status, valid_until, tx_signature, created_at, updated_at)
+            VALUES
+              ($1, $2, 'active', $3, $4, NOW(), NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+              plan = EXCLUDED.plan,
+              status = 'active',
+              valid_until = EXCLUDED.valid_until,
+              tx_signature = EXCLUDED.tx_signature,
+              updated_at = NOW()
+            """,
+            wallet,
+            plan,
+            valid_until,
+            tx_sig,
+        )
+
+        # 6. Reset scan usage for new billing period
+        current_month = datetime.utcnow().strftime("%Y-%m")
+        await conn.execute(
+            """
+            INSERT INTO wallet_scan_usage (wallet, month, scan_count, updated_at)
+            VALUES ($1, $2, 0, NOW())
+            ON CONFLICT (wallet, month)
+            DO UPDATE SET
+              scan_count = 0,
+              updated_at = NOW()
+            """,
+            wallet,
+            current_month,
+        )
+
+        return {
+            "success": True,
+            "plan": plan,
+            "period": period,
+            "valid_until": valid_until.isoformat(),
         }
     finally:
         await release_conn(conn)

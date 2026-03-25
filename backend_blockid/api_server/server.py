@@ -66,7 +66,7 @@ from backend_blockid.api_server.profile_api import router as profile_router
 from backend_blockid.api_server.social_api import router as social_router
 from backend_blockid.api_server.subscription_api import router as subscription_router
 from backend_blockid.api_server.nft_mint_api import ensure_tables, router as nft_mint_router
-from backend_blockid.database.pg_connection import init_db
+from backend_blockid.database.pg_connection import init_db, get_conn, release_conn
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
 
@@ -143,10 +143,32 @@ class ImportWalletsCsvResponse(BaseModel):
 TRUST_SCORE_SYNC_INTERVAL_SEC = float(os.getenv("TRUST_SCORE_SYNC_INTERVAL_SEC", "300").strip() or "300")  # 5 min
 
 
+async def ensure_subscription_columns():
+    """
+    Ensure optional subscription columns exist.
+
+    Safe to run on startup (best-effort); failures are swallowed intentionally.
+    """
+    conn = await get_conn()
+    try:
+        await conn.execute("""
+          ALTER TABLE subscriptions
+          ADD COLUMN IF NOT EXISTS valid_until TIMESTAMP;
+          ALTER TABLE subscriptions
+          ADD COLUMN IF NOT EXISTS tx_signature VARCHAR UNIQUE;
+        """)
+    except Exception:
+        # Best-effort migration: avoid blocking API startup.
+        pass
+    finally:
+        await release_conn(conn)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize PostgreSQL pool; start background workers when available."""
     await init_db()
+    await ensure_subscription_columns()
     await ensure_tables()
     asyncio.create_task(start_hourly_flush(app))
 
