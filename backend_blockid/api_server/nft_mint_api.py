@@ -56,6 +56,12 @@ async def ensure_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_nft_mint_payments_wallet ON nft_mint_payments(wallet)"
         )
         await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_nft_mint_payments_wallet_date
+            ON nft_mint_payments(wallet, created_at DESC)
+            """
+        )
+        await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_nft_mint_payments_tx ON nft_mint_payments(tx_signature)"
         )
     finally:
@@ -222,6 +228,55 @@ async def mint_nft_avatar(
         # Verify payment first
         await verify_payment_tx(tx_signature, wallet)
         logger.info("nft_payment_verified", wallet=wallet[:16], tx=tx_signature[:16])
+
+        # Check plan-based mint limit
+        conn = await get_conn()
+        try:
+            async with conn.transaction():
+                # Get user plan
+                sub = await conn.fetchrow(
+                    """
+                    SELECT plan FROM subscriptions
+                    WHERE user_id = $1
+                    AND status = 'active'
+                    AND (valid_until IS NULL OR valid_until > NOW())
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    wallet,
+                )
+
+                plan = (sub["plan"] if sub else "free") or "free"
+                plan = str(plan).lower()
+
+                # Free plan cannot mint
+                if plan == "free":
+                    raise HTTPException(
+                        403,
+                        "Make Your Own NFT requires Explorer or PRO plan. "
+                        "Upgrade at app.blockidscore.fun/upgrade",
+                    )
+
+                # Explorer: max 3 mints per month
+                if plan == "explorer":
+                    mint_count = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM nft_mint_payments
+                        WHERE wallet = $1
+                        AND created_at >= DATE_TRUNC('month', NOW())
+                        """,
+                        wallet,
+                    )
+
+                    if int(mint_count or 0) >= 3:
+                        raise HTTPException(
+                            429,
+                            "Explorer plan allows 3 NFT mints per month. "
+                            "Upgrade to PRO for unlimited mints.",
+                        )
+
+                # PRO plan: unlimited — no check needed
+        finally:
+            await release_conn(conn)
 
         # Upload image
         image_url = await upload_to_r2(contents, image_key, file.content_type)
