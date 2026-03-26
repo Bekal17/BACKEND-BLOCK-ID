@@ -42,8 +42,8 @@ async def create_encryption_session(req: Request):
             "https://shield.openfort.io/project/encryption-session",
             headers={
                 "Content-Type": "application/json",
-                "x-publishable-key": shield_publishable_key,
-                "x-secret-key": shield_secret_key,
+                "x-api-key": shield_publishable_key,
+                "x-api-secret": shield_secret_key,
                 "x-encryption-part": encryption_share,
                 "Authorization": f"Bearer {token}",
                 "x-auth-provider": "openfort",
