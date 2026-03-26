@@ -64,6 +64,7 @@ from backend_blockid.api_server.dm_api import router as dm_router
 from backend_blockid.api_server.privacy_api import router as privacy_router
 from backend_blockid.api_server.profile_api import router as profile_router
 from backend_blockid.api_server.social_api import router as social_router
+from backend_blockid.api_server.openfort_api import router as openfort_router
 from backend_blockid.api_server.subscription_api import router as subscription_router
 from backend_blockid.api_server.nft_mint_api import ensure_tables, router as nft_mint_router
 from backend_blockid.database.pg_connection import init_db, get_conn, release_conn
@@ -276,6 +277,7 @@ app.include_router(privacy_router)
 app.include_router(dm_router)
 app.include_router(profile_router)
 app.include_router(social_router)
+app.include_router(openfort_router)
 app.include_router(subscription_router)
 app.include_router(nft_mint_router)
 
