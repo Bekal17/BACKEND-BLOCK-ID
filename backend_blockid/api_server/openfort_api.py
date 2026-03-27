@@ -4,8 +4,10 @@ import os
 import httpx
 
 from fastapi import APIRouter, HTTPException, Request
+from backend_blockid.blockid_logging import get_logger
 
 router = APIRouter(prefix="/openfort", tags=["openfort"])
+logger = get_logger(__name__)
 
 
 @router.post("/encryption-session")
@@ -37,6 +39,7 @@ async def create_encryption_session(req: Request):
 
     # Call Shield API to create encryption session
     # Reference: https://github.com/openfort-xyz/shield
+    logger.info("openfort_shield_request_start")
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             "https://shield.openfort.io/project/encryption-session",
@@ -50,6 +53,11 @@ async def create_encryption_session(req: Request):
             },
             json={},
         )
+    logger.info(
+        "openfort_shield_response",
+        status_code=resp.status_code,
+        body=resp.text,
+    )
 
     if resp.status_code != 200:
         raise HTTPException(
@@ -57,7 +65,16 @@ async def create_encryption_session(req: Request):
             detail=f"Shield error ({resp.status_code}): {resp.text}",
         )
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.error(
+            "openfort_shield_invalid_json",
+            status_code=resp.status_code,
+            body=resp.text,
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=f"Invalid Shield JSON response: {resp.text}")
     # Shield returns { session_id: "..." } or { session: "..." }
     session = data.get("session_id") or data.get("session") or data.get("id")
     if not session:
