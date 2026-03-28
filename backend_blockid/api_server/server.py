@@ -65,6 +65,7 @@ from backend_blockid.api_server.privacy_api import router as privacy_router
 from backend_blockid.api_server.profile_api import router as profile_router
 from backend_blockid.api_server.social_api import router as social_router
 from backend_blockid.api_server.openfort_api import router as openfort_router
+from backend_blockid.api_server.stats_api import router as stats_router
 from backend_blockid.api_server.subscription_api import router as subscription_router
 from backend_blockid.api_server.nft_mint_api import ensure_tables, router as nft_mint_router
 from backend_blockid.database.pg_connection import init_db, get_conn, release_conn
@@ -247,6 +248,7 @@ def metrics() -> Response:
 
 
 app.include_router(auth_router)
+app.include_router(stats_router)
 app.include_router(trust_router, prefix="/api", tags=["Trust Score"])
 app.include_router(balance_router)
 app.include_router(activity_router)
