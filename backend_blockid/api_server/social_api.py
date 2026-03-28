@@ -614,6 +614,42 @@ async def get_following_feed(
             *params,
         )
 
+        # Fetch top 1 reply per post (single query, not N+1)
+        post_ids = [row["id"] for row in rows]
+        top_replies_map: Dict[int, Dict[str, Any]] = {}
+
+        if post_ids:
+            placeholders = ", ".join(f"${i + 1}" for i in range(len(post_ids)))
+            top_reply_rows = await conn.fetch(
+                f"""
+                SELECT DISTINCT ON (parent_id)
+                    p.id,
+                    p.parent_id,
+                    p.wallet,
+                    p.handle,
+                    p.content,
+                    p.created_at,
+                    p.like_count,
+                    p.reply_count,
+                    p.repost_count,
+                    COALESCE(sub.plan, 'free') AS plan
+                FROM social_posts p
+                LEFT JOIN LATERAL (
+                    SELECT DISTINCT ON (user_id) user_id, plan
+                    FROM subscriptions
+                    WHERE user_id = p.wallet
+                      AND status = 'active'
+                    ORDER BY user_id, created_at DESC NULLS LAST
+                ) sub ON true
+                WHERE p.parent_id IN ({placeholders})
+                  AND p.is_hidden = FALSE
+                ORDER BY parent_id, p.created_at ASC
+                """,
+                *post_ids,
+            )
+            for r in top_reply_rows:
+                top_replies_map[r["parent_id"]] = dict(r)
+
         posts = []
         for r in rows:
             post = dict(r)
@@ -637,6 +673,7 @@ async def get_following_feed(
                 post.pop("original_plan", None)
                 post["original_post"] = None
 
+            post["top_reply"] = top_replies_map.get(post.get("id"))
             posts.append(post)
 
         next_cursor = posts[-1]["created_at"].isoformat() if posts else None
