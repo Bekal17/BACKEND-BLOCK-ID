@@ -1,12 +1,14 @@
 """BlockID authentication API — login with wallet signature, returns JWT session."""
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend_blockid.api_server.session_auth import create_session_token
+from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
 from backend_blockid.api_server.signature_verify import (
     BLOCKID_ENV,
     DEVNET_BYPASS,
@@ -47,6 +49,7 @@ async def login(body: LoginRequest):
     # In DEV mode accept bypass
     if BLOCKID_ENV == "DEV" and body.signature in DEVNET_BYPASS:
         token = create_session_token(wallet)
+        asyncio.create_task(run_realtime_wallet_pipeline(wallet))
         return {"session_token": token, "wallet": wallet, "expires_in": 86400}
 
     # Verify signature
@@ -66,6 +69,7 @@ async def login(body: LoginRequest):
         raise HTTPException(401, detail="Invalid message format")
 
     token = create_session_token(wallet)
+    asyncio.create_task(run_realtime_wallet_pipeline(wallet))
     return {
         "session_token": token,
         "wallet": wallet,

@@ -677,7 +677,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             )
 
             if already_minted:
-                logger.debug(
+                logger.info(
                     "auto_mint_identity_nft_skip",
                     wallet=wallet[:16],
                     reason="already_minted",
@@ -685,7 +685,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             else:
                 elig = await check_eligibility(wallet, auto_mint_conn)
                 if not elig["eligible"]:
-                    logger.debug(
+                    logger.info(
                         "auto_mint_identity_nft_skip",
                         wallet=wallet[:16],
                         skip_reason="not_eligible",
@@ -694,7 +694,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                         score_tier=elig.get("score_tier"),
                     )
                 else:
-                    logger.debug(
+                    logger.info(
                         "auto_mint_identity_nft_triggered",
                         wallet=wallet[:16],
                         trust_score=elig["trust_score"],
@@ -707,7 +707,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                     )
                     mint_req = MintRequest(wallet=wallet)
                     mint_result = await mint_identity_nft(mint_req)
-                    logger.debug(
+                    logger.info(
                         "auto_mint_identity_nft_done",
                         wallet=wallet[:16],
                         success=mint_result.get("success", False),
