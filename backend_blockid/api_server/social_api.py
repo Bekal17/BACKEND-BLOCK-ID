@@ -606,6 +606,7 @@ async def get_following_feed(
             ) sub_orig ON sub_orig.user_id = orig.wallet
             WHERE f.follower_wallet = $1
               AND p.is_hidden = FALSE
+              AND p.parent_id IS NULL
               {before_clause}
             ORDER BY p.created_at DESC
             LIMIT $2
@@ -699,6 +700,7 @@ async def get_explore_feed(
                 ) sub_orig ON sub_orig.user_id = orig.wallet
                 WHERE p.post_type = 'PUBLIC'
                   AND p.is_hidden = FALSE
+                  AND p.parent_id IS NULL
                   AND (
                     p.is_repost = TRUE
                     OR COALESCE(ts.score, p.trust_score, 0) >= $1
