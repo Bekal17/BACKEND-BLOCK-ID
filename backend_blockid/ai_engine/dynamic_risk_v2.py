@@ -189,11 +189,9 @@ async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
             days_inactive=days_inactive,
         )
 
-        decay = -2.0 * days_inactive
-
         activity_boost = 2.0 * tx_count_24h
 
-        dynamic_risk = updated + graph_penalty + decay + activity_boost
+        dynamic_risk = updated + graph_penalty + activity_boost
         dynamic_risk = max(0.0, min(100.0, dynamic_risk))
 
         return {
@@ -247,7 +245,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
             dynamic_risk=float(dynamic_risk),
             reason_penalty=float(reason_penalty),
             graph_penalty=float(details.get("graph_penalty", 0.0)),
-            decay=float(details.get("decay", 0.0)),
+            decay=0.0,
             activity_boost=float(details.get("activity_boost", 0.0)),
             risk_level=str(risk_level),
         )
