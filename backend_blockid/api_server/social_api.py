@@ -2401,6 +2401,9 @@ async def get_bookmarks(wallet: str):
                 if r.get("bookmarked_at")
                 else None,
                 "plan": r.get("plan", "free"),
+                "avatar_url": r.get("avatar_url"),
+                "avatar_type": r.get("avatar_type"),
+                "avatar_is_animated": r.get("avatar_is_animated"),
             }
             original_wallet = r.get("original_wallet")
             if r.get("is_repost") and r.get("repost_of") and original_wallet:
