@@ -2065,6 +2065,7 @@ async def get_wallet_posts(
                     ORDER BY user_id, created_at DESC NULLS LAST
                 ) sub_orig ON sub_orig.user_id = orig.wallet
                 WHERE sp.wallet = $1 AND sp.is_hidden = FALSE
+                    AND sp.parent_id IS NULL
                 ORDER BY sp.created_at DESC
                 LIMIT $2
                 """,
