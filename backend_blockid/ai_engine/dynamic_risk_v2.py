@@ -29,12 +29,30 @@ async def _get_ml_score(conn: Any, wallet: str) -> float:
 
 async def _get_prior_risk(conn: Any, wallet: str) -> float:
     row = await conn.fetchrow(
-        "SELECT dynamic_risk FROM trust_scores WHERE wallet = $1 LIMIT 1",
+        "SELECT dynamic_risk, final_score, score FROM trust_scores WHERE wallet = $1 LIMIT 1",
         wallet,
     )
-    if not row or row["dynamic_risk"] is None:
+    if not row:
         return 0.0
-    return float(row["dynamic_risk"])
+
+    dynamic_risk = row["dynamic_risk"]
+    final_score = row["final_score"]
+    score = row["score"]
+
+    # If dynamic_risk exists and is reasonable (>= 20), use it as prior
+    if dynamic_risk is not None and float(dynamic_risk) >= 20.0:
+        return float(dynamic_risk)
+
+    # Fallback: use final_score if available and reasonable
+    if final_score is not None and float(final_score) >= 20.0:
+        return float(final_score)
+
+    # Last fallback: use score column
+    if score is not None and float(score) >= 20.0:
+        return float(score)
+
+    # If all are too low or None, return 0 (new wallet behavior)
+    return 0.0
 
 
 async def _get_reason_penalty(conn: Any, wallet: str) -> float:
