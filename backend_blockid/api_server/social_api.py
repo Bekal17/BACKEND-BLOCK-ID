@@ -586,12 +586,17 @@ async def get_following_feed(
                 orig.trust_score AS original_trust_score,
                 orig.created_at AS original_created_at,
                 COALESCE(sub.plan, 'free') AS plan,
-                COALESCE(sub_orig.plan, 'free') AS original_plan
+                COALESCE(sub_orig.plan, 'free') AS original_plan,
+                sp_prof.avatar_url,
+                sp_prof.avatar_type,
+                sp_prof.avatar_is_animated
             FROM social_posts p
             JOIN social_follows f
               ON f.following_wallet = p.wallet
             LEFT JOIN social_posts orig
               ON orig.id = p.repost_of
+            LEFT JOIN social_profiles sp_prof
+              ON sp_prof.wallet = p.wallet
             LEFT JOIN (
                 SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
@@ -713,10 +718,15 @@ async def get_explore_feed(
                     COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                     orig.created_at AS original_created_at,
                     COALESCE(sub.plan, 'free') AS plan,
-                    COALESCE(sub_orig.plan, 'free') AS original_plan
+                    COALESCE(sub_orig.plan, 'free') AS original_plan,
+                    sp_prof.avatar_url,
+                    sp_prof.avatar_type,
+                    sp_prof.avatar_is_animated
                 FROM social_posts p
                 LEFT JOIN social_posts orig
                   ON orig.id = p.repost_of
+                LEFT JOIN social_profiles sp_prof
+                  ON sp_prof.wallet = p.wallet
                 LEFT JOIN user_privacy_settings ups
                   ON ups.wallet = p.wallet
                 LEFT JOIN trust_scores ts
@@ -1947,8 +1957,13 @@ async def get_post(post_id: int):
             SELECT sp.id, sp.wallet, sp.handle, sp.content, sp.image_url, sp.post_type,
                    sp.parent_id, sp.reply_count, sp.like_count, sp.repost_count,
                    sp.is_hidden, sp.trust_score, sp.risk_level, sp.created_at,
-                   COALESCE(sub.plan, 'free') AS plan
+                   COALESCE(sub.plan, 'free') AS plan,
+                   sp_prof.avatar_url,
+                   sp_prof.avatar_type,
+                   sp_prof.avatar_is_animated
             FROM social_posts sp
+            LEFT JOIN social_profiles sp_prof
+              ON sp_prof.wallet = sp.wallet
             LEFT JOIN (
                 SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
@@ -1965,8 +1980,13 @@ async def get_post(post_id: int):
             """
             SELECT r.id, r.wallet, r.handle, r.content, r.image_url, r.post_type,
                    r.parent_id, r.reply_count, r.like_count, r.is_hidden, r.created_at,
-                   COALESCE(sub.plan, 'free') AS plan
+                   COALESCE(sub.plan, 'free') AS plan,
+                   sp_prof.avatar_url,
+                   sp_prof.avatar_type,
+                   sp_prof.avatar_is_animated
             FROM social_posts r
+            LEFT JOIN social_profiles sp_prof
+              ON sp_prof.wallet = r.wallet
             LEFT JOIN (
                 SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
@@ -2044,10 +2064,15 @@ async def get_wallet_posts(
                     COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                     orig.created_at AS original_created_at,
                     COALESCE(sub.plan, 'free') AS plan,
-                    COALESCE(sub_orig.plan, 'free') AS original_plan
+                    COALESCE(sub_orig.plan, 'free') AS original_plan,
+                    sp_prof.avatar_url,
+                    sp_prof.avatar_type,
+                    sp_prof.avatar_is_animated
                 FROM social_posts sp
                 LEFT JOIN social_posts orig
                     ON orig.id = sp.repost_of
+                LEFT JOIN social_profiles sp_prof
+                    ON sp_prof.wallet = sp.wallet
                 LEFT JOIN trust_scores ts
                     ON ts.wallet = sp.wallet
                 LEFT JOIN trust_scores ts_orig
