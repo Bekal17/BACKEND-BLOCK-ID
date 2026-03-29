@@ -585,6 +585,9 @@ async def get_following_feed(
                 orig.content AS original_content,
                 orig.trust_score AS original_trust_score,
                 orig.created_at AS original_created_at,
+                sp_orig.avatar_url AS original_avatar_url,
+                sp_orig.avatar_type AS original_avatar_type,
+                sp_orig.avatar_is_animated AS original_avatar_is_animated,
                 COALESCE(sub.plan, 'free') AS plan,
                 COALESCE(sub_orig.plan, 'free') AS original_plan,
                 sp_prof.avatar_url,
@@ -595,6 +598,8 @@ async def get_following_feed(
               ON f.following_wallet = p.wallet
             LEFT JOIN social_posts orig
               ON orig.id = p.repost_of
+            LEFT JOIN social_profiles sp_orig
+              ON sp_orig.wallet = orig.wallet
             LEFT JOIN social_profiles sp_prof
               ON sp_prof.wallet = p.wallet
             LEFT JOIN (
@@ -667,6 +672,9 @@ async def get_following_feed(
                     "content": post.pop("original_content", None),
                     "trust_score": post.pop("original_trust_score", None),
                     "created_at": post.pop("original_created_at", None),
+                    "avatar_url": post.pop("original_avatar_url", None),
+                    "avatar_type": post.pop("original_avatar_type", None),
+                    "avatar_is_animated": post.pop("original_avatar_is_animated", None),
                     "plan": post.pop("original_plan", "free"),
                 }
             else:
@@ -675,6 +683,9 @@ async def get_following_feed(
                 post.pop("original_content", None)
                 post.pop("original_trust_score", None)
                 post.pop("original_created_at", None)
+                post.pop("original_avatar_url", None)
+                post.pop("original_avatar_type", None)
+                post.pop("original_avatar_is_animated", None)
                 post.pop("original_plan", None)
                 post["original_post"] = None
 
@@ -717,6 +728,9 @@ async def get_explore_feed(
                     orig.content AS original_content,
                     COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                     orig.created_at AS original_created_at,
+                    sp_orig.avatar_url AS original_avatar_url,
+                    sp_orig.avatar_type AS original_avatar_type,
+                    sp_orig.avatar_is_animated AS original_avatar_is_animated,
                     COALESCE(sub.plan, 'free') AS plan,
                     COALESCE(sub_orig.plan, 'free') AS original_plan,
                     sp_prof.avatar_url,
@@ -725,6 +739,8 @@ async def get_explore_feed(
                 FROM social_posts p
                 LEFT JOIN social_posts orig
                   ON orig.id = p.repost_of
+                LEFT JOIN social_profiles sp_orig
+                  ON sp_orig.wallet = orig.wallet
                 LEFT JOIN social_profiles sp_prof
                   ON sp_prof.wallet = p.wallet
                 LEFT JOIN user_privacy_settings ups
@@ -772,6 +788,9 @@ async def get_explore_feed(
                         "content": post.pop("original_content", None),
                         "trust_score": post.pop("original_trust_score", None),
                         "created_at": post.pop("original_created_at", None),
+                        "avatar_url": post.pop("original_avatar_url", None),
+                        "avatar_type": post.pop("original_avatar_type", None),
+                        "avatar_is_animated": post.pop("original_avatar_is_animated", None),
                         "plan": post.pop("original_plan", "free"),
                     }
                 else:
@@ -780,6 +799,9 @@ async def get_explore_feed(
                     post.pop("original_content", None)
                     post.pop("original_trust_score", None)
                     post.pop("original_created_at", None)
+                    post.pop("original_avatar_url", None)
+                    post.pop("original_avatar_type", None)
+                    post.pop("original_avatar_is_animated", None)
                     post.pop("original_plan", None)
                     post["original_post"] = None
 
