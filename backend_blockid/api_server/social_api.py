@@ -2111,6 +2111,113 @@ async def get_wallet_posts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/activity/{wallet}")
+async def get_wallet_activity(
+    wallet: str,
+    viewer_wallet: str = Query(...),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """Get wallet's activity feed — private, only visible to owner."""
+    wallet = (wallet or "").strip()
+    viewer_wallet = (viewer_wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="Invalid wallet")
+    if not viewer_wallet:
+        raise HTTPException(status_code=400, detail="viewer_wallet required")
+
+    if viewer_wallet.lower() != wallet.lower():
+        raise HTTPException(status_code=403, detail="Activity is private")
+
+    conn = await get_conn()
+    try:
+        comment_rows = await conn.fetch(
+            """
+            SELECT
+                sp.id,
+                sp.content,
+                sp.created_at,
+                sp.parent_id,
+                parent.content AS parent_content,
+                parent.wallet AS parent_wallet,
+                parent.handle AS parent_handle,
+                'commented' AS activity_type
+            FROM social_posts sp
+            LEFT JOIN social_posts parent ON parent.id = sp.parent_id
+            WHERE sp.wallet = $1
+              AND sp.parent_id IS NOT NULL
+              AND sp.is_hidden = FALSE
+            ORDER BY sp.created_at DESC
+            LIMIT $2
+            """,
+            wallet,
+            limit,
+        )
+
+        like_rows = await conn.fetch(
+            """
+            SELECT
+                sl.post_id AS id,
+                sl.created_at,
+                sp.content AS parent_content,
+                sp.wallet AS parent_wallet,
+                sp.handle AS parent_handle,
+                'liked' AS activity_type
+            FROM social_likes sl
+            LEFT JOIN social_posts sp ON sp.id = sl.post_id
+            WHERE sl.wallet = $1
+            ORDER BY sl.created_at DESC
+            LIMIT $2
+            """,
+            wallet,
+            limit,
+        )
+
+        repost_rows = await conn.fetch(
+            """
+            SELECT
+                sp.id,
+                sp.created_at,
+                sp.repost_of AS parent_id,
+                orig.content AS parent_content,
+                orig.wallet AS parent_wallet,
+                orig.handle AS parent_handle,
+                'reposted' AS activity_type
+            FROM social_posts sp
+            LEFT JOIN social_posts orig ON orig.id = sp.repost_of
+            WHERE sp.wallet = $1
+              AND sp.is_repost = TRUE
+              AND sp.is_hidden = FALSE
+            ORDER BY sp.created_at DESC
+            LIMIT $2
+            """,
+            wallet,
+            limit,
+        )
+
+        activities: List[Dict[str, Any]] = []
+        for row in comment_rows:
+            activities.append(dict(row))
+        for row in like_rows:
+            activities.append(dict(row))
+        for row in repost_rows:
+            activities.append(dict(row))
+
+        def _activity_ts(item: Dict[str, Any]) -> float:
+            ts = item.get("created_at")
+            if ts is None:
+                return 0.0
+            try:
+                return float(ts.timestamp())
+            except Exception:
+                return 0.0
+
+        activities.sort(key=_activity_ts, reverse=True)
+
+        return {"activities": activities[:limit]}
+    finally:
+        await release_conn(conn)
+
+
 @router.post("/bookmark")
 async def bookmark_post(body: Dict[str, Any]):
     """
