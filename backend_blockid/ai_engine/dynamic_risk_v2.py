@@ -16,15 +16,27 @@ DYNAMIC_RISK_THRESHOLD = 70
 
 
 async def _get_ml_score(conn: Any, wallet: str) -> float:
+    """
+    New wallet (no prior): return 50.0 as neutral base.
+    Established wallet (prior >= 20): return prior as ml_score
+    so EMA = (0.6 * prior) + (0.4 * prior) = prior → STABLE.
+    Score only moves from graph_penalty, activity_boost, reason_penalty.
+    """
     row = await conn.fetchrow(
-        "SELECT ml_score, score FROM trust_scores WHERE wallet = $1 LIMIT 1",
+        "SELECT dynamic_risk, final_score FROM trust_scores WHERE wallet = $1 LIMIT 1",
         wallet,
     )
     if not row:
         return 50.0
-    ml_score = row["ml_score"] if row["ml_score"] is not None else None
-    score = row["score"] if row["score"] is not None else None
-    return float(ml_score if ml_score is not None else (score if score is not None else 50.0))
+
+    prior = row["dynamic_risk"] if row["dynamic_risk"] is not None else None
+    if prior is None:
+        prior = row["final_score"] if row["final_score"] is not None else None
+
+    if prior is not None and float(prior) >= 20.0:
+        return float(prior)
+
+    return 50.0
 
 
 async def _get_prior_risk(conn: Any, wallet: str) -> float:
