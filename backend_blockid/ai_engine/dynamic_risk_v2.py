@@ -210,7 +210,7 @@ async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
             "ml_score": float(ml_score),
             "prior": float(prior),
             "graph_penalty": float(graph_penalty),
-            "decay": float(decay),
+            "decay": 0.0,
             "activity_boost": float(activity_boost),
             "dynamic_risk": float(dynamic_risk),
             "last_tx_time": float(last_tx_time),
