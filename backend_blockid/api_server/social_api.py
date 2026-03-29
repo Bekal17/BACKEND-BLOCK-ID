@@ -2347,9 +2347,13 @@ async def get_bookmarks(wallet: str):
                 COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                 orig.created_at AS original_created_at,
                 COALESCE(sub.plan, 'free') AS plan,
-                COALESCE(sub_orig.plan, 'free') AS original_plan
+                COALESCE(sub_orig.plan, 'free') AS original_plan,
+                sp_prof.avatar_url,
+                sp_prof.avatar_type,
+                sp_prof.avatar_is_animated
             FROM post_bookmarks pb
             JOIN social_posts sp ON sp.id = pb.post_id
+            LEFT JOIN social_profiles sp_prof ON sp_prof.wallet = sp.wallet
             LEFT JOIN social_posts orig ON orig.id = sp.repost_of
             LEFT JOIN handle_registry hr ON hr.owner_wallet = sp.wallet
             LEFT JOIN trust_scores ts ON ts.wallet = sp.wallet
