@@ -1563,6 +1563,16 @@ async def get_profile(
             wallet,
         )
         badges = [r["reason_code"] for r in reason_rows] if reason_rows else []
+        sp_row = await conn.fetchrow(
+            """
+            SELECT avatar_type, avatar_url, avatar_nft_mint, avatar_nft_name,
+                   avatar_nft_collection, avatar_is_animated,
+                   banner_type, banner_url, banner_is_animated,
+                   display_name, display_name_source, bio, website, location
+            FROM social_profiles WHERE wallet = $1
+            """,
+            wallet,
+        )
 
         profile_row = await conn.fetchrow(
             "SELECT displayed_badges FROM social_profiles WHERE wallet = $1",
@@ -1601,6 +1611,20 @@ async def get_profile(
             "posts": [dict(r) for r in posts_rows],
             "is_following": is_following,
             "badges": badges,
+            "avatar_type": sp_row["avatar_type"] if sp_row else None,
+            "avatar_url": sp_row["avatar_url"] if sp_row else None,
+            "avatar_nft_mint": sp_row["avatar_nft_mint"] if sp_row else None,
+            "avatar_nft_name": sp_row["avatar_nft_name"] if sp_row else None,
+            "avatar_nft_collection": sp_row["avatar_nft_collection"] if sp_row else None,
+            "avatar_is_animated": sp_row["avatar_is_animated"] if sp_row else False,
+            "banner_type": sp_row["banner_type"] if sp_row else None,
+            "banner_url": sp_row["banner_url"] if sp_row else None,
+            "banner_is_animated": sp_row["banner_is_animated"] if sp_row else False,
+            "display_name": sp_row["display_name"] if sp_row else None,
+            "display_name_source": sp_row["display_name_source"] if sp_row else "WALLET",
+            "bio": sp_row["bio"] if sp_row else None,
+            "website": sp_row["website"] if sp_row else None,
+            "location": sp_row["location"] if sp_row else None,
             "displayed_badges": displayed_badges,
             "joined_at": id_row["minted_at"].isoformat() if id_row and id_row.get("minted_at") else None,
         }
