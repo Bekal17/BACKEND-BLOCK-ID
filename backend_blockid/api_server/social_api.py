@@ -73,6 +73,11 @@ class CreatePostRequest(BaseModel):
     session_token: str = ""
 
 
+class SetBadgesRequest(BaseModel):
+    wallet: str
+    badges: list[str]
+
+
 async def _has_identity_nft(wallet: str) -> bool:
     """Check if wallet has Identity NFT (mint_status = MINTED)."""
     conn = await get_conn()
@@ -1559,6 +1564,16 @@ async def get_profile(
         )
         badges = [r["reason_code"] for r in reason_rows] if reason_rows else []
 
+        profile_row = await conn.fetchrow(
+            "SELECT displayed_badges FROM social_profiles WHERE wallet = $1",
+            wallet,
+        )
+        displayed_badges = (
+            list(profile_row["displayed_badges"])
+            if profile_row and profile_row["displayed_badges"]
+            else []
+        )
+
         plan = "free"
         try:
             sub = await conn.fetchrow(
@@ -1586,8 +1601,52 @@ async def get_profile(
             "posts": [dict(r) for r in posts_rows],
             "is_following": is_following,
             "badges": badges,
+            "displayed_badges": displayed_badges,
             "joined_at": id_row["minted_at"].isoformat() if id_row and id_row.get("minted_at") else None,
         }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/badges/{wallet}")
+async def get_badges(wallet: str):
+    conn = await get_conn()
+    try:
+        reason_rows = await conn.fetch(
+            "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1 AND weight > 0",
+            wallet,
+        )
+        profile_row = await conn.fetchrow(
+            "SELECT displayed_badges FROM social_profiles WHERE wallet = $1",
+            wallet,
+        )
+        earned = [r["reason_code"] for r in reason_rows]
+        displayed = list(profile_row["displayed_badges"]) if profile_row and profile_row["displayed_badges"] else []
+        return {"earned": earned, "displayed": displayed}
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/badges/display")
+async def set_displayed_badges(body: SetBadgesRequest):
+    if len(body.badges) > 5:
+        raise HTTPException(400, detail="Maximum 5 badges allowed")
+    conn = await get_conn()
+    try:
+        reason_rows = await conn.fetch(
+            "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1 AND weight > 0",
+            body.wallet,
+        )
+        earned = {r["reason_code"] for r in reason_rows}
+        for b in body.badges:
+            if b not in earned:
+                raise HTTPException(400, detail=f"Badge {b} not earned by this wallet")
+        await conn.execute(
+            "UPDATE social_profiles SET displayed_badges = $1 WHERE wallet = $2",
+            body.badges,
+            body.wallet,
+        )
+        return {"success": True, "displayed": body.badges}
     finally:
         await release_conn(conn)
 
