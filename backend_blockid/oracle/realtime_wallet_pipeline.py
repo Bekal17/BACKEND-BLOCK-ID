@@ -596,6 +596,18 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                         confidence=1.0,
                     )
 
+                if linking_reasons:
+                    for code in linking_reasons:
+                        await boost_conn.execute(
+                            """
+                            INSERT INTO wallet_reasons (wallet, reason_code, created_at)
+                            VALUES ($1, $2, NOW())
+                            ON CONFLICT (wallet, reason_code) DO NOTHING
+                            """,
+                            wallet,
+                            code,
+                        )
+
                 if boost != 0:
                     # Step 1: fetch score_before for linking history
                     score_row = await boost_conn.fetchrow(
