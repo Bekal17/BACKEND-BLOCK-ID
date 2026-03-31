@@ -166,11 +166,26 @@ async def ensure_subscription_columns():
         await release_conn(conn)
 
 
+async def ensure_badge_columns():
+    """Ensure displayed_badges column exists on social_profiles."""
+    conn = await get_conn()
+    try:
+        await conn.execute("""
+            ALTER TABLE social_profiles
+            ADD COLUMN IF NOT EXISTS displayed_badges TEXT[] DEFAULT '{}';
+        """)
+    except Exception:
+        pass
+    finally:
+        await release_conn(conn)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize PostgreSQL pool; start background workers when available."""
     await init_db()
     await ensure_subscription_columns()
+    await ensure_badge_columns()
     await ensure_tables()
     asyncio.create_task(start_hourly_flush(app))
 
