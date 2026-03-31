@@ -17,8 +17,8 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/subscription", tags=["Subscription"])
 
 TIER_LIMITS: dict[str, dict[str, Any]] = {
-    "FREE": {"scan_limit": 10, "handle_limit": 0, "wallet_graph": False},
-    "EXPLORER": {"scan_limit": 100, "handle_limit": 1, "wallet_graph": True},
+    "FREE": {"scan_limit": 50, "handle_limit": 0, "wallet_graph": False},
+    "EXPLORER": {"scan_limit": 250, "handle_limit": 1, "wallet_graph": True},
     "PRO": {"scan_limit": None, "handle_limit": 3, "wallet_graph": True},
 }
 
