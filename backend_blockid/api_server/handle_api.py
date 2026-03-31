@@ -21,6 +21,7 @@ from backend_blockid.api_server.handle_pricing import (
     get_handle_price,
     validate_handle_format,
 )
+from backend_blockid.api_server.nft_mint_api import verify_payment_tx
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 
@@ -60,6 +61,8 @@ class ClaimRequest(BaseModel):
     handle: str = Field(..., description="Handle with or without @")
     signed_message: str = Field(..., description="Message signed by wallet")
     signature: str = Field(default="", description="Base58 signature")
+    tx_signature: str = Field(default="", description="On-chain payment transaction signature")
+    payment_method: str = "SOL"
 
 
 class LinkWalletRequest(BaseModel):
@@ -181,6 +184,23 @@ async def claim_handle(body: ClaimRequest) -> dict[str, Any]:
                 "reason": anti["reason"],
                 "message": "Handle claim rejected",
             }
+
+        await verify_payment_tx(body.tx_signature, wallet, body.payment_method)
+
+        conn2 = await get_conn()
+        try:
+            await conn2.execute(
+                """
+                INSERT INTO nft_mint_payments (wallet, tx_signature, amount_sol)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (tx_signature) DO NOTHING
+                """,
+                wallet,
+                body.tx_signature,
+                0.0,
+            )
+        finally:
+            await release_conn(conn2)
 
         metadata_uri = f"{HANDLE_METADATA_BASE_URL}/{h}"
         try:

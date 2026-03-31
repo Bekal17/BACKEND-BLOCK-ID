@@ -34,6 +34,9 @@ MINT_SERVICE_URL = (os.getenv("MINT_SERVICE_URL", "http://localhost:3001")).rstr
 TREASURY_WALLET = os.getenv("TREASURY_WALLET", "4DdLPRDiLRY8Q2E4Fv31kvcfMf3XJf11HgaSaW7tKVcx")
 REQUIRED_SOL = float(os.getenv("NFT_MINT_PRICE_SOL", "0.01"))
 LAMPORTS_PER_SOL = 1_000_000_000
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+REQUIRED_USDC = float(os.getenv("HANDLE_PRICE_USDC", "5.0"))
+USDC_DECIMALS = 1_000_000  # USDC has 6 decimals
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
 
 
@@ -95,15 +98,16 @@ async def upload_to_r2(data: bytes, key: str, content_type: str) -> str:
     return f"{R2_PUBLIC_URL.rstrip('/')}/{key}"
 
 
-async def verify_payment_tx(tx_signature: str, payer_wallet: str) -> bool:
+async def verify_payment_tx(
+    tx_signature: str,
+    payer_wallet: str,
+    payment_method: str = "SOL",
+) -> bool:
     """
-    Verify that tx_signature is a valid SOL transfer:
-    - from payer_wallet
-    - to TREASURY_WALLET
-    - amount >= REQUIRED_SOL
-    - not already used
+    Verify payment transaction.
+    payment_method: 'SOL' or 'USDC'
     """
-    # Check replay — tx already used?
+    # Check replay
     conn = await get_conn()
     try:
         existing = await conn.fetchrow(
@@ -118,7 +122,6 @@ async def verify_payment_tx(tx_signature: str, payer_wallet: str) -> bool:
     if not HELIUS_API_KEY.strip():
         raise HTTPException(status_code=500, detail="HELIUS_API_KEY not configured")
 
-    # Fetch tx from Helius
     rpc_url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         res = await client.post(
@@ -143,43 +146,78 @@ async def verify_payment_tx(tx_signature: str, payer_wallet: str) -> bool:
     if not result:
         raise HTTPException(status_code=400, detail="Transaction not found or not confirmed")
 
-    # Check tx not failed
     if result.get("meta", {}).get("err") is not None:
         raise HTTPException(status_code=400, detail="Transaction failed on-chain")
 
-    # Parse instructions — find SOL transfer to treasury
     instructions = (
         result.get("transaction", {})
         .get("message", {})
         .get("instructions", [])
     )
-
     treasury = TREASURY_WALLET.lower()
     payer = payer_wallet.lower()
-    found_transfer = False
 
-    for ix in instructions:
-        parsed = ix.get("parsed", {})
-        if not isinstance(parsed, dict):
-            continue
-        ix_type = parsed.get("type", "")
-        info = parsed.get("info", {})
-
-        if ix_type == "transfer":
-            source = (info.get("source") or "").lower()
-            dest = (info.get("destination") or "").lower()
-            lamports = int(info.get("lamports") or 0)
-            sol_amount = lamports / LAMPORTS_PER_SOL
-
-            if source == payer and dest == treasury and sol_amount >= REQUIRED_SOL:
-                found_transfer = True
-                break
-
-    if not found_transfer:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No valid SOL transfer found. Required: {REQUIRED_SOL} SOL to {TREASURY_WALLET}",
-        )
+    if payment_method == "USDC":
+        # Verify SPL token transfer (USDC)
+        found_transfer = False
+        for ix in instructions:
+            parsed = ix.get("parsed", {})
+            if not isinstance(parsed, dict):
+                continue
+            ix_type = parsed.get("type", "")
+            info = parsed.get("info", {})
+            # spl-token transferChecked or transfer
+            if ix_type in ("transferChecked", "transfer"):
+                # verify mint is USDC
+                mint = (info.get("mint") or "").lower()
+                if mint and mint != USDC_MINT.lower():
+                    continue
+                authority = (info.get("authority") or "").lower()
+                dest = (info.get("destination") or "").lower()
+                # tokenAmount for transferChecked
+                token_amount = info.get("tokenAmount", {})
+                raw_amount = int(token_amount.get("amount") or info.get("amount") or 0)
+                usdc_amount = raw_amount / USDC_DECIMALS
+                if authority == payer and usdc_amount >= REQUIRED_USDC:
+                    # verify destination is treasury token account
+                    # We check post token balances for treasury wallet
+                    post_balances = result.get("meta", {}).get("postTokenBalances", [])
+                    for bal in post_balances:
+                        if (
+                            (bal.get("owner") or "").lower() == treasury
+                            and (bal.get("mint") or "").lower() == USDC_MINT.lower()
+                        ):
+                            found_transfer = True
+                            break
+                if found_transfer:
+                    break
+        if not found_transfer:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No valid USDC transfer found. Required: {REQUIRED_USDC} USDC to {TREASURY_WALLET}",
+            )
+    else:
+        # Verify native SOL transfer
+        found_transfer = False
+        for ix in instructions:
+            parsed = ix.get("parsed", {})
+            if not isinstance(parsed, dict):
+                continue
+            ix_type = parsed.get("type", "")
+            info = parsed.get("info", {})
+            if ix_type == "transfer":
+                source = (info.get("source") or "").lower()
+                dest = (info.get("destination") or "").lower()
+                lamports = int(info.get("lamports") or 0)
+                sol_amount = lamports / LAMPORTS_PER_SOL
+                if source == payer and dest == treasury and sol_amount >= REQUIRED_SOL:
+                    found_transfer = True
+                    break
+        if not found_transfer:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No valid SOL transfer found. Required: {REQUIRED_SOL} SOL to {TREASURY_WALLET}",
+            )
 
     return True
 
