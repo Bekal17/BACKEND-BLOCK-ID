@@ -5,10 +5,15 @@ BlockID Smart Router API
 - Prepare unsigned transaction for frontend to sign via Phantom
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
+import json
+import os
 import time
+import openai
 
 from backend_blockid.database.pg_connection import get_conn, release_conn
 
@@ -44,6 +49,76 @@ BADGE_LABELS = {
     "LOW_ACTIVITY": "Early Explorer",
     "NO_RISK_DETECTED": "No Risk Detected",
 }
+
+# ── OpenAI for natural language parsing ──
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+PARSE_SYSTEM_PROMPT = """You are BlockID Smart Router intent parser. Parse user input into a structured JSON action.
+
+SUPPORTED INTENTS:
+1. "send" — transfer SOL or USDC to a @handle
+2. "check" — look up a @handle's profile/trust score
+3. "balance" — check sender's own balance
+4. "swap" — swap between SOL and USDC (no recipient)
+5. "unknown" — cannot determine intent
+
+RULES:
+- Handle: extract @handle without the @ prefix. If no @ symbol, still detect handle-like words after "to", "ke", "for".
+- Token: detect SOL, USDC, or dollar/dolar/usd (map to USDC). Default to SOL if ambiguous for send. For swap, detect both input and output token.
+- Amount: extract numeric value. Support "half"→"HALF", "all"/"semua"/"max"→"MAX", "quarter"→"QUARTER".
+- Language: support English and Bahasa Indonesia equally.
+- If intent is "check" or "balance", amount and token can be null.
+- If intent is "swap", there is no handle, but there must be input_token and output_token.
+- For "send" intent: if user says dollar/dolar/usd, map token to USDC.
+
+RESPOND WITH ONLY valid JSON, no markdown, no explanation:
+{
+  "intent": "send" | "check" | "balance" | "swap" | "unknown",
+  "handle": "string or null",
+  "amount": number or "HALF" or "MAX" or "QUARTER" or null,
+  "token": "SOL" or "USDC" or null,
+  "output_token": "SOL" or "USDC" or null,
+  "confidence": 0.0 to 1.0,
+  "raw_input": "original user input"
+}
+
+EXAMPLES:
+Input: "send 1 SOL to @blockid"
+Output: {"intent":"send","handle":"blockid","amount":1,"token":"SOL","output_token":null,"confidence":0.95,"raw_input":"send 1 SOL to @blockid"}
+
+Input: "kirim 100 USDC ke @bee121"
+Output: {"intent":"send","handle":"bee121","amount":100,"token":"USDC","output_token":null,"confidence":0.95,"raw_input":"kirim 100 USDC ke @bee121"}
+
+Input: "bayar @blockid 50 dolar"
+Output: {"intent":"send","handle":"blockid","amount":50,"token":"USDC","output_token":null,"confidence":0.9,"raw_input":"bayar @blockid 50 dolar"}
+
+Input: "send half my SOL to @blockid"
+Output: {"intent":"send","handle":"blockid","amount":"HALF","token":"SOL","output_token":null,"confidence":0.9,"raw_input":"send half my SOL to @blockid"}
+
+Input: "kirim semua USDC ke @bee121"
+Output: {"intent":"send","handle":"bee121","amount":"MAX","token":"USDC","output_token":null,"confidence":0.9,"raw_input":"kirim semua USDC ke @bee121"}
+
+Input: "siapa @blockid?"
+Output: {"intent":"check","handle":"blockid","amount":null,"token":null,"output_token":null,"confidence":0.9,"raw_input":"siapa @blockid?"}
+
+Input: "cek score @bee121"
+Output: {"intent":"check","handle":"bee121","amount":null,"token":null,"output_token":null,"confidence":0.95,"raw_input":"cek score @bee121"}
+
+Input: "berapa saldo aku?"
+Output: {"intent":"balance","handle":null,"amount":null,"token":null,"output_token":null,"confidence":0.9,"raw_input":"berapa saldo aku?"}
+
+Input: "my balance"
+Output: {"intent":"balance","handle":null,"amount":null,"token":null,"output_token":null,"confidence":0.95,"raw_input":"my balance"}
+
+Input: "tukar 1 SOL ke USDC"
+Output: {"intent":"swap","handle":null,"amount":1,"token":"SOL","output_token":"USDC","confidence":0.95,"raw_input":"tukar 1 SOL ke USDC"}
+
+Input: "swap 100 USDC to SOL"
+Output: {"intent":"swap","handle":null,"amount":100,"token":"USDC","output_token":"SOL","confidence":0.95,"raw_input":"swap 100 USDC to SOL"}
+
+Input: "hello"
+Output: {"intent":"unknown","handle":null,"amount":null,"token":null,"output_token":null,"confidence":0.3,"raw_input":"hello"}"""
 
 
 # ── Models ──
@@ -294,6 +369,111 @@ async def prepare_swap(req: SwapRequest):
         "output_amount": int(quote_data.get("outAmount", 0)) / (10 ** output_info["decimals"]),
         "recipient_wallet": req.recipient_wallet,
     }
+
+
+# ── 5. Natural Language Intent Parser (LLM) ──
+class ParseRequest(BaseModel):
+    input: str
+    sender_wallet: Optional[str] = None
+
+
+@router.post("/parse")
+async def parse_intent(req: ParseRequest):
+    """
+    Parse natural language input into structured transaction intent.
+    Uses GPT-4o-mini for multi-language support (EN + ID).
+
+    Examples:
+      "send 1 SOL to @blockid"
+      "kirim 100 USDC ke @bee121"
+      "bayar @blockid 50 dolar"
+      "siapa @blockid?"
+      "berapa saldo aku?"
+      "tukar 1 SOL ke USDC"
+      "send half my SOL to @blockid"
+    """
+    if not req.input or not req.input.strip():
+        raise HTTPException(status_code=400, detail="Input cannot be empty")
+
+    if not openai_client:
+        raise HTTPException(status_code=503, detail="OpenAI not configured")
+
+    user_input = req.input.strip()
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": PARSE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_input},
+            ],
+            temperature=0.1,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+        )
+
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+
+        intent = parsed.get("intent", "unknown")
+        handle = parsed.get("handle")
+        amount = parsed.get("amount")
+        token = parsed.get("token")
+        output_token = parsed.get("output_token")
+        confidence = parsed.get("confidence", 0.5)
+
+        if handle:
+            handle = handle.strip().lower().lstrip("@")
+
+        if isinstance(amount, str) and amount not in ("HALF", "MAX", "QUARTER"):
+            try:
+                amount = float(amount)
+            except ValueError:
+                amount = None
+
+        resolved = None
+        if handle and intent in ("send", "check"):
+            conn = await get_conn()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT owner_wallet FROM handle_registry WHERE LOWER(handle) = $1 AND status = 'ACTIVE' LIMIT 1",
+                    handle,
+                )
+                if row:
+                    resolved = row["owner_wallet"]
+            finally:
+                await release_conn(conn)
+
+        return {
+            "intent": intent,
+            "handle": handle,
+            "handle_resolved": resolved,
+            "amount": amount,
+            "token": token,
+            "output_token": output_token,
+            "confidence": confidence,
+            "raw_input": user_input,
+            "needs_more_info": (
+                (intent == "send" and (not handle or amount is None))
+                or (intent == "swap" and (amount is None or not token or not output_token))
+            ),
+        }
+
+    except json.JSONDecodeError:
+        return {
+            "intent": "unknown",
+            "handle": None,
+            "handle_resolved": None,
+            "amount": None,
+            "token": None,
+            "output_token": None,
+            "confidence": 0.0,
+            "raw_input": user_input,
+            "needs_more_info": True,
+            "error": "Failed to parse LLM response",
+        }
+    except openai.APIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI API error: {str(e)}")
 
 
 # ── 4. Supported tokens list ──
