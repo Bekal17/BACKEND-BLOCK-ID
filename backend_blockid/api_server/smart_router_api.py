@@ -26,8 +26,9 @@ SUPPORTED_TOKENS = {
     "SOL": {"mint": SOL_MINT, "decimals": 9, "symbol": "SOL"},
     "USDC": {"mint": USDC_MINT, "decimals": 6, "symbol": "USDC"},
 }
-JUPITER_ORDER_URL = "https://api.jup.ag/swap/v2/order"
-JUPITER_EXECUTE_URL = "https://api.jup.ag/swap/v2/execute"
+JUPITER_BASE_URL = "https://api.jup.ag/swap/v2"
+JUPITER_ORDER_URL = f"{JUPITER_BASE_URL}/order"
+JUPITER_EXECUTE_URL = f"{JUPITER_BASE_URL}/execute"
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "")
 
 BADGE_LABELS = {
@@ -140,10 +141,9 @@ class SwapRequest(BaseModel):
     slippage_bps: int = 50  # 0.5% default
 
 
-class ExecuteSwapRequest(BaseModel):
-    """Body for POST /router/execute (matches Jupiter JSON key)."""
-
-    signedTransaction: str
+class ExecuteRequest(BaseModel):
+    signed_transaction: str
+    request_id: str
 
 
 # ── 1. Resolve @handle ──
@@ -238,7 +238,8 @@ async def resolve_handle(handle: str):
 async def get_quote(req: QuoteRequest):
     """
     Get transfer quote including fees.
-    If input_token != output_token, get Jupiter Swap API v2 quote.
+    If input_token != output_token, get Jupiter Swap API v2 order (quote + tx in one call).
+    Based on: https://dev.jup.ag/docs/swap/order-and-execute
     """
     if req.input_token not in SUPPORTED_TOKENS:
         raise HTTPException(status_code=400, detail=f"Unsupported input token: {req.input_token}")
@@ -267,14 +268,18 @@ async def get_quote(req: QuoteRequest):
     needs_swap = req.input_token != req.output_token
     output_amount = req.amount
     price_impact = 0.0
-    swap_fee = 0.0
     order_data = None
 
     if needs_swap:
         amount_raw = int(req.amount * (10 ** input_info["decimals"]))
-        headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
+        headers = {}
+        if JUPITER_API_KEY:
+            headers["x-api-key"] = JUPITER_API_KEY
         try:
             async with httpx.AsyncClient(timeout=15) as client:
+                # GET /order returns quote + assembled transaction in one call
+                # Without "taker", it returns quote only (no transaction)
+                # We omit taker here for quote-only to save resources
                 resp = await client.get(
                     JUPITER_ORDER_URL,
                     params={
@@ -282,19 +287,17 @@ async def get_quote(req: QuoteRequest):
                         "outputMint": output_info["mint"],
                         "amount": str(amount_raw),
                         "slippageBps": "50",
-                        "taker": req.sender_wallet,
                     },
                     headers=headers,
                 )
                 if resp.status_code != 200:
-                    error_detail = resp.text[:200] if resp.text else "Unknown error"
+                    error_detail = resp.text[:300] if resp.text else "Unknown error"
                     raise HTTPException(status_code=502, detail=f"Jupiter order failed: {error_detail}")
                 order_data = resp.json()
 
             out_raw = int(order_data.get("outAmount", 0))
             output_amount = out_raw / (10 ** output_info["decimals"])
             price_impact = float(order_data.get("priceImpactPct", 0))
-            swap_fee = req.amount * 0.003  # ~0.3% estimate
 
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail="Jupiter timeout")
@@ -311,9 +314,8 @@ async def get_quote(req: QuoteRequest):
         "output_amount": round(output_amount, 6),
         "needs_swap": needs_swap,
         "price_impact_pct": round(price_impact, 4),
-        "swap_fee_estimate": round(swap_fee, 6),
         "network_fee_sol": network_fee_sol,
-        "jupiter_order": order_data if needs_swap else None,
+        "router": order_data.get("router") if order_data else None,
         "swap_api_version": "v2",
         "timestamp": int(time.time()),
     }
@@ -323,9 +325,13 @@ async def get_quote(req: QuoteRequest):
 @router.post("/swap")
 async def prepare_swap(req: SwapRequest):
     """
-    Get assembled swap transaction from Jupiter Swap API v2.
-    Uses /order endpoint which returns quote + transaction in one call.
-    Frontend signs with Phantom, then we submit via /execute for managed landing.
+    Get assembled swap transaction from Jupiter Swap API v2 /order endpoint.
+    This time we pass "taker" to get the full assembled transaction.
+    Frontend signs with Phantom, then submits via /router/execute.
+    Based on: https://dev.jup.ag/docs/swap/order-and-execute
+
+    /order required params: inputMint, outputMint, amount, taker
+    /order response: { transaction, requestId, outAmount, router, mode, feeBps, feeMint }
     """
     if req.input_token == req.output_token:
         raise HTTPException(
@@ -339,11 +345,13 @@ async def prepare_swap(req: SwapRequest):
         raise HTTPException(status_code=400, detail="Unsupported token")
 
     amount_raw = int(req.amount * (10 ** input_info["decimals"]))
-    headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
+    headers = {}
+    if JUPITER_API_KEY:
+        headers["x-api-key"] = JUPITER_API_KEY
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            # v2 /order returns quote + assembled transaction in one call
+            # GET /order with taker = returns quote + assembled unsigned transaction
             order_resp = await client.get(
                 JUPITER_ORDER_URL,
                 params={
@@ -356,7 +364,7 @@ async def prepare_swap(req: SwapRequest):
                 headers=headers,
             )
             if order_resp.status_code != 200:
-                error_detail = order_resp.text[:200] if order_resp.text else "Unknown error"
+                error_detail = order_resp.text[:300] if order_resp.text else "Unknown error"
                 raise HTTPException(status_code=502, detail=f"Jupiter order failed: {error_detail}")
 
             order_data = order_resp.json()
@@ -364,48 +372,74 @@ async def prepare_swap(req: SwapRequest):
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Jupiter timeout")
 
+    if not order_data.get("transaction"):
+        raise HTTPException(status_code=502, detail="Jupiter returned no transaction")
+
     out_raw = int(order_data.get("outAmount", 0))
 
     return {
-        "swap_transaction": order_data.get("transaction"),
+        "transaction": order_data["transaction"],
+        "request_id": order_data.get("requestId"),
         "input_token": req.input_token,
         "input_amount": req.amount,
         "output_token": req.output_token,
         "output_amount": out_raw / (10 ** output_info["decimals"]),
         "recipient_wallet": req.recipient_wallet,
-        "swap_api_version": "v2",
         "router": order_data.get("router", "unknown"),
+        "mode": order_data.get("mode", "unknown"),
+        "fee_bps": order_data.get("feeBps", 0),
+        "swap_api_version": "v2",
     }
 
 
 @router.post("/execute")
-async def execute_swap(body: ExecuteSwapRequest):
+async def execute_swap(req: ExecuteRequest):
     """
-    Submit a signed swap transaction to Jupiter for managed landing.
-    Jupiter handles retry, priority fees, and transaction confirmation.
-    """
-    signed_transaction = (body.signedTransaction or "").strip()
-    if not signed_transaction:
-        raise HTTPException(status_code=400, detail="signed_transaction is required")
+    Submit signed swap transaction to Jupiter /execute for managed landing.
+    Jupiter handles: optimized slippage (RTSE), priority fees, transaction landing, confirmation.
 
-    headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
-    headers["Content-Type"] = "application/json"
+    Required: signedTransaction (base64) + requestId (from /order response)
+    Based on: https://dev.jup.ag/docs/swap/order-and-execute
+
+    Response: { status, signature, code, inputAmountResult, outputAmountResult }
+    """
+    if not req.signed_transaction:
+        raise HTTPException(status_code=400, detail="signed_transaction is required")
+    if not req.request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+
+    headers = {"Content-Type": "application/json"}
+    if JUPITER_API_KEY:
+        headers["x-api-key"] = JUPITER_API_KEY
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 JUPITER_EXECUTE_URL,
-                json={"signedTransaction": signed_transaction},
+                json={
+                    "signedTransaction": req.signed_transaction,
+                    "requestId": req.request_id,
+                },
                 headers=headers,
             )
             if resp.status_code != 200:
-                error_detail = resp.text[:200] if resp.text else "Unknown error"
+                error_detail = resp.text[:300] if resp.text else "Unknown error"
                 raise HTTPException(status_code=502, detail=f"Jupiter execute failed: {error_detail}")
 
-            return resp.json()
+            result = resp.json()
 
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Jupiter execute timeout")
+
+    return {
+        "status": result.get("status"),
+        "signature": result.get("signature"),
+        "code": result.get("code", -1),
+        "input_amount_result": result.get("inputAmountResult"),
+        "output_amount_result": result.get("outputAmountResult"),
+        "error": result.get("error"),
+        "swap_api_version": "v2",
+    }
 
 
 # ── 5. Natural Language Intent Parser (LLM) ──
