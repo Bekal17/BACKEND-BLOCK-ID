@@ -316,11 +316,16 @@ async def predict_wallet_score_for_wallet(wallet: str) -> float:
         risk_score = round(scam_prob * 100)
         ml_score = float(100 - risk_score)
 
-    # Guard: mock token always returns 0 risk for any wallet.
-    # New wallets with no real data must not receive inflated scores.
-    if scam_prob < 0.05 and len(tokens) <= 1:
+    # Guard: mock token data always returns 0 risk for ANY wallet.
+    # Since we use mock data (not real token history), ml_score is unreliable.
+    # Always normalize to 50.0 (neutral) when using mock data.
+    # This prevents ml_score=100 from pulling EMA upward on every recalculate.
+    if scam_prob < 0.05:
         ml_score = 50.0
-        logger.info("realtime_base_score_normalized_to_50", wallet=wallet)
+        logger.info("realtime_base_score_normalized_to_50", wallet=wallet, reason="mock_data_guard")
+
+    # Cap ml_score to 50 max when using mock data to prevent score inflation
+    capped_ml_score = min(50.0, ml_score)
 
     conn = await get_conn()
     try:
@@ -331,18 +336,18 @@ async def predict_wallet_score_for_wallet(wallet: str) -> float:
             WHERE wallet = $1
             """,
             wallet,
-            ml_score,
+            capped_ml_score,
+        )
+        logger.info(
+            "predict_wallet_score_realtime_done",
+            wallet=wallet,
+            ml_score=ml_score,
+            capped_ml_score=capped_ml_score,
         )
     finally:
         await release_conn(conn)
 
-    logger.info(
-        "predict_wallet_score_realtime_done",
-        wallet=wallet,
-        ml_score=ml_score,
-    )
-
-    return ml_score
+    return capped_ml_score
 
 
 def predict_wallet_score_batch() -> int:
