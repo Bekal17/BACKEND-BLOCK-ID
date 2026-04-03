@@ -8,6 +8,7 @@ Agent runner — main event loop and process lifecycle.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -16,6 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.agent_worker.worker import WorkerConfig, run_worker
+from backend_blockid.analysis_engine.wallet_age import (
+    calculate_wallet_age_days,
+    get_wallet_first_tx_timestamp,
+)
 from backend_blockid.blockid_logging import get_logger
 
 logger = get_logger(__name__)
@@ -93,11 +98,26 @@ def _analyze_and_save_wallet(
         for r in history
     ]
     features = extract_features(txs, wallet)
+    _now = int(time.time())
+    true_first_tx: int | None = None
+    try:
+        true_first_tx = asyncio.run(get_wallet_first_tx_timestamp(wallet))
+    except Exception as e:
+        logger.warning(
+            "true_wallet_age_fetch_failed",
+            wallet_id=wallet[:16] if wallet else "?",
+            error=str(e),
+        )
+    ts_min_history = min((r.timestamp for r in history if r.timestamp is not None), default=_now)
+    ts_max = max((r.timestamp for r in history if r.timestamp is not None), default=_now)
+    ts_min = true_first_tx if true_first_tx is not None else ts_min_history
+    true_age_days = calculate_wallet_age_days(true_first_tx) or int(features.time_span_days or 0)
+
     anomaly_result = detect_anomalies(features, config=anomaly_config)
     metrics = {
         "wallet": wallet,
         "tx_count": features.tx_count,
-        "wallet_age_days": int(features.time_span_days or 0),
+        "wallet_age_days": true_age_days,
         "unique_programs": features.unique_counterparties,
     }
     risk = calculate_risk(metrics)
@@ -128,8 +148,6 @@ def _analyze_and_save_wallet(
             "tx_count": features.tx_count,
         },
     )
-    ts_min = min((r.timestamp for r in history if r.timestamp is not None), default=now)
-    ts_max = max((r.timestamp for r in history if r.timestamp is not None), default=now)
     profile = WalletProfile(wallet=wallet, first_seen_at=ts_min, last_seen_at=ts_max, profile_json=None)
     db.upsert_wallet_profile(profile)
     stored_alerts = evaluate_and_store_alerts(
