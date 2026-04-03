@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Any
 
 from backend_blockid.blockid_logging import get_logger
+from backend_blockid.analysis_engine.wallet_age import (
+    calculate_wallet_age_days,
+    get_wallet_first_tx_timestamp,
+)
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.database.db_wallet_tracking_light import insert_reason_evidence_async
 from backend_blockid.database.repositories import insert_wallet_reason
@@ -418,6 +422,29 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         # Step 6: reason_weight_engine — skip (applied inline above)
 
         # Ensure wallet in cluster_features for predict
+        # Fetch true wallet age from blockchain
+        true_age_days = 0
+        try:
+            first_tx_ts = await get_wallet_first_tx_timestamp(wallet)
+            true_age_days = calculate_wallet_age_days(first_tx_ts)
+            logger.info("wallet_true_age_fetched", wallet=wallet[:16], age_days=true_age_days)
+        except Exception as e:
+            logger.warning("wallet_true_age_failed", wallet=wallet[:16], error=str(e))
+
+        # Also update wallet_meta with true age
+        try:
+            meta_conn = await get_conn()
+            try:
+                await meta_conn.execute(
+                    """UPDATE wallet_meta SET wallet_age_days = $1 WHERE wallet = $2 AND (wallet_age_days IS NULL OR wallet_age_days < $1)""",
+                    true_age_days,
+                    wallet,
+                )
+            finally:
+                await release_conn(meta_conn)
+        except Exception:
+            pass
+
         cluster_path = _DATA_DIR / "cluster_features.csv"
         default_row = {
             "wallet": wallet,
@@ -426,7 +453,7 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
             "distance_to_scam": 999,
             "percent_to_same_cluster": 0,
             "is_scam_cluster_member": 0,
-            "wallet_age_days": 0,
+            "wallet_age_days": true_age_days,
             "last_scam_days": 9999,
             "graph_distance": 999,
         }
@@ -877,6 +904,29 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
                 error=str(e),
             )
 
+        # Fetch true wallet age from blockchain
+        true_age_days = 0
+        try:
+            first_tx_ts = await get_wallet_first_tx_timestamp(wallet)
+            true_age_days = calculate_wallet_age_days(first_tx_ts)
+            logger.info("wallet_true_age_fetched", wallet=wallet[:16], age_days=true_age_days)
+        except Exception as e:
+            logger.warning("wallet_true_age_failed", wallet=wallet[:16], error=str(e))
+
+        # Also update wallet_meta with true age
+        try:
+            meta_conn = await get_conn()
+            try:
+                await meta_conn.execute(
+                    """UPDATE wallet_meta SET wallet_age_days = $1 WHERE wallet = $2 AND (wallet_age_days IS NULL OR wallet_age_days < $1)""",
+                    true_age_days,
+                    wallet,
+                )
+            finally:
+                await release_conn(meta_conn)
+        except Exception:
+            pass
+
         cluster_path = _DATA_DIR / "cluster_features.csv"
         default_row = {
             "wallet": wallet,
@@ -885,7 +935,7 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
             "distance_to_scam": 999,
             "percent_to_same_cluster": 0,
             "is_scam_cluster_member": 0,
-            "wallet_age_days": 0,
+            "wallet_age_days": true_age_days,
             "last_scam_days": 9999,
             "graph_distance": 999,
         }
