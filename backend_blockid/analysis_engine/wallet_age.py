@@ -24,7 +24,7 @@ async def _get_oldest_signature_time(wallet: str, client: httpx.AsyncClient) -> 
     """Paginate getSignaturesForAddress to find the oldest signature timestamp."""
     oldest_timestamp: int | None = None
     before: str | None = None
-    max_pages = 50
+    max_pages = 10  # Safety limit: 10 * 1000 = 10k tx max, prevents timeout for high-volume wallets
 
     for page in range(max_pages):
         payload = {
