@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -30,6 +31,8 @@ from backend_blockid.ml.save_model import save_model
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _DATA_DIR = _SCRIPT_DIR.parent / "data"
 _MODELS_DIR = _SCRIPT_DIR / "models"
+# Predict pipeline loads from backend_blockid/models/token_scam_model.joblib
+_DEPLOY_MODEL_PATH = _SCRIPT_DIR.parent / "models" / "token_scam_model.joblib"
 TOKEN_FEATURES_CSV = _DATA_DIR / "token_features.csv"
 SCAM_WALLETS_CSV = _DATA_DIR / "scam_wallets.csv"
 
@@ -99,13 +102,19 @@ def main() -> int:
         labels.append(label)
     y = np.array(labels, dtype=int)
 
-    # Features: derive mint_authority_exists, freeze_authority_exists; use metadata_missing, decimals, supply
-    mint_authority_exists = (
-        (df["mint_authority"].fillna("").astype(str).str.strip() != "").astype(int)
-    )
-    freeze_authority_exists = (
-        (df["freeze_authority"].fillna("").astype(str).str.strip() != "").astype(int)
-    )
+    # Features: DAS export uses *_exists ints; legacy CSV uses mint_authority/freeze_authority text
+    if "mint_authority_exists" in df.columns:
+        mint_authority_exists = df["mint_authority_exists"].map(_bool_to_int)
+    else:
+        mint_authority_exists = (
+            (df["mint_authority"].fillna("").astype(str).str.strip() != "").astype(int)
+        )
+    if "freeze_authority_exists" in df.columns:
+        freeze_authority_exists = df["freeze_authority_exists"].map(_bool_to_int)
+    else:
+        freeze_authority_exists = (
+            (df["freeze_authority"].fillna("").astype(str).str.strip() != "").astype(int)
+        )
     metadata_missing = df["metadata_missing"].map(_bool_to_int)
     decimals = pd.to_numeric(df["decimals"], errors="coerce").fillna(0).astype(int)
     supply = pd.to_numeric(df["supply"], errors="coerce").fillna(0).astype(np.int64)
@@ -161,6 +170,10 @@ def main() -> int:
         feature_list=FEATURE_COLUMNS,
     )
     print("[ml] saved", model_path, metadata_path)
+
+    _DEPLOY_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(clf, _DEPLOY_MODEL_PATH)
+    print("[ml] deployed for inference:", _DEPLOY_MODEL_PATH)
 
     print("[ml] done")
     return 0
