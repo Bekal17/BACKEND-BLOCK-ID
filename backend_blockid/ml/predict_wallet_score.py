@@ -19,6 +19,7 @@ import os
 import time
 from pathlib import Path
 
+import httpx
 import joblib
 import numpy as np
 
@@ -102,6 +103,9 @@ FLOW_FEATURES_CSV = _DATA_DIR / "flow_features.csv"
 GRAPH_CLUSTER_CSV = _DATA_DIR / "graph_cluster_features.csv"
 MODEL_PATH = _MODELS_DIR / "token_scam_model.joblib"
 
+HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY", "")
+HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+
 # Feature order must match train_token_scam_model.py
 FEATURE_ORDER = [
     "mint_authority_exists",
@@ -136,6 +140,113 @@ def _load_scam_wallets(path: Path) -> set[str]:
             if w:
                 out.add(w)
     return out
+
+
+async def _get_token_history_real(wallet: str) -> list[dict]:
+    """
+    Fetch real token/asset data from Helius DAS API (getAssetsByOwner).
+    Returns list of feature dicts per token for ML model.
+    Falls back to empty list on error.
+    """
+    if not HELIUS_API_KEY:
+        return []
+
+    wallet = (wallet or "").strip()
+    if not wallet:
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAssetsByOwner",
+                "params": {
+                    "ownerAddress": wallet,
+                    "page": 1,
+                    "limit": 100,
+                    "displayOptions": {
+                        "showFungible": True,
+                        "showNativeBalance": True,
+                    },
+                },
+            }
+            resp = await client.post(HELIUS_RPC_URL, json=payload)
+            if resp.status_code != 200:
+                logger.warning(
+                    "real_token_fetch_error",
+                    wallet=wallet[:16],
+                    status_code=resp.status_code,
+                    body=(resp.text[:200] if resp.text else ""),
+                )
+                return []
+            data = resp.json()
+
+            if "error" in data or "result" not in data:
+                logger.warning("real_token_fetch_error", wallet=wallet[:16], error=data.get("error"))
+                return []
+
+            items = data["result"].get("items", [])
+            if not items:
+                return []
+
+            tokens = []
+            for item in items:
+                token_info = item.get("token_info") or {}
+                ownership = item.get("ownership") or {}
+                authorities = item.get("authorities") or []
+                creators = item.get("creators") or []
+
+                has_mint_authority = 0
+                has_freeze_authority = 0
+                for auth in authorities:
+                    scopes = auth.get("scopes", [])
+                    if isinstance(scopes, list):
+                        if "full" in scopes:
+                            has_mint_authority = 1
+                        if "freeze" in scopes:
+                            has_freeze_authority = 1
+
+                if ownership.get("frozen", False):
+                    has_freeze_authority = 1
+
+                content = item.get("content") or {}
+                metadata = content.get("metadata") or {}
+                metadata_missing = 1 if not metadata.get("name") else 0
+
+                is_mutable = 1 if item.get("mutable", False) else 0
+
+                compression = item.get("compression") or {}
+                is_compressed = 1 if compression.get("compressed", False) else 0
+
+                has_unverified_creator = 0
+                for c in creators:
+                    if isinstance(c, dict) and not c.get("verified", False):
+                        has_unverified_creator = 1
+                        break
+
+                decimals = int(safe_num(token_info.get("decimals"), 0))
+                supply = safe_num(token_info.get("supply"), 0)
+
+                tokens.append(
+                    {
+                        "mint_authority_exists": has_mint_authority,
+                        "freeze_authority_exists": has_freeze_authority,
+                        "metadata_missing": metadata_missing,
+                        "decimals": decimals,
+                        "supply": supply,
+                        "is_mutable": is_mutable,
+                        "is_compressed": is_compressed,
+                        "has_unverified_creator": has_unverified_creator,
+                    }
+                )
+
+            logger.info("real_token_fetch_done", wallet=wallet[:16], token_count=len(tokens))
+            return tokens
+
+    except Exception as e:
+        logger.warning("real_token_fetch_failed", wallet=wallet[:16], error=str(e))
+        return []
 
 
 def _get_token_history_mock(wallet: str) -> list[dict]:
@@ -302,7 +413,21 @@ async def predict_wallet_score_for_wallet(wallet: str) -> float:
     model = joblib.load(MODEL_PATH)
     scam_wallets = _load_scam_wallets(SCAM_WALLETS_CSV)
 
-    tokens = _get_token_history_mock(wallet)
+    # Try real token data from Helius DAS API first
+    using_real_data = False
+    try:
+        tokens = await _get_token_history_real(wallet)
+        if tokens:
+            using_real_data = True
+            logger.info("predict_using_real_token_data", wallet=wallet[:16], token_count=len(tokens))
+    except Exception as e:
+        tokens = []
+        logger.debug("real_token_fallback", wallet=wallet[:16], error=str(e))
+
+    # Fallback to mock if real data unavailable
+    if not tokens:
+        tokens = _get_token_history_mock(wallet)
+        logger.info("predict_using_mock_token_data", wallet=wallet[:16])
 
     if not tokens:
         ml_score = 50.0
@@ -316,16 +441,23 @@ async def predict_wallet_score_for_wallet(wallet: str) -> float:
         risk_score = round(scam_prob * 100)
         ml_score = float(100 - risk_score)
 
-    # Guard: mock token data always returns 0 risk for ANY wallet.
-    # Since we use mock data (not real token history), ml_score is unreliable.
-    # Always normalize to 50.0 (neutral) when using mock data.
-    # This prevents ml_score=100 from pulling EMA upward on every recalculate.
-    if scam_prob < 0.05:
+    # Guard: if using mock data, cap ml_score to neutral 50
+    # Real data: allow ml_score to be whatever model predicts, but cap at 97
+    if not using_real_data and scam_prob < 0.05:
         ml_score = 50.0
-        logger.info("realtime_base_score_normalized_to_50", wallet=wallet, reason="mock_data_guard")
+        logger.info(
+            "realtime_base_score_normalized_to_50",
+            wallet=wallet[:16],
+            reason="mock_data_guard",
+        )
+    else:
+        ml_score = max(0.0, min(97.0, ml_score))
 
-    # Cap ml_score to 50 max when using mock data to prevent score inflation
-    capped_ml_score = min(50.0, ml_score)
+    # Cap based on data source
+    if using_real_data:
+        capped_ml_score = max(0.0, min(97.0, ml_score))
+    else:
+        capped_ml_score = min(50.0, ml_score)
 
     conn = await get_conn()
     try:
