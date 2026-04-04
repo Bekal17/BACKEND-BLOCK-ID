@@ -42,6 +42,9 @@ FEATURE_COLUMNS = [
     "metadata_missing",
     "decimals",
     "supply",
+    "is_mutable",
+    "is_compressed",
+    "has_unverified_creator",
 ]
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
@@ -119,12 +122,26 @@ def main() -> int:
     decimals = pd.to_numeric(df["decimals"], errors="coerce").fillna(0).astype(int)
     supply = pd.to_numeric(df["supply"], errors="coerce").fillna(0).astype(np.int64)
 
+    # New features from DAS API
+    is_mutable_col = pd.to_numeric(
+        df.get("is_mutable", pd.Series([0] * len(df))), errors="coerce"
+    ).fillna(0).astype(int)
+    is_compressed_col = pd.to_numeric(
+        df.get("is_compressed", pd.Series([0] * len(df))), errors="coerce"
+    ).fillna(0).astype(int)
+    has_unverified_creator_col = pd.to_numeric(
+        df.get("has_unverified_creator", pd.Series([0] * len(df))), errors="coerce"
+    ).fillna(0).astype(int)
+
     X = pd.DataFrame({
         "mint_authority_exists": mint_authority_exists,
         "freeze_authority_exists": freeze_authority_exists,
         "metadata_missing": metadata_missing,
         "decimals": decimals,
         "supply": supply,
+        "is_mutable": is_mutable_col,
+        "is_compressed": is_compressed_col,
+        "has_unverified_creator": has_unverified_creator_col,
     })
 
     # Drop rows with any NaN (shouldn't happen after fillna)

@@ -113,6 +113,9 @@ FEATURE_ORDER = [
     "metadata_missing",
     "decimals",
     "supply",
+    "is_mutable",
+    "is_compressed",
+    "has_unverified_creator",
 ]
 
 def _load_valid_wallets_from_cluster(path: Path) -> list[str]:
@@ -151,6 +154,9 @@ async def _get_token_history_real(wallet: str) -> list[dict]:
     if not HELIUS_API_KEY:
         return []
 
+    # Edge case: rate limit — handled by httpx timeout=15
+    # Edge case: no tokens — returns [] and caller falls back to mock
+
     wallet = (wallet or "").strip()
     if not wallet:
         return []
@@ -187,6 +193,15 @@ async def _get_token_history_real(wallet: str) -> list[dict]:
                 return []
 
             items = data["result"].get("items", [])
+            # Edge case: wallet with too many tokens — limit to 100
+            if len(items) > 100:
+                original_count = len(items)
+                items = items[:100]
+                logger.info(
+                    "real_token_fetch_limited",
+                    wallet=wallet[:16],
+                    original_count=original_count,
+                )
             if not items:
                 return []
 
@@ -262,6 +277,9 @@ def _get_token_history_mock(wallet: str) -> list[dict]:
             "metadata_missing": 0,
             "decimals": 9,
             "supply": 0,
+            "is_mutable": 0,
+            "is_compressed": 0,
+            "has_unverified_creator": 0,
         }
     ]
 
@@ -269,13 +287,19 @@ def _get_token_history_mock(wallet: str) -> list[dict]:
 def _feature_vector_from_tokens(tokens: list[dict]) -> np.ndarray:
     """Aggregate token features into one vector (max of binary flags, mean of numeric)."""
     if not tokens:
-        return np.array([[0, 0, 0, 0, 0]], dtype=np.float64)
+        return np.array([[0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.float64)
     mint_max = max(t.get("mint_authority_exists", 0) for t in tokens)
     freeze_max = max(t.get("freeze_authority_exists", 0) for t in tokens)
     meta_max = max(t.get("metadata_missing", 0) for t in tokens)
-    dec_mean = np.mean([t.get("decimals", 0) for t in tokens])
-    supply_mean = np.mean([t.get("supply", 0) for t in tokens])
-    return np.array([[mint_max, freeze_max, meta_max, dec_mean, supply_mean]], dtype=np.float64)
+    dec_mean = np.mean([safe_num(t.get("decimals", 0)) for t in tokens])
+    supply_mean = np.mean([safe_num(t.get("supply", 0)) for t in tokens])
+    mutable_max = max(t.get("is_mutable", 0) for t in tokens)
+    compressed_ratio = sum(1 for t in tokens if t.get("is_compressed", 0)) / max(1, len(tokens))
+    unverified_max = max(t.get("has_unverified_creator", 0) for t in tokens)
+    return np.array(
+        [[mint_max, freeze_max, meta_max, dec_mean, supply_mean, mutable_max, compressed_ratio, unverified_max]],
+        dtype=np.float64,
+    )
 
 
 def _load_reason_penalties(path: Path) -> dict[str, int]:
@@ -420,6 +444,16 @@ async def predict_wallet_score_for_wallet(wallet: str) -> float:
         if tokens:
             using_real_data = True
             logger.info("predict_using_real_token_data", wallet=wallet[:16], token_count=len(tokens))
+            compressed_count = sum(1 for t in tokens if t.get("is_compressed", 0))
+            mutable_count = sum(1 for t in tokens if t.get("is_mutable", 0))
+            logger.info(
+                "predict_token_summary",
+                wallet=wallet[:16],
+                total_tokens=len(tokens),
+                compressed=compressed_count,
+                mutable=mutable_count,
+                using_real_data=True,
+            )
     except Exception as e:
         tokens = []
         logger.debug("real_token_fallback", wallet=wallet[:16], error=str(e))
