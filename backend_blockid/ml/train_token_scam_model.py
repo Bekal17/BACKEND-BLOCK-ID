@@ -158,7 +158,7 @@ def main() -> int:
     )
 
     print("[ml] training model")
-    clf = RandomForestClassifier(n_estimators=N_ESTIMATORS, random_state=RANDOM_STATE)
+    clf = RandomForestClassifier(n_estimators=N_ESTIMATORS, random_state=RANDOM_STATE, )
     clf.fit(X_train, y_train)
 
     y_pred = clf.predict(X_test)
