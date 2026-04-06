@@ -26,6 +26,7 @@ from backend_blockid.database.score_history import log_score_change
 from backend_blockid.config.env import get_helius_api_key
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.database.repositories import insert_wallet_reason
+from backend_blockid.utils.og_fetcher import extract_first_url, fetch_og_metadata
 
 
 logger = get_logger(__name__)
@@ -262,6 +263,24 @@ async def create_post(body: CreatePostRequest):
             await apply_content_penalty(wallet, 1, conn)
             await log_violation(wallet, content[:100], 1, conn)
 
+        # --- Link preview: extract URL and fetch OG metadata ---
+        link_url = None
+        link_title = None
+        link_description = None
+        link_image = None
+
+        detected_url = extract_first_url(content)
+        if detected_url:
+            try:
+                og = await fetch_og_metadata(detected_url)
+                if og:
+                    link_url = og.get("url")
+                    link_title = og.get("title")
+                    link_description = og.get("description")
+                    link_image = og.get("image")
+            except Exception as e:
+                logger.debug("og_fetch_post_error", error=str(e))
+
         image_url: Optional[str] = None
         image_key: Optional[str] = None
 
@@ -281,14 +300,16 @@ async def create_post(body: CreatePostRequest):
             INSERT INTO social_posts (
                 wallet, handle, content, image_url, image_key,
                 post_type, parent_id, is_hidden, hide_reason,
-                trust_score, risk_level
+                trust_score, risk_level,
+                link_url, link_title, link_description, link_image
             )
             VALUES (
                 $1,
                 (SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1),
                 $2, $3, $4,
                 $5, $6, $7, $8,
-                $9, $10
+                $9, $10,
+                $11, $12, $13, $14
             )
             RETURNING id, wallet, handle, content, image_url, post_type,
                       trust_score, risk_level, is_hidden, created_at
@@ -303,6 +324,10 @@ async def create_post(body: CreatePostRequest):
             hide_reason,
             trust_score,
             risk_level,
+            link_url,
+            link_title,
+            link_description,
+            link_image,
         )
         if parent_id:
             await conn.execute(
@@ -514,6 +539,24 @@ async def create_post_with_image(
             await apply_content_penalty(wallet, 1, conn)
             await log_violation(wallet, content[:100], 1, conn)
 
+        # --- Link preview: extract URL and fetch OG metadata ---
+        link_url = None
+        link_title = None
+        link_description = None
+        link_image = None
+
+        detected_url = extract_first_url(content)
+        if detected_url:
+            try:
+                og = await fetch_og_metadata(detected_url)
+                if og:
+                    link_url = og.get("url")
+                    link_title = og.get("title")
+                    link_description = og.get("description")
+                    link_image = og.get("image")
+            except Exception as e:
+                logger.debug("og_fetch_post_error", error=str(e))
+
         ts_row = await conn.fetchrow(
             "SELECT score AS trust_score, risk_level FROM trust_scores WHERE wallet = $1",
             wallet,
@@ -528,14 +571,16 @@ async def create_post_with_image(
             INSERT INTO social_posts (
                 wallet, handle, content, image_url, image_key,
                 post_type, parent_id, is_hidden, hide_reason,
-                trust_score, risk_level
+                trust_score, risk_level,
+                link_url, link_title, link_description, link_image
             )
             VALUES (
                 $1,
                 (SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1),
                 $2, $3, $4,
                 $5, $6, $7, $8,
-                $9, $10
+                $9, $10,
+                $11, $12, $13, $14
             )
             RETURNING id, wallet, handle, content, image_url, post_type,
                       trust_score, risk_level, is_hidden, created_at
@@ -550,6 +595,10 @@ async def create_post_with_image(
             hide_reason,
             trust_score,
             risk_level,
+            link_url,
+            link_title,
+            link_description,
+            link_image,
         )
         if parent_id_val:
             await conn.execute(
