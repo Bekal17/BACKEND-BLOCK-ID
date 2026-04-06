@@ -162,6 +162,15 @@ async def fetch_og_metadata(url: str) -> Optional[Dict[str, Optional[str]]]:
         html = resp.text[:50_000]
         og = _parse_og_tags(html)
 
+        # Convert relative image URL to absolute
+        if og["image"] and not og["image"].startswith("http"):
+            parsed = urlparse(url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            if og["image"].startswith("/"):
+                og["image"] = base + og["image"]
+            else:
+                og["image"] = base + "/" + og["image"]
+
         if not og["title"] and not og["description"]:
             return None
 
