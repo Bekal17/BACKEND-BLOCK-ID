@@ -1584,6 +1584,7 @@ async def get_profile(
             """
             SELECT sp.id, sp.wallet, sp.handle, sp.content, sp.image_url, sp.post_type,
                    sp.reply_count, sp.like_count, sp.trust_score, sp.risk_level,
+                   sp.link_url, sp.link_title, sp.link_description, sp.link_image,
                    sp.is_hidden, sp.created_at,
                    COALESCE(sub.plan, 'free') AS plan
             FROM social_posts sp
@@ -2210,6 +2211,7 @@ async def get_wallet_posts(
                     sp.image_url, sp.post_type, sp.parent_id,
                     sp.reply_count, sp.like_count, sp.repost_count,
                     sp.is_hidden, COALESCE(ts.score, sp.trust_score) AS trust_score, sp.risk_level,
+                    sp.link_url, sp.link_title, sp.link_description, sp.link_image,
                     sp.created_at, sp.is_repost, sp.repost_of,
                     sp.quote_content,
                     orig.wallet AS original_wallet,
