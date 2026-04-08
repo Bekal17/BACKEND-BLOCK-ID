@@ -68,9 +68,25 @@ async def _get_prior_risk(conn: Any, wallet: str) -> float:
 
 
 async def _get_reason_penalty(conn: Any, wallet: str) -> float:
-    rows = await conn.fetch(
-        "SELECT weight, confidence_score FROM wallet_reasons WHERE wallet = $1",
+    """
+    Only count reasons that were added AFTER the last score update.
+    This prevents the same reasons from compounding on every recalculate.
+    Already-existing reasons are already baked into the prior dynamic_risk.
+    """
+    # Get last_updated timestamp from trust_scores
+    ts_row = await conn.fetchrow(
+        "SELECT last_updated FROM trust_scores WHERE wallet = $1 LIMIT 1",
         wallet,
+    )
+    last_updated = 0
+    if ts_row and ts_row["last_updated"] is not None:
+        last_updated = int(ts_row["last_updated"])
+
+    # Only fetch reasons created AFTER last score update
+    rows = await conn.fetch(
+        "SELECT weight, confidence_score FROM wallet_reasons WHERE wallet = $1 AND created_at > $2",
+        wallet,
+        last_updated,
     )
     if not rows:
         return 0.0
@@ -79,7 +95,8 @@ async def _get_reason_penalty(conn: Any, wallet: str) -> float:
         w = float(row["weight"] or 0)
         c = float(row["confidence_score"] if row["confidence_score"] is not None else 1.0)
         total += w * c
-    return total
+    # Cap: max +20 boost, max -30 penalty per recalculate
+    return max(-30.0, min(20.0, total))
 
 
 async def _get_neighbors(wallet: str, max_hop: int = 2) -> dict[str, int]:
@@ -201,7 +218,9 @@ async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
             days_inactive=days_inactive,
         )
 
-        activity_boost = 2.0 * tx_count_24h
+        # Only +1 score if wallet has 100+ transactions in last 24h
+        # This prevents activity_boost from compounding on every recalculate
+        activity_boost = 1.0 if tx_count_24h >= 100 else 0.0
 
         dynamic_risk = updated + graph_penalty + activity_boost
         dynamic_risk = max(0.0, min(100.0, dynamic_risk))
@@ -230,7 +249,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         dynamic_risk = details["dynamic_risk"]
         reason_penalty = await _get_reason_penalty(conn, wallet)
         final_score = (dynamic_risk + reason_penalty)
-        final_score = max(0.0, min(100.0, final_score))
+        final_score = max(0.0, min(97.0, final_score))
         risk_level = score_to_risk(int(round(final_score)))
 
         # Fetch score_before for history (before any UPDATE)
