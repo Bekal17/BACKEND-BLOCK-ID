@@ -166,7 +166,7 @@ async def resolve_handle(handle: str):
             handle,
         )
         if not row:
-            raise HTTPException(status_code=404, detail="Handle not found")
+            raise HTTPException(status_code=404, detail="Handle, SNS or DNS not found")
 
         wallet = row["owner_wallet"]
 
