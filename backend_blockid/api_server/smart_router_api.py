@@ -141,6 +141,14 @@ class SwapRequest(BaseModel):
     slippage_bps: int = 50  # 0.5% default
 
 
+class SwapQuoteRequest(BaseModel):
+    sender_wallet: str
+    amount: float
+    input_token: str  # e.g. "SOL"
+    output_token: str  # e.g. "USDC"
+    slippage_bps: int = 50  # 0.5% default
+
+
 class ExecuteRequest(BaseModel):
     signed_transaction: str
     request_id: str
@@ -321,6 +329,67 @@ async def get_quote(req: QuoteRequest):
     }
 
 
+@router.post("/swap-quote")
+async def swap_quote(req: SwapQuoteRequest):
+    """
+    Get a swap quote without handle resolution.
+    For self-swap operations (token A → token B in same wallet).
+    Calls Jupiter /order without taker (quote-only mode).
+    """
+    input_token = req.input_token.upper()
+    output_token = req.output_token.upper()
+
+    if input_token not in SUPPORTED_TOKENS:
+        raise HTTPException(status_code=400, detail=f"Unsupported input token: {req.input_token}")
+    if output_token not in SUPPORTED_TOKENS:
+        raise HTTPException(status_code=400, detail=f"Unsupported output token: {req.output_token}")
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    if req.slippage_bps < 0:
+        raise HTTPException(status_code=400, detail="slippage_bps must be non-negative")
+
+    input_info = SUPPORTED_TOKENS[input_token]
+    output_info = SUPPORTED_TOKENS[output_token]
+    amount_raw = int(req.amount * (10 ** input_info["decimals"]))
+
+    headers = {}
+    if JUPITER_API_KEY:
+        headers["x-api-key"] = JUPITER_API_KEY
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                JUPITER_ORDER_URL,
+                params={
+                    "inputMint": input_info["mint"],
+                    "outputMint": output_info["mint"],
+                    "amount": str(amount_raw),
+                    "slippageBps": str(req.slippage_bps),
+                },
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                error_detail = resp.text[:300] if resp.text else "Unknown error"
+                raise HTTPException(status_code=502, detail=f"Jupiter order failed: {error_detail}")
+            order_data = resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Jupiter timeout")
+
+    out_raw = int(order_data.get("outAmount", 0))
+    output_amount = out_raw / (10 ** output_info["decimals"])
+    price_impact = float(order_data.get("priceImpactPct", 0))
+
+    return {
+        "input_amount": req.amount,
+        "input_token": input_token,
+        "output_amount": round(output_amount, 6),
+        "output_token": output_token,
+        "price_impact_pct": round(price_impact, 4),
+        "router": order_data.get("router"),
+        "slippage_bps": req.slippage_bps,
+    }
+
+
 # ── 3. Assembled swap tx (v2 /order) + managed execute ──
 @router.post("/swap")
 async def prepare_swap(req: SwapRequest):
@@ -344,6 +413,11 @@ async def prepare_swap(req: SwapRequest):
     if not input_info or not output_info:
         raise HTTPException(status_code=400, detail="Unsupported token")
 
+    recipient_wallet = (req.recipient_wallet or "").strip()
+    is_self_swap = (not recipient_wallet) or (recipient_wallet == req.sender_wallet)
+    taker_wallet = req.sender_wallet if is_self_swap else recipient_wallet
+    recipient_wallet_effective = req.sender_wallet if is_self_swap else recipient_wallet
+
     amount_raw = int(req.amount * (10 ** input_info["decimals"]))
     headers = {}
     if JUPITER_API_KEY:
@@ -359,7 +433,7 @@ async def prepare_swap(req: SwapRequest):
                     "outputMint": output_info["mint"],
                     "amount": str(amount_raw),
                     "slippageBps": str(req.slippage_bps),
-                    "taker": req.sender_wallet,
+                    "taker": taker_wallet,
                 },
                 headers=headers,
             )
@@ -384,7 +458,8 @@ async def prepare_swap(req: SwapRequest):
         "input_amount": req.amount,
         "output_token": req.output_token,
         "output_amount": out_raw / (10 ** output_info["decimals"]),
-        "recipient_wallet": req.recipient_wallet,
+        "recipient_wallet": recipient_wallet_effective,
+        "is_self_swap": is_self_swap,
         "router": order_data.get("router", "unknown"),
         "mode": order_data.get("mode", "unknown"),
         "fee_bps": order_data.get("feeBps", 0),
