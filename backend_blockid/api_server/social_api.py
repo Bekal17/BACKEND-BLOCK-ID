@@ -637,6 +637,11 @@ async def get_following_feed(
                 orig.wallet AS original_wallet,
                 orig.handle AS original_handle,
                 orig.content AS original_content,
+                orig.image_url AS original_image_url,
+                orig.link_url AS original_link_url,
+                orig.link_title AS original_link_title,
+                orig.link_description AS original_link_description,
+                orig.link_image AS original_link_image,
                 orig.trust_score AS original_trust_score,
                 orig.created_at AS original_created_at,
                 sp_orig.avatar_url AS original_avatar_url,
@@ -730,6 +735,11 @@ async def get_following_feed(
                     "avatar_type": post.pop("original_avatar_type", None),
                     "avatar_is_animated": post.pop("original_avatar_is_animated", None),
                     "plan": post.pop("original_plan", "free"),
+                    "image_url": post.pop("original_image_url", None),
+                    "link_url": post.pop("original_link_url", None),
+                    "link_title": post.pop("original_link_title", None),
+                    "link_description": post.pop("original_link_description", None),
+                    "link_image": post.pop("original_link_image", None),
                 }
             else:
                 post.pop("original_wallet", None)
@@ -741,6 +751,11 @@ async def get_following_feed(
                 post.pop("original_avatar_type", None)
                 post.pop("original_avatar_is_animated", None)
                 post.pop("original_plan", None)
+                post.pop("original_image_url", None)
+                post.pop("original_link_url", None)
+                post.pop("original_link_title", None)
+                post.pop("original_link_description", None)
+                post.pop("original_link_image", None)
                 post["original_post"] = None
 
             post["top_reply"] = top_replies_map.get(post.get("id"))
@@ -780,6 +795,11 @@ async def get_explore_feed(
                     orig.wallet AS original_wallet,
                     orig.handle AS original_handle,
                     orig.content AS original_content,
+                    orig.image_url AS original_image_url,
+                    orig.link_url AS original_link_url,
+                    orig.link_title AS original_link_title,
+                    orig.link_description AS original_link_description,
+                    orig.link_image AS original_link_image,
                     COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                     orig.created_at AS original_created_at,
                     sp_orig.avatar_url AS original_avatar_url,
@@ -846,6 +866,11 @@ async def get_explore_feed(
                         "avatar_type": post.pop("original_avatar_type", None),
                         "avatar_is_animated": post.pop("original_avatar_is_animated", None),
                         "plan": post.pop("original_plan", "free"),
+                        "image_url": post.pop("original_image_url", None),
+                        "link_url": post.pop("original_link_url", None),
+                        "link_title": post.pop("original_link_title", None),
+                        "link_description": post.pop("original_link_description", None),
+                        "link_image": post.pop("original_link_image", None),
                     }
                 else:
                     post.pop("original_wallet", None)
@@ -857,6 +882,11 @@ async def get_explore_feed(
                     post.pop("original_avatar_type", None)
                     post.pop("original_avatar_is_animated", None)
                     post.pop("original_plan", None)
+                    post.pop("original_image_url", None)
+                    post.pop("original_link_url", None)
+                    post.pop("original_link_title", None)
+                    post.pop("original_link_description", None)
+                    post.pop("original_link_image", None)
                     post["original_post"] = None
 
                 posts.append(post)
@@ -2261,16 +2291,26 @@ async def get_wallet_posts(
                     orig.wallet AS original_wallet,
                     orig.handle AS original_handle,
                     orig.content AS original_content,
+                    orig.image_url AS original_image_url,
+                    orig.link_url AS original_link_url,
+                    orig.link_title AS original_link_title,
+                    orig.link_description AS original_link_description,
+                    orig.link_image AS original_link_image,
                     COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                     orig.created_at AS original_created_at,
                     COALESCE(sub.plan, 'free') AS plan,
                     COALESCE(sub_orig.plan, 'free') AS original_plan,
+                    sp_orig.avatar_url AS original_avatar_url,
+                    sp_orig.avatar_type AS original_avatar_type,
+                    sp_orig.avatar_is_animated AS original_avatar_is_animated,
                     sp_prof.avatar_url,
                     sp_prof.avatar_type,
                     sp_prof.avatar_is_animated
                 FROM social_posts sp
                 LEFT JOIN social_posts orig
                     ON orig.id = sp.repost_of
+                LEFT JOIN social_profiles sp_orig
+                    ON sp_orig.wallet = orig.wallet
                 LEFT JOIN social_profiles sp_prof
                     ON sp_prof.wallet = sp.wallet
                 LEFT JOIN trust_scores ts
@@ -2308,17 +2348,33 @@ async def get_wallet_posts(
                         "wallet": post.pop("original_wallet", None),
                         "handle": post.pop("original_handle", None),
                         "content": post.pop("original_content", None),
+                        "image_url": post.pop("original_image_url", None),
                         "trust_score": post.pop("original_trust_score", None),
                         "created_at": post.pop("original_created_at", None),
                         "plan": post.pop("original_plan", "free"),
+                        "avatar_url": post.pop("original_avatar_url", None),
+                        "avatar_type": post.pop("original_avatar_type", None),
+                        "avatar_is_animated": post.pop("original_avatar_is_animated", None),
+                        "link_url": post.pop("original_link_url", None),
+                        "link_title": post.pop("original_link_title", None),
+                        "link_description": post.pop("original_link_description", None),
+                        "link_image": post.pop("original_link_image", None),
                     }
                 else:
                     post.pop("original_wallet", None)
                     post.pop("original_handle", None)
                     post.pop("original_content", None)
+                    post.pop("original_image_url", None)
                     post.pop("original_trust_score", None)
                     post.pop("original_created_at", None)
                     post.pop("original_plan", None)
+                    post.pop("original_avatar_url", None)
+                    post.pop("original_avatar_type", None)
+                    post.pop("original_avatar_is_animated", None)
+                    post.pop("original_link_url", None)
+                    post.pop("original_link_title", None)
+                    post.pop("original_link_description", None)
+                    post.pop("original_link_image", None)
                     post["original_post"] = None
 
                 posts.append(post)
@@ -2544,6 +2600,10 @@ async def get_bookmarks(wallet: str):
                 orig.handle AS original_handle,
                 orig.content AS original_content,
                 orig.image_url AS original_image_url,
+                orig.link_url AS original_link_url,
+                orig.link_title AS original_link_title,
+                orig.link_description AS original_link_description,
+                orig.link_image AS original_link_image,
                 COALESCE(ts_orig.score, orig.trust_score) AS original_trust_score,
                 orig.created_at AS original_created_at,
                 COALESCE(sub.plan, 'free') AS plan,
@@ -2617,6 +2677,10 @@ async def get_bookmarks(wallet: str):
                     if r.get("original_created_at")
                     else None,
                     "plan": r.get("original_plan", "free"),
+                    "link_url": r.get("original_link_url"),
+                    "link_title": r.get("original_link_title"),
+                    "link_description": r.get("original_link_description"),
+                    "link_image": r.get("original_link_image"),
                 }
             else:
                 post["original_post"] = None
