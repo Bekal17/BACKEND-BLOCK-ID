@@ -2177,21 +2177,57 @@ async def delete_post(
         if post["wallet"] != wallet:
             raise HTTPException(status_code=403, detail="Not authorized to delete this post")
 
-        # Delete related data first
-        await conn.execute("DELETE FROM social_likes WHERE post_id = $1", post_id)
-        await conn.execute("DELETE FROM post_bookmarks WHERE post_id = $1", post_id)
+        # Delete likes/bookmarks for all descendants (unlimited depth), then the post itself.
         await conn.execute(
-            "DELETE FROM social_posts WHERE parent_id IN (SELECT id FROM social_posts WHERE parent_id = $1)",
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM social_posts WHERE parent_id = $1
+                UNION ALL
+                SELECT sp.id
+                FROM social_posts sp
+                JOIN descendants d ON sp.parent_id = d.id
+            )
+            DELETE FROM social_likes WHERE post_id IN (SELECT id FROM descendants)
+            """,
             post_id,
         )
-        await conn.execute("DELETE FROM social_posts WHERE parent_id = $1", post_id)
-
-        # Delete the post
+        await conn.execute("DELETE FROM social_likes WHERE post_id = $1", post_id)
         await conn.execute(
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM social_posts WHERE parent_id = $1
+                UNION ALL
+                SELECT sp.id
+                FROM social_posts sp
+                JOIN descendants d ON sp.parent_id = d.id
+            )
+            DELETE FROM post_bookmarks WHERE post_id IN (SELECT id FROM descendants)
+            """,
+            post_id,
+        )
+        await conn.execute("DELETE FROM post_bookmarks WHERE post_id = $1", post_id)
+
+        # Delete all descendant replies recursively, then delete the post itself.
+        await conn.execute(
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM social_posts WHERE parent_id = $1
+                UNION ALL
+                SELECT sp.id
+                FROM social_posts sp
+                JOIN descendants d ON sp.parent_id = d.id
+            )
+            DELETE FROM social_posts WHERE id IN (SELECT id FROM descendants)
+            """,
+            post_id,
+        )
+        result = await conn.execute(
             "DELETE FROM social_posts WHERE id = $1 AND wallet = $2",
             post_id,
             wallet,
         )
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="Post not found")
 
         logger.info("post_deleted", post_id=post_id, wallet=wallet[:16])
         return {"success": True, "message": "Post deleted successfully"}
