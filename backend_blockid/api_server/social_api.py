@@ -2180,10 +2180,18 @@ async def delete_post(
         # Delete related data first
         await conn.execute("DELETE FROM social_likes WHERE post_id = $1", post_id)
         await conn.execute("DELETE FROM post_bookmarks WHERE post_id = $1", post_id)
+        await conn.execute(
+            "DELETE FROM social_posts WHERE parent_id IN (SELECT id FROM social_posts WHERE parent_id = $1)",
+            post_id,
+        )
         await conn.execute("DELETE FROM social_posts WHERE parent_id = $1", post_id)
 
         # Delete the post
-        await conn.execute("DELETE FROM social_posts WHERE id = $1", post_id)
+        await conn.execute(
+            "DELETE FROM social_posts WHERE id = $1 AND wallet = $2",
+            post_id,
+            wallet,
+        )
 
         logger.info("post_deleted", post_id=post_id, wallet=wallet[:16])
         return {"success": True, "message": "Post deleted successfully"}
