@@ -2614,6 +2614,49 @@ async def get_bookmark_ids(wallet: str):
         await release_conn(conn)
 
 
+@router.get("/liked/{wallet}/ids")
+async def get_liked_ids(wallet: str):
+    """Get post IDs that this wallet has liked."""
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT post_id FROM social_likes WHERE wallet = $1",
+            wallet,
+        )
+        return {
+            "wallet": wallet,
+            "post_ids": [r["post_id"] for r in rows],
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/reposted/{wallet}/ids")
+async def get_reposted_ids(wallet: str):
+    """Get original post IDs that this wallet has reposted."""
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT repost_of FROM social_posts "
+            "WHERE wallet = $1 AND is_repost = TRUE AND repost_of IS NOT NULL",
+            wallet,
+        )
+        return {
+            "wallet": wallet,
+            "post_ids": [r["repost_of"] for r in rows],
+        }
+    finally:
+        await release_conn(conn)
+
+
 HELIUS_BASE = (os.getenv("HELIUS_BASE") or "https://api.helius.xyz").rstrip("/")
 ACTIVITY_FEED_MAX_WALLETS_PARALLEL = 3
 ACTIVITY_FEED_TX_PER_WALLET = 10
