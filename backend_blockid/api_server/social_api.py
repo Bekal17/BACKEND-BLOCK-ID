@@ -1181,6 +1181,95 @@ async def repost_post(body: Dict[str, Any]):
         await release_conn(conn)
 
 
+@router.delete("/repost")
+async def unrepost_post(body: Dict[str, Any]):
+    """Remove a repost. Deletes the repost record and decrements repost_count on original."""
+    wallet = (body.get("wallet") or "").strip()
+    post_id = body.get("post_id")
+    signature = body.get("signature", "")
+    session_token = body.get("session_token", "")
+
+    if not wallet or not post_id:
+        raise HTTPException(status_code=400, detail="wallet and post_id required")
+
+    bypass = BLOCKID_ENV == "DEV" and signature in DEVNET_BYPASS
+    if not bypass:
+        if BLOCKID_ENV != "DEV":
+            if not session_token:
+                raise HTTPException(401, detail="session_token required")
+            verified_wallet = verify_session_token(session_token)
+            if verified_wallet != wallet:
+                raise HTTPException(401, detail="Session wallet mismatch")
+        await _require_identity_nft(wallet)
+
+    conn = await get_conn()
+    try:
+        repost_row = await conn.fetchrow(
+            "SELECT id FROM social_posts WHERE wallet = $1 AND repost_of = $2 AND is_repost = TRUE",
+            wallet,
+            int(post_id),
+        )
+        if not repost_row:
+            raise HTTPException(status_code=404, detail="Repost not found")
+
+        repost_id = repost_row["id"]
+
+        await conn.execute(
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM social_posts WHERE parent_id = $1
+                UNION ALL
+                SELECT sp.id
+                FROM social_posts sp
+                JOIN descendants d ON sp.parent_id = d.id
+            )
+            DELETE FROM social_likes WHERE post_id IN (SELECT id FROM descendants)
+            """,
+            repost_id,
+        )
+        await conn.execute("DELETE FROM social_likes WHERE post_id = $1", repost_id)
+        await conn.execute(
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM social_posts WHERE parent_id = $1
+                UNION ALL
+                SELECT sp.id
+                FROM social_posts sp
+                JOIN descendants d ON sp.parent_id = d.id
+            )
+            DELETE FROM post_bookmarks WHERE post_id IN (SELECT id FROM descendants)
+            """,
+            repost_id,
+        )
+        await conn.execute("DELETE FROM post_bookmarks WHERE post_id = $1", repost_id)
+        await conn.execute(
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM social_posts WHERE parent_id = $1
+                UNION ALL
+                SELECT sp.id
+                FROM social_posts sp
+                JOIN descendants d ON sp.parent_id = d.id
+            )
+            DELETE FROM social_posts WHERE id IN (SELECT id FROM descendants)
+            """,
+            repost_id,
+        )
+        await conn.execute(
+            "DELETE FROM social_posts WHERE id = $1 AND wallet = $2 AND is_repost = TRUE",
+            repost_id,
+            wallet,
+        )
+        await conn.execute(
+            "UPDATE social_posts SET repost_count = GREATEST(repost_count - 1, 0) WHERE id = $1",
+            int(post_id),
+        )
+
+        return {"success": True, "message": "Repost removed"}
+    finally:
+        await release_conn(conn)
+
+
 @router.post("/flag")
 async def flag_post(body: Dict[str, Any]):
     wallet = body.get("wallet", "").strip()
