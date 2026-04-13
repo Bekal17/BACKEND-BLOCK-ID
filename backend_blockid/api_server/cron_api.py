@@ -29,23 +29,12 @@ async def run_batch_recalculate():
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
 
     try:
-        # Get active wallets
-        try:
-            rows = await pool.fetch("""
-                SELECT DISTINCT wallet FROM wallet_meta
-                WHERE last_login IS NOT NULL
-                AND last_login > NOW() - INTERVAL '7 days'
-                ORDER BY wallet
-            """)
-        except Exception:
-            rows = await pool.fetch("""
-                SELECT DISTINCT wallet FROM wallet_meta
-                WHERE updated_at > NOW() - INTERVAL '7 days'
-                UNION
-                SELECT DISTINCT wallet FROM social_posts
-                WHERE created_at > NOW() - INTERVAL '7 days'
-                ORDER BY wallet
-            """)
+        # Get active wallets from social activity only
+        rows = await pool.fetch("""
+            SELECT DISTINCT wallet FROM social_posts
+            WHERE created_at > NOW() - INTERVAL '7 days'
+            ORDER BY wallet
+        """)
 
         wallets = [row["wallet"] for row in rows]
         total = len(wallets)
