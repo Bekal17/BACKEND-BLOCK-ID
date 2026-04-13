@@ -44,6 +44,7 @@ from backend_blockid.api_server.helius_api import router as helius_router
 from backend_blockid.api_server.monitoring_api import router as monitoring_router
 from backend_blockid.api_server.transaction_api import router as transaction_router
 from backend_blockid.api_server.billing_api import router as billing_router
+from backend_blockid.api_server.cron_api import router as cron_router
 from backend_blockid.api_server.api_key_api import router as api_key_router
 from backend_blockid.api_server.b2b_api import router as b2b_router
 from backend_blockid.api_server.usage_api import router as usage_router
@@ -299,6 +300,7 @@ app.include_router(profile_router)
 app.include_router(openfort_router)
 app.include_router(subscription_router)
 app.include_router(nft_mint_router)
+app.include_router(cron_router)
 
 
 @app.post("/wallet/recalculate/{wallet}")
