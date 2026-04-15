@@ -24,6 +24,10 @@ router = APIRouter(prefix="/sage", tags=["sage"])
 SAGE_HANDLE = "sage"
 SAGE_WALLET_FALLBACK = os.getenv("SAGE_WALLET", "")
 INTERNAL_BASE_URL = os.getenv("INTERNAL_API_BASE", "http://localhost:8000")
+BACKEND_URL = os.environ.get(
+    "BACKEND_URL",
+    "https://blockid-backend-production.up.railway.app",
+)
 
 
 class SageProcessRequest(BaseModel):
@@ -73,7 +77,7 @@ async def _get_sage_identity() -> tuple[str, str]:
 
 
 async def _fetch_intent(author_wallet: str, content: str) -> dict[str, Any]:
-    url = f"{INTERNAL_BASE_URL.rstrip('/')}/router/parse"
+    url = f"{BACKEND_URL.rstrip('/')}/router/parse"
     payload = {"wallet": author_wallet, "input": content}
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(url, json=payload)
