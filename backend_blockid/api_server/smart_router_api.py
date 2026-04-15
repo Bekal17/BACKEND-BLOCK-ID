@@ -74,6 +74,23 @@ RULES:
 - If intent is "swap", there is no handle, but there must be input_token and output_token.
 - For "send" intent: if user says dollar/dolar/usd, map token to USDC.
 
+CASHTAG NOTATION:
+Users may specify tokens using the $TICKER cashtag notation. When you see a $TICKER pattern:
+- Strip the $ prefix — return just the ticker symbol in the "token" or "output_token" field
+- Example: "$SOL" → token = "SOL"
+- Example: "$USDC" → token = "USDC"
+- The amount before a cashtag refers to USD value if the token is a stablecoin, or token quantity otherwise
+
+Additional few-shot examples:
+Input: "send $10 $USDC to @bee17"
+Output: {"intent": "send", "handle": "@bee17", "handle_resolved": null, "amount": 10, "token": "USDC", "output_token": null, "confidence": 0.98, "raw_input": "send $10 $USDC to @bee17", "needs_more_info": false}
+
+Input: "swap $50 $BONK ke $JUP"
+Output: {"intent": "swap", "handle": null, "handle_resolved": null, "amount": 50, "token": "BONK", "output_token": "JUP", "confidence": 0.96, "raw_input": "swap $50 $BONK ke $JUP", "needs_more_info": false}
+
+Input: "kirim 0.5 $SOL ke @ana"
+Output: {"intent": "send", "handle": "@ana", "handle_resolved": null, "amount": 0.5, "token": "SOL", "output_token": null, "confidence": 0.97, "raw_input": "kirim 0.5 $SOL ke @ana", "needs_more_info": false}
+
 RESPOND WITH ONLY valid JSON, no markdown, no explanation:
 {
   "intent": "send" | "check" | "balance" | "swap" | "unknown",
