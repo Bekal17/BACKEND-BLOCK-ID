@@ -86,29 +86,25 @@ async def _fetch_intent(author_wallet: str, content: str) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
 
 
-async def _fetch_resolved_handle(handle_clean: str) -> tuple[str, str]:
-    if not handle_clean:
-        return "unknown", "N/A"
-
-    # Prefer requested social endpoint; fallback to smart router resolve.
-    urls = [
-        f"{INTERNAL_BASE_URL.rstrip('/')}/social/resolve/{handle_clean}",
-        f"{INTERNAL_BASE_URL.rstrip('/')}/router/resolve/{handle_clean}",
-    ]
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for url in urls:
-            try:
-                resp = await client.get(url)
-                if resp.status_code >= 400:
-                    continue
-                data = resp.json() if resp.text else {}
-                trust = data.get("trust_score") if isinstance(data, dict) else None
-                handle = data.get("handle") if isinstance(data, dict) else None
-                trust_label = f"{float(trust):.1f}" if trust is not None else "N/A"
-                return handle or handle_clean, trust_label
-            except Exception:
-                continue
-    return handle_clean, "N/A"
+async def _get_handle_trust(handle: str) -> str:
+    handle_clean = handle.lstrip("@").lower()
+    conn = await get_conn()
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT ts.final_score
+            FROM handle_registry hr
+            JOIN trust_scores ts ON ts.wallet = hr.owner_wallet
+            WHERE LOWER(hr.handle) = $1
+            LIMIT 1
+            """,
+            handle_clean,
+        )
+        if row and row["final_score"]:
+            return str(round(row["final_score"]))
+        return "N/A"
+    finally:
+        await release_conn(conn)
 
 
 async def _build_intent_reply(intent_data: dict[str, Any]) -> str | None:
@@ -133,7 +129,8 @@ async def _build_intent_reply(intent_data: dict[str, Any]) -> str | None:
     url = f"https://app.blockidscore.fun/router?{urlencode(params)}"
 
     if intent == "send":
-        recipient_handle, trust_score = await _fetch_resolved_handle(handle_clean)
+        trust_score = await _get_handle_trust(handle_clean)
+        recipient_handle = handle_clean or "unknown"
         return (
             "✓ Ready to execute\n\n"
             f"Send: {amount} {token}"
