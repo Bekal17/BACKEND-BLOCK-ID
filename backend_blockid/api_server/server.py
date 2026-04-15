@@ -70,6 +70,7 @@ from backend_blockid.api_server.stats_api import router as stats_router
 from backend_blockid.api_server.subscription_api import router as subscription_router
 from backend_blockid.api_server.nft_mint_api import ensure_tables, router as nft_mint_router
 from backend_blockid.api_server.smart_router_api import router as smart_router_router
+from backend_blockid.api_server.sage_api import router as sage_router
 from backend_blockid.database.pg_connection import init_db, get_conn, release_conn
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
@@ -190,6 +191,8 @@ async def lifespan(app: FastAPI):
     await ensure_badge_columns()
     await ensure_tables()
     asyncio.create_task(start_hourly_flush(app))
+    from backend_blockid.api_server.sage_worker import start_sage_worker
+    asyncio.create_task(start_sage_worker())
 
     from backend_blockid.config import ensure_production_safe
 
@@ -301,6 +304,7 @@ app.include_router(openfort_router)
 app.include_router(subscription_router)
 app.include_router(nft_mint_router)
 app.include_router(cron_router)
+app.include_router(sage_router)
 
 
 @app.post("/wallet/recalculate/{wallet}")
