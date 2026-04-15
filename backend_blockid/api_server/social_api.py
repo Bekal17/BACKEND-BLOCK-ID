@@ -2746,6 +2746,72 @@ async def get_reposted_ids(wallet: str):
         await release_conn(conn)
 
 
+@router.get("/cashtag/{ticker}/stats")
+async def get_cashtag_stats(ticker: str):
+    """
+    Returns stats for a cashtag token mention in social posts.
+    Used by TokenPreviewSheet to show trusted wallet discussions.
+    """
+    ticker_clean = ticker.upper().lstrip("$")
+    if not ticker_clean or len(ticker_clean) > 10:
+        raise HTTPException(status_code=400, detail="Invalid ticker")
+
+    conn = await get_conn()
+    try:
+        pattern = f"%${ticker_clean}%"
+
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT
+                sp.wallet,
+                sp.handle,
+                ts.final_score,
+                sp2.avatar_url,
+                sp2.avatar_type,
+                sp2.avatar_is_animated
+            FROM social_posts sp
+            JOIN trust_scores ts ON sp.wallet = ts.wallet
+            LEFT JOIN social_profiles sp2 ON sp2.wallet = sp.wallet
+            WHERE sp.content ILIKE $1
+              AND ts.final_score > 50
+            ORDER BY ts.final_score DESC
+            LIMIT 10
+            """,
+            pattern,
+        )
+
+        post_count_row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) as count
+            FROM social_posts
+            WHERE content ILIKE $1
+              AND created_at > NOW() - INTERVAL '24 hours'
+            """,
+            pattern,
+        )
+
+        wallets = [
+            {
+                "wallet": r["wallet"],
+                "handle": r["handle"],
+                "trust_score": round(r["final_score"], 1),
+                "avatar_url": r["avatar_url"],
+                "avatar_type": r["avatar_type"],
+                "avatar_is_animated": r["avatar_is_animated"],
+            }
+            for r in rows
+        ]
+
+        return {
+            "ticker": ticker_clean,
+            "trusted_wallet_count": len(wallets),
+            "post_count_today": post_count_row["count"] if post_count_row else 0,
+            "wallets": wallets,
+        }
+    finally:
+        await release_conn(conn)
+
+
 HELIUS_BASE = (os.getenv("HELIUS_BASE") or "https://api.helius.xyz").rstrip("/")
 ACTIVITY_FEED_MAX_WALLETS_PARALLEL = 3
 ACTIVITY_FEED_TX_PER_WALLET = 10
