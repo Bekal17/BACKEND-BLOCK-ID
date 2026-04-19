@@ -2812,6 +2812,41 @@ async def get_cashtag_stats(ticker: str):
         await release_conn(conn)
 
 
+@router.get("/tokens/list")
+async def get_token_list():
+    """Proxy Jupiter verified token list to avoid CORS."""
+    jupiter_api_key = os.environ.get("JUPITER_API_KEY", "")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                "https://api.jup.ag/tokens/v2/tag?query=verified",
+                headers={"x-api-key": jupiter_api_key} if jupiter_api_key else {},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return []
+    except Exception:
+        return []
+
+
+@router.get("/tokens/search/{ticker}")
+async def search_token(ticker: str):
+    """Proxy Jupiter token search to avoid CORS."""
+    ticker_clean = ticker.upper().lstrip("$")[:10]
+    jupiter_api_key = os.environ.get("JUPITER_API_KEY", "")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://api.jup.ag/tokens/v2/search?query={ticker_clean}",
+                headers={"x-api-key": jupiter_api_key} if jupiter_api_key else {},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return []
+    except Exception:
+        return []
+
+
 HELIUS_BASE = (os.getenv("HELIUS_BASE") or "https://api.helius.xyz").rstrip("/")
 ACTIVITY_FEED_MAX_WALLETS_PARALLEL = 3
 ACTIVITY_FEED_TX_PER_WALLET = 10
