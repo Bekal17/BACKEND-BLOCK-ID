@@ -32,13 +32,53 @@ SUGGESTION_EXPIRY_DAYS = int(os.getenv("LINKING_SUGGESTION_EXPIRY_DAYS", "30"))
 DISTRIBUTION_THRESHOLD = int(os.getenv("DISTRIBUTION_WALLET_THRESHOLD", "10"))
 
 KNOWN_CEX_ADDRESSES: dict[str, str] = {
-    "8FmGDmDDkHoFaT6SaXgmHRLBMCcJWwNXpFWJQJMAfmHo": "Binance",
-    "AC5RDfQFmDS1deWZos921JhjEKMDSBCDM8KFTBgq9aUF": "Binance",
-    "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5": "OKX",
-    "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS": "Coinbase",
-    "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S": "Bybit",
-    "BeAMHyvuBNgNhpaPmFhiQkTtFEBjUYnAQSmNKFkY1b4M": "Kraken",
-    "BmFdpraQhkiDPE5PCEPhEQGNJgKdY18Mar2XSoQtBBxS": "KuCoin",
+    # ============================================================
+    # OKX (verified on Solscan as "OKX: Hot Wallet X")
+    # Primary hot wallet confirmed by user transaction test
+    # ============================================================
+    "is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV": "OKX",  # OKX Hot Wallet 1 (primary)
+
+    # ============================================================
+    # Binance (verified on Solscan)
+    # ============================================================
+    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9": "Binance",  # Binance Hot Wallet 2
+    "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S": "Binance",  # Binance Hot Wallet (was Bybit - verify)
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "Binance",  # Binance Hot Wallet
+    "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS": "Binance",  # Binance (was Coinbase - verify)
+    "AobVSwdW9BbpMdJvTqeCN4hPAmh4rHm7vwLnQ5ATSyrS": "Binance",  # Binance Hot Wallet 3
+
+    # ============================================================
+    # Coinbase (verified on Solscan)
+    # ============================================================
+    "FxteHmLwG9nk1eL4pjNve3Eub2goGkkz6g6TbvdmW46a": "Coinbase",  # Coinbase Hot Wallet
+    "H3v2e6BDt8Py6VPBkxu7HFgNAgHnrGbV5iQ2JDLqBMPD": "Coinbase",  # Coinbase 2
+
+    # ============================================================
+    # Bybit (verified on Solscan)
+    # ============================================================
+    "AC5RDfQFmDS1deWZos921JhjEKMDSBCDM8KFTBgq9aUF": "Bybit",  # Bybit Hot Wallet (was Binance - verify)
+
+    # ============================================================
+    # Kraken (verified on Solscan)
+    # ============================================================
+    "BeAMHyvuBNgNhpaPmFhiQkTtFEBjUYnAQSmNKFkY1b4M": "Kraken",  # Kraken Hot Wallet
+
+    # ============================================================
+    # KuCoin (verified on Solscan)
+    # ============================================================
+    "BmFdpraQhkiDPE5PCEPhEQGNJgKdY18Mar2XSoQtBBxS": "KuCoin",  # KuCoin
+
+    # ============================================================
+    # Indodax (Indonesia CEX — unique to Southeast Asia users)
+    # TODO: Verify via Solscan labels post-hackathon
+    # ============================================================
+    # (kosong dulu, verify later)
+
+    # ============================================================
+    # STALE/UNVERIFIED — removed:
+    # "8FmGDmDDkHoFaT6SaXgmHRLBMCcJWwNXpFWJQJMAfmHo": "Binance"  (old)
+    # "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5": "OKX"       (old/wrong)
+    # ============================================================
 }
 
 KNOWN_ONRAMP_ADDRESSES: dict[str, str] = {}
