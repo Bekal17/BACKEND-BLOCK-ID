@@ -7,8 +7,10 @@ import os
 import asyncio
 import logging
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 
 import asyncpg
 
@@ -17,6 +19,10 @@ logger = logging.getLogger("cron_recalculate")
 router = APIRouter(prefix="/cron", tags=["cron"])
 
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
+
+
+class RecalculateRequest(BaseModel):
+    wallet: Optional[str] = None
 
 
 async def run_batch_recalculate():
@@ -72,9 +78,30 @@ async def run_batch_recalculate():
         await pool.close()
 
 
+async def run_single_wallet_recalculate(wallet: str):
+    """Recalculate trust score for a single wallet (testing / admin use)."""
+    import asyncpg
+
+    DATABASE_URL = os.environ.get("DATABASE_URL", "")
+    if not DATABASE_URL:
+        logger.error("[CRON-SINGLE] DATABASE_URL not set")
+        return
+
+    try:
+        from backend_blockid.oracle.realtime_wallet_pipeline import (
+            run_realtime_wallet_pipeline,
+        )
+        logger.info(f"[CRON-SINGLE] Starting recalculate for {wallet[:16]}...")
+        await run_realtime_wallet_pipeline(wallet)
+        logger.info(f"[CRON-SINGLE] Completed recalculate for {wallet[:16]}")
+    except Exception as e:
+        logger.error(f"[CRON-SINGLE] FAIL {wallet[:16]}: {e}")
+
+
 @router.post("/recalculate")
 async def auto_recalculate(
     background_tasks: BackgroundTasks,
+    request: RecalculateRequest = RecalculateRequest(),
     x_cron_secret: str = Header(None),
 ):
     """
@@ -84,6 +111,18 @@ async def auto_recalculate(
     if not CRON_SECRET or x_cron_secret != CRON_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+    # Single-wallet mode: body has {"wallet": "..."}
+    if request.wallet:
+        background_tasks.add_task(run_single_wallet_recalculate, request.wallet)
+        return {
+            "status": "started",
+            "mode": "single_wallet",
+            "wallet": request.wallet,
+            "message": f"Single wallet recalculate triggered: {request.wallet[:16]}...",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    # Full-sweep mode (existing behavior, used by Thursday cron)
     background_tasks.add_task(run_batch_recalculate)
 
     return {
