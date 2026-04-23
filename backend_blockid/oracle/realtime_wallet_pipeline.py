@@ -419,6 +419,22 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
                 error=str(e),
             )
 
+        # Step 5c: detect_cex_fingerprint — insert CEX badges
+        logger.info("realtime_pipeline_step", step="detect_cex_fingerprint", wallet=wallet[:16])
+        try:
+            from backend_blockid.ai_engine.cex_fingerprint import detect_cex_fingerprint
+            cex_badges = await detect_cex_fingerprint(wallet)
+            for r in cex_badges:
+                await insert_wallet_reason(
+                    wallet=wallet,
+                    reason_code=r["code"],
+                    weight=int(r.get("weight", 0)),
+                    confidence=float(r.get("confidence", 1.0)),
+                    tx_hash=r.get("tx_hash"),
+                )
+        except Exception as e:
+            logger.debug("realtime_cex_fingerprint_skip", wallet=wallet[:16], error=str(e))
+
         # Step 6: reason_weight_engine — skip (applied inline above)
 
         # Ensure wallet in cluster_features for predict
@@ -903,6 +919,22 @@ async def run_realtime_wallet_pipeline_streaming(wallet: str):
                 wallet=wallet[:16],
                 error=str(e),
             )
+
+        # Step 5c: detect_cex_fingerprint — insert CEX badges
+        logger.info("realtime_pipeline_step", step="detect_cex_fingerprint", wallet=wallet[:16])
+        try:
+            from backend_blockid.ai_engine.cex_fingerprint import detect_cex_fingerprint
+            cex_badges = await detect_cex_fingerprint(wallet)
+            for r in cex_badges:
+                await insert_wallet_reason(
+                    wallet=wallet,
+                    reason_code=r["code"],
+                    weight=int(r.get("weight", 0)),
+                    confidence=float(r.get("confidence", 1.0)),
+                    tx_hash=r.get("tx_hash"),
+                )
+        except Exception as e:
+            logger.debug("realtime_cex_fingerprint_skip", wallet=wallet[:16], error=str(e))
 
         # Fetch true wallet age from blockchain
         true_age_days = 0
