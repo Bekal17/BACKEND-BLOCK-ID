@@ -107,14 +107,14 @@ async def _query_cex_interactions(
             SELECT
                 counterparty,
                 COUNT(*) AS tx_count,
-                COALESCE(SUM(amount), 0)::BIGINT AS volume_lamports
+                COALESCE(SUM(amount_lamports), 0)::BIGINT AS volume_lamports
             FROM (
-                SELECT receiver AS counterparty, amount
+                SELECT receiver AS counterparty, amount_lamports
                 FROM transactions
                 WHERE sender = $1
                   AND receiver = ANY($2::text[])
                 UNION ALL
-                SELECT sender AS counterparty, amount
+                SELECT sender AS counterparty, amount_lamports
                 FROM transactions
                 WHERE receiver = $1
                   AND sender = ANY($2::text[])
