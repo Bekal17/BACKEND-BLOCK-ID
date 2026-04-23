@@ -297,7 +297,7 @@ async def save_suggestions(
 # Linking boost for trust score (Phase 3.1)
 # ---------------------------------------------------------------------------
 
-LINKING_BOOST_CAP_POSITIVE = 15
+LINKING_BOOST_CAP_POSITIVE = 8
 LINKING_BOOST_CAP_NEGATIVE = -40
 AGE_LONG_CODES = {"AGE_3Y", "AGE_5Y", "AGE_7Y", "AGE_10Y"}
 WHALE_CODES = {"WHALE_100_SOL", "WHALE_1K_SOL", "WHALE_5K_SOL", "WHALE_10K_SOL", "WHALE_50K_SOL"}
@@ -349,7 +349,7 @@ async def calculate_linking_boost(
             if not linked_wallet:
                 continue
 
-            wallet_boost = 10.0  # VERIFIED_WALLET_LINK base
+            wallet_boost = 4.0  # VERIFIED_WALLET_LINK base
 
             ts_row = await conn.fetchrow(
                 "SELECT score, risk_level FROM trust_scores WHERE wallet = $1 ORDER BY computed_at DESC LIMIT 1",
