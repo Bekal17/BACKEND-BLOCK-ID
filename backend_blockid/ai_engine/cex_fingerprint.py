@@ -50,12 +50,25 @@ HELIUS_MAX_SIGNATURES = int(os.getenv("CEX_HELIUS_MAX_SIGS", "500"))
 CACHE_TTL_DAYS = int(os.getenv("CEX_CACHE_TTL_DAYS", "30"))
 
 CEX_NAME_MAP = {
-    "Binance":  "BINANCE",
-    "OKX":      "OKX",
-    "Coinbase": "COINBASE",
-    "Bybit":    "BYBIT",
-    "Kraken":   "KRAKEN",
-    "KuCoin":   "KUCOIN",
+    "Binance":   "BINANCE",
+    "OKX":       "OKX",
+    "Coinbase":  "COINBASE",
+    "Bybit":     "BYBIT",
+    "Kraken":    "KRAKEN",
+    "KuCoin":    "KUCOIN",
+    "Upbit":     "UPBIT",
+    "Gate.io":   "GATE",
+    "MEXC":      "MEXC",
+    "Bitget":    "BITGET",
+    "Crypto.com": "CRYPTOCOM",
+    "Robinhood": "ROBINHOOD",
+    "Backpack":  "BACKPACK",
+    "Bithumb":   "BITHUMB",
+    "Bitfinex":  "BITFINEX",
+    "SwissBorg": "SWISSBORG",
+    "Ourbit":    "OURBIT",
+    "Bullish":   "BULLISH",
+    "FalconX":   "FALCONX",
 }
 
 # ============================================================

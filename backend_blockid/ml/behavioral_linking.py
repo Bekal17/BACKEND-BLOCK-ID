@@ -32,53 +32,131 @@ SUGGESTION_EXPIRY_DAYS = int(os.getenv("LINKING_SUGGESTION_EXPIRY_DAYS", "30"))
 DISTRIBUTION_THRESHOLD = int(os.getenv("DISTRIBUTION_WALLET_THRESHOLD", "10"))
 
 KNOWN_CEX_ADDRESSES: dict[str, str] = {
-    # ============================================================
-    # OKX (verified on Solscan as "OKX: Hot Wallet X")
-    # Primary hot wallet confirmed by user transaction test
-    # ============================================================
-    "is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV": "OKX",  # OKX Hot Wallet 1 (primary)
+    # ── OKX ──────────────────────────────────────────────────────────────
+    "is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV": "OKX",   # Hot Wallet 1 (verified)
+    "2YxQCXt9spMwoQZiwFLwdjHtscVvXi4nmxCkQCD6Rvgg": "OKX",   # Hot Wallet 2
+    "8wM44Ryv9DFCSfkgUnPEPgnsc53arT4cnmXL6LnnC4UW": "OKX",   # Hot Wallet 4
+    "EkeyuVghbRfGWPyEtm3vnjKZPbUXXrPqxdar8fsEMuXd": "OKX",   # Hot Wallet 5
+    "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5": "OKX",   # Legacy
 
-    # ============================================================
-    # Binance (verified on Solscan)
-    # ============================================================
-    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9": "Binance",  # Binance Hot Wallet 2
-    "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S": "Binance",  # Binance Hot Wallet (was Bybit - verify)
-    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "Binance",  # Binance Hot Wallet
-    "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS": "Binance",  # Binance (was Coinbase - verify)
-    "AobVSwdW9BbpMdJvTqeCN4hPAmh4rHm7vwLnQ5ATSyrS": "Binance",  # Binance Hot Wallet 3
+    # ── Binance ───────────────────────────────────────────────────────────
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "Binance",  # Binance 2
+    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9": "Binance",  # Binance 3
+    "6QJzieMYfp7yr3EdrePaQoG3Ghxs2wM98xSLRu8Xh56U": "Binance",  # Binance 11
+    "3gd3dqgtJ4jWfBfLYTX67DALFetjc5iS72sCgRhCkW2u": "Binance",  # Binance 10
+    "53unSgGWqEWANcPYRF35B2Bgf8BkszUtcccKiXwGGLyr": "Binance",  # Binance.US
+    "3ADzk5YDP9sgorvPSs9YPxigJiSqhgddpwHwwPwmEFib": "Binance",  # Deposit address
+    "8FmGDmDDkHoFaT6SaXgmHRLBMCcJWwNXpFWJQJMAfmHo": "Binance", # Legacy 1
+    "AC5RDfQFmDS1deWZos921JhjEKMDSBCDM8KFTBgq9aUF": "Binance",  # Legacy 2
 
-    # ============================================================
-    # Coinbase (verified on Solscan)
-    # ============================================================
-    "FxteHmLwG9nk1eL4pjNve3Eub2goGkkz6g6TbvdmW46a": "Coinbase",  # Coinbase Hot Wallet
-    "H3v2e6BDt8Py6VPBkxu7HFgNAgHnrGbV5iQ2JDLqBMPD": "Coinbase",  # Coinbase 2
+    # ── Bybit ─────────────────────────────────────────────────────────────
+    "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2": "Bybit",  # Hot Wallet
+    "iGdFcQoyR2MwbXMHQskhmNsqddZ6rinsipHc4TNSdwu":  "Bybit",  # Wallet 10
+    "5LZkATrLwHYCQj2YuVbjjgsDZzBk6YfL4pFQRJmtboT2": "Bybit",  # Wallet 15
+    "7cAui6ADtxLnpRr2wYvwJWTkzwgmVF2LYKnjKTLx4xR8": "Bybit",  # Wallet
+    "CK8i4zFXkDE2KWfyg7g9S748r6mwxajbcKcyGhQMR3qQ": "Bybit",  # Wallet 13
+    "9ZifroknFoYu4r6DUk6nYoJiUQnEyyoUyeAwjXbPoL2x": "Bybit",  # Wallet 11
+    "7ReR6syi6gr7qUrKCL1FB9VFzGhVgHwLJ8wtfNtH9Mv4": "Bybit",  # Wallet 9
+    "BunaYnktTigcU1ovzVt9dG7NMv2gW5VX7MBfSS8J38s2": "Bybit",  # Wallet 6
+    "CSSJFgoeqidqVtHKSNP7i7s6WX8APHfH2kYGdLV195Jb": "Bybit",  # Deposit
+    "CMivUnnbDHxLq9ChV1bSuiQE5ycZf6JVvFFDePMHhHYK": "Bybit",  # Deposit
+    "2qo8jvuc49pFmTjmUHLiARSV6ppPTaE7gw27ZJ6DnNZy": "Bybit",  # Wallet 12
 
-    # ============================================================
-    # Bybit (verified on Solscan)
-    # ============================================================
-    "AC5RDfQFmDS1deWZos921JhjEKMDSBCDM8KFTBgq9aUF": "Bybit",  # Bybit Hot Wallet (was Binance - verify)
+    # ── Coinbase ──────────────────────────────────────────────────────────
+    "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS": "Coinbase",  # Coinbase 1
+    "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm": "Coinbase",  # Coinbase 2
+    "9obNtb5GyUegcs3a1CbBkLuc5hEWynWfJC6gjz5uWQkE": "Coinbase",  # Coinbase 4
+    "FpwQQhQQoEaVu3WU2qZMfF1hx48YyfwsLoRgXG83E99Q": "Coinbase",  # Hot Wallet 1
+    "D89hHJT5Aqyx1trP6EnGY9jJUB3whgnq3aUvvCqedvzf": "Coinbase",  # Hot Wallet 3
+    "DPqsobysNf5iA9w7zrQM8HLzCKZEDMkZsWbiidsAt1xo": "Coinbase",  # Hot Wallet 4
+    "3vxheE5C46XzK4XftziRhwAf8QAfipD7HXXWj25mgkom": "Coinbase",  # Prime
+    "AYXGC7sBnX2LnG4rKPx6Ejod5pUr7vut8vokPwSy5uy6": "Coinbase",  # Prime Deposit
+    "2x4fzH8qzXQw923imiuc1sobuds1vT2TfNeomndfBAuh": "Coinbase",  # Deposit
+    "DSo8tY2KdbmZC6Q9YNWgQ9745ugL1Q9K6FeyqovkGqRS": "Coinbase",  # Deposit
+    "BCES4xJZvugXafnrsbK7nahh6DELuMj72J4hUChyTmKt": "Coinbase",  # Deposit
+    "7PbYL5iBwcsae6U9KDcuAryVeU8VLwuJuQR5bq5ZMwje": "Coinbase",  # Deposit
+    "8HWUVzK1JWDNCvyJQcRotfg4UwPb5RbKrmCa4hxyK8gP": "Coinbase",  # Deposit
+    "Fue5m7uwemAhv1uyPSC44hd6UpBgAkubxiFCvBGmc8Ah": "Coinbase",  # Deposit
+    "Ddy2b4kf6iuXe5tBBPXrnDkoBQgWUVaucQjxMQrTFS3M": "Coinbase",  # Deposit
+    "3mvRNcMyrM91GrNUQMuZ3EW7feqGbwJg3p8JJKTsFKvp": "Coinbase",  # Deposit
+    "9u2SjcfTUnSaJ1UHteESQLDaAo7KSJeBT9wMyoTqTkuJ": "Coinbase",  # Deposit
+    "3eCq5SX86LCQzbTEctJEBc4tJ4iYcR8T2VB3ruNhxJVZ": "Coinbase",  # Deposit
+    "6fBLQE41AkujAm3N1MLEqV1cWKey1RxR5cG9btDaeMHp": "Coinbase",  # Deposit
+    "E1YG99HeNiRwfB6D2qjBYUAeMjpNA88WKEPjrBc8Kvhh": "Coinbase",  # Deposit
+    "JspwVtWvxBwgHL4iCt2WCwFqWMGPZwYNtP9o6XtgdDs":  "Coinbase",  # Deposit
+    "5anqJQxX2YoY4Z3M3H7yuFTiD3KCEeS5fzxHnuEZw8Ba": "Coinbase",  # Deposit
+    "51ig4tkZD1kCcnXLRuFre1nxyJg83aFTfQb5UGLPwMHy": "Coinbase",  # Deposit
+    "GNPXBUapDex941kStjpQRzcfMh2SEPhNhz6irSAaAeRN": "Coinbase",  # Deposit
+    "8HzyPVwoExwtZvhHC2ynpsw7xFiEkr5HgR9emPnb8RgT": "Coinbase",  # Deposit
+    "89FSaQLPMUCHf4N9iQbf6XjeGvYkbPhE7kitdZKqU1an": "Coinbase",  # Deposit
+    "FQpC71EDo4m6L44Y7xt5uTPGo8qpXuFKXjiCgJ6GjYtL": "Coinbase",  # Deposit
 
-    # ============================================================
-    # Kraken (verified on Solscan)
-    # ============================================================
-    "BeAMHyvuBNgNhpaPmFhiQkTtFEBjUYnAQSmNKFkY1b4M": "Kraken",  # Kraken Hot Wallet
+    # ── Kraken ────────────────────────────────────────────────────────────
+    "6LY1JzAFVZsP2a2xKrtU6znQMQ5h4i7tocWdgrkZzkzF": "Kraken",  # Main
+    "HzKVUmEAuaf8nV3tcJk2uZKohmLwtk1351ASCdqT5B8q": "Kraken",  # Hot Wallet 2
+    "8u6UYLGA8vFeCkZDoLmN9xS2wCUYVxdSKSRhthDzWSsN": "Kraken",  # Deposit
+    "FcH9X4WtgZeJ6dkDgBehfzoxAoDg8XgjpxNg8u9JZrTk": "Kraken",  # Deposit
+    "8bfcAwx9dZjLGkHcMtuZwaDthuWaQ7bPFMoZeniCSMLS": "Kraken",  # Deposit
+    "3xCgDJQ3PSQpoMFnijF9sQNV3J6onmQk7U3ZkxjigeAk": "Kraken",  # Deposit
+    "BeAMHyvuBNgNhpaPmFhiQkTtFEBjUYnAQSmNKFkY1b4M": "Kraken",  # Legacy
 
-    # ============================================================
-    # KuCoin (verified on Solscan)
-    # ============================================================
-    "BmFdpraQhkiDPE5PCEPhEQGNJgKdY18Mar2XSoQtBBxS": "KuCoin",  # KuCoin
+    # ── KuCoin ────────────────────────────────────────────────────────────
+    "HVh6wHNBAsG3pq1Bj5oCzRjoWKVogEDHwUHkRz3ekFgt": "KuCoin",  # KuCoin 3
+    "BmFdpraQhkiDQE6SnfG5omcA1VwzqfXrwtNYBwWTymy6": "KuCoin",  # KuCoin 2
+    "CAxKWUpSbsNsWu2gEFjed64jrNxiNYfRMVEMahshHotb": "KuCoin",  # Deposit 5
+    "7gQ1CfjdysJkSEVSDXNjJHnzrqvP2zQYQDJHJP67o1bb": "KuCoin",  # Deposit 3
+    "AGVhmrhDi3RKLu9nxnRqp3CUpaG3SVeYXWkWcygHAk8N": "KuCoin",  # KuCoin 5
+    "6BhBoBB47wSGjK5uzcGWNcTf2oNRPQNuv6GVdkNyj9PB": "KuCoin",  # KuCoin 4
+    "BmFdpraQhkiDPE5PCEPhEQGNJgKdY18Mar2XSoQtBBxS": "KuCoin",  # Legacy
 
-    # ============================================================
-    # Indodax (Indonesia CEX — unique to Southeast Asia users)
-    # TODO: Verify via Solscan labels post-hackathon
-    # ============================================================
-    # (kosong dulu, verify later)
+    # ── Upbit ─────────────────────────────────────────────────────────────
+    "7mhcgF1DVsj5iv4CxZDgp51H6MBBwqamsH1KnqXhSRc5": "Upbit",   # Hot Wallet
+    "555oNTKdRECgyLn8fBvySoN6hXMCszFq1Y4oea9p3ZFB": "Upbit",   # Hot Wallet 2
 
-    # ============================================================
-    # STALE/UNVERIFIED — removed:
-    # "8FmGDmDDkHoFaT6SaXgmHRLBMCcJWwNXpFWJQJMAfmHo": "Binance"  (old)
-    # "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5": "OKX"       (old/wrong)
-    # ============================================================
+    # ── Gate.io ───────────────────────────────────────────────────────────
+    "u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w":  "Gate.io",  # Main
+    "GLC5DctxxSNUqaN6pzkRfH5A7wS8kZvN8kbomwZq2J3B": "Gate.io",  # Deposit
+    "DNxB8gtBbo73giAFs7GtbFX2cfmKJ4CCko6CbsiRbNbr": "Gate.io",  # Deposit
+
+    # ── MEXC ──────────────────────────────────────────────────────────────
+    "5PAhQiYdLBd6SVdjzBQDxUAEFyDdF5ExNPQfcscnPRj5": "MEXC",  # MEXC 2
+    "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ": "MEXC",  # Main
+
+    # ── Bitget ────────────────────────────────────────────────────────────
+    "A77HErqtfN1hLLpvZ9pCtu66FEtM8BveoaKbbMoZ4RiR": "Bitget",  # Exchange
+
+    # ── Crypto.com ────────────────────────────────────────────────────────
+    "22Wnk8PwyWZV7BfkZGJEKT9jGGdtvu7xY6EXeRh7zkBa": "Crypto.com",  # Hot Wallet 3
+    "6FEVkH17P9y8Q9aCkDdPcMDjvj7SVxrTETaYEm8f51Jy": "Crypto.com",  # Hot Wallet 1
+
+    # ── Robinhood ─────────────────────────────────────────────────────────
+    "4xLpwxgYuPwPvtQjE94RLS4WZ4aD8NJYYKr2AJk99Qdg": "Robinhood",  # Hot Wallet
+
+    # ── Backpack ──────────────────────────────────────────────────────────
+    "43DbAvKxhXh1oSxkJSqGosNw3HpBnmsWiak6tB5wpecN": "Backpack",  # Exchange
+    "J16ovD5x6kZLYDYAa6CqfrwacHdM7fcKD9iKG5EoNeGR": "Backpack",  # Deposit
+    "6wspq3nz3qPQ9X6rbLM5bEDHK525yPSNqyqeABXcSMHQ": "Backpack",  # Deposit
+
+    # ── Bithumb ───────────────────────────────────────────────────────────
+    "8Mm46CsqxiyAputDUp2cXHg41HE3BfynTeMBDwzrMZQH": "Bithumb",  # Hot Wallet
+
+    # ── Bitfinex ──────────────────────────────────────────────────────────
+    "FxteHmLwG9nk1eL4pjNve3Eub2goGkkz6g6TbvdmW46a": "Bitfinex",  # Hot Wallet
+
+    # ── Ceffu (Binance Custody) ───────────────────────────────────────────
+    "5SDrsMNTYdhmApjfqYHDvjoW92f2S42vcc7zNDVcQ9Ej": "Binance",  # Ceffu Custody
+
+    # ── SwissBorg ─────────────────────────────────────────────────────────
+    "DMe3ddj7awSR3LFC64rjmCPexsrSv33QAxFoJux4vGH3": "SwissBorg",  # Hot Wallet 3
+
+    # ── Ourbit ────────────────────────────────────────────────────────────
+    "3pjwKq9yuzpVYfD4h5jMZLLfV8oSd8YiwpoAaB5oZS3H": "Ourbit",  # Hot Wallet 2
+
+    # ── Bullish ───────────────────────────────────────────────────────────
+    "Bc5bth4Mn2n8DX1etZwvnq3uDEGg479s2D24TCEsnXHf": "Bullish",  # Hot Wallet
+
+    # ── FalconX ───────────────────────────────────────────────────────────
+    "AgsYPSd9jQZEpbTMsvBWKdiAux3eyghdSY355QVHH9Hs": "FalconX",  # Hot Wallet
 }
 
 KNOWN_ONRAMP_ADDRESSES: dict[str, str] = {}
