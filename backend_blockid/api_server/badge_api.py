@@ -12,6 +12,7 @@ from fastapi.responses import Response
 
 from backend_blockid.ai_engine.generate_badge import generate_badge, generate_svg_badge
 from backend_blockid.blockid_logging import get_logger
+from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.tools.badge_engine import get_badge_timeline
 
 logger = get_logger(__name__)
@@ -94,3 +95,31 @@ def get_wallet_badge_timeline(wallet: str) -> list[dict]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     return [{"date": t["date"], "badge": t["badge"], "score": t["score"]} for t in timeline]
+
+
+@router.get("/badges/metadata")
+async def get_badge_metadata():
+    """
+    Return all reason_code_metadata for frontend badge display.
+    Used by Profile.tsx to get brand colors and display labels for CEX badges.
+    """
+    conn = None
+    try:
+        conn = await get_conn()
+        rows = await conn.fetch(
+            """
+            SELECT code, category, tier, display_label, icon,
+                   color_hex, description, is_public, priority
+            FROM reason_code_metadata
+            WHERE is_public = true
+            ORDER BY category, priority, code
+            """
+        )
+        return {
+            "metadata": [dict(r) for r in rows]
+        }
+    except Exception as e:
+        return {"metadata": [], "error": str(e)}
+    finally:
+        if conn:
+            await release_conn(conn)
