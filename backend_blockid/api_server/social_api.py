@@ -36,6 +36,20 @@ router = APIRouter(prefix="/social", tags=["social"])
 ENDORSE_TRUST_BOOST = 5
 SOCIAL_MIN_SCORE_TO_ENDORSE = 50
 SCORE_CAP = 97
+NEGATIVE_CODES = {
+    "SCAM_CLUSTER_MEMBER",
+    "SCAM_CLUSTER_MEMBER_SMALL",
+    "SCAM_CLUSTER_MEMBER_LARGE",
+    "DRAINER_FLOW",
+    "DRAINER_FLOW_DETECTED",
+    "MEGA_DRAINER",
+    "RUG_PULL_DEPLOYER",
+    "HIGH_RISK_TOKEN_INTERACTION",
+    "SUSPICIOUS_TOKEN_MINT",
+    "BLACKLISTED_CREATOR",
+    "VICTIM_OF_SCAM",
+    "HIGH_VALUE_OUTFLOW",
+}
 
 TREASURY_WALLET = os.getenv(
     "TREASURY_WALLET",
@@ -1701,7 +1715,7 @@ async def get_profile(
             "SELECT reason_code FROM wallet_reasons WHERE wallet = $1 AND weight > 0",
             wallet,
         )
-        badges = [r["reason_code"] for r in reason_rows] if reason_rows else []
+        badges = [r["reason_code"] for r in reason_rows if r["reason_code"] not in NEGATIVE_CODES] if reason_rows else []
         sp_row = await conn.fetchrow(
             """
             SELECT avatar_type, avatar_url, avatar_nft_mint, avatar_nft_name,
@@ -1783,7 +1797,7 @@ async def get_badges(wallet: str):
             "SELECT displayed_badges FROM social_profiles WHERE wallet = $1",
             wallet,
         )
-        earned = [r["reason_code"] for r in reason_rows]
+        earned = [r["reason_code"] for r in reason_rows if r["reason_code"] not in NEGATIVE_CODES]
         displayed = list(profile_row["displayed_badges"]) if profile_row and profile_row["displayed_badges"] else []
         return {"earned": earned, "displayed": displayed}
     finally:
@@ -1800,7 +1814,7 @@ async def set_displayed_badges(body: SetBadgesRequest):
             "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1 AND weight > 0",
             body.wallet,
         )
-        earned = {r["reason_code"] for r in reason_rows}
+        earned = {r["reason_code"] for r in reason_rows if r["reason_code"] not in NEGATIVE_CODES}
         for b in body.badges:
             if b not in earned:
                 raise HTTPException(400, detail=f"Badge {b} not earned by this wallet")
