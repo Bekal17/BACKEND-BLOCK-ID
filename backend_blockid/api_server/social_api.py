@@ -82,6 +82,8 @@ class CreatePostRequest(BaseModel):
     wallet: str
     content: str = Field(..., max_length=500)
     post_type: str = Field(default="PUBLIC")
+    image_url: Optional[str] = None
+    media_type: Optional[str] = None
     parent_id: Optional[int] = None
     signed_message: str = ""
     signature: str = ""
@@ -295,7 +297,7 @@ async def create_post(body: CreatePostRequest):
             except Exception as e:
                 logger.debug("og_fetch_post_error", error=str(e))
 
-        image_url: Optional[str] = None
+        image_url: Optional[str] = body.image_url or None
         image_key: Optional[str] = None
 
         # Snapshot trust and risk
@@ -315,7 +317,7 @@ async def create_post(body: CreatePostRequest):
                 wallet, handle, content, image_url, image_key,
                 post_type, parent_id, is_hidden, hide_reason,
                 trust_score, risk_level,
-                link_url, link_title, link_description, link_image
+                link_url, link_title, link_description, link_image, media_type
             )
             VALUES (
                 $1,
@@ -323,7 +325,7 @@ async def create_post(body: CreatePostRequest):
                 $2, $3, $4,
                 $5, $6, $7, $8,
                 $9, $10,
-                $11, $12, $13, $14
+                $11, $12, $13, $14, $15
             )
             RETURNING id, wallet, handle, content, image_url, post_type,
                       trust_score, risk_level, is_hidden, created_at
@@ -342,6 +344,7 @@ async def create_post(body: CreatePostRequest):
             link_title,
             link_description,
             link_image,
+            body.media_type,
         )
         if parent_id:
             await conn.execute(
