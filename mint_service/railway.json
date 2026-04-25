@@ -5,7 +5,7 @@
     "dockerfilePath": "mint_service/Dockerfile"
   },
   "deploy": {
-    "startCommand": "node mint_service/index.js",
+    "startCommand": "node index.js",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
