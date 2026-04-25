@@ -404,6 +404,12 @@ async def run_realtime_wallet_pipeline(wallet: str) -> int:
         try:
             from backend_blockid.ai_engine.positive_reasons import detect_positive_reasons
             positive = await detect_positive_reasons(wallet)
+            logger.info(
+                "realtime_positive_reasons_result",
+                wallet=wallet[:16],
+                count=len(positive),
+                codes=[r["code"] for r in positive],
+            )
             for r in positive:
                 await insert_wallet_reason(
                     wallet=wallet,
