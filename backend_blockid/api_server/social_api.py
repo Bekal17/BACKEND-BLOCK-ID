@@ -1811,7 +1811,7 @@ async def set_displayed_badges(body: SetBadgesRequest):
     conn = await get_conn()
     try:
         reason_rows = await conn.fetch(
-            "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1 AND weight > 0",
+            "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1",
             body.wallet,
         )
         earned = {r["reason_code"] for r in reason_rows if r["reason_code"] not in NEGATIVE_CODES}
