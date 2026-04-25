@@ -51,6 +51,66 @@ NEGATIVE_CODES = {
     "HIGH_VALUE_OUTFLOW",
 }
 
+# Social rate limits by risk level (rolling 24h)
+SOCIAL_LIMITS = {
+    "HIGH":   {"post": 0,  "reply": 2,  "repost": 0},
+    "MEDIUM": {"post": 3,  "reply": 10, "repost": 3},
+    "LOW":    {"post": 10, "reply": 40, "repost": 10},
+    "SAFE":   {"post": 25, "reply": 100, "repost": 25},
+}
+
+
+def get_social_limit(risk_level: str, plan: str) -> dict:
+    rl = (risk_level or "MEDIUM").upper()
+    pl = (plan or "free").lower()
+    if rl == "SAFE" and pl == "pro":
+        return {"post": -1, "reply": -1, "repost": -1}
+    return SOCIAL_LIMITS.get(rl, SOCIAL_LIMITS["MEDIUM"])
+
+
+async def check_social_limit(conn, wallet: str, action: str, risk_level: str, plan: str) -> tuple[bool, int, int]:
+    """
+    Returns (allowed, used, limit).
+    limit = -1 means unlimited.
+    """
+    limits = get_social_limit(risk_level, plan)
+    limit = limits.get(action, 0)
+    if limit == -1:
+        return True, 0, -1
+    if limit == 0:
+        return False, 0, 0
+
+    if action == "post":
+        count = await conn.fetchval(
+            """SELECT COUNT(*) FROM social_posts
+               WHERE wallet = $1
+               AND parent_id IS NULL
+               AND is_repost = FALSE
+               AND created_at > NOW() - INTERVAL '24 hours'""",
+            wallet,
+        )
+    elif action == "reply":
+        count = await conn.fetchval(
+            """SELECT COUNT(*) FROM social_posts
+               WHERE wallet = $1
+               AND parent_id IS NOT NULL
+               AND created_at > NOW() - INTERVAL '24 hours'""",
+            wallet,
+        )
+    elif action == "repost":
+        count = await conn.fetchval(
+            """SELECT COUNT(*) FROM social_posts
+               WHERE wallet = $1
+               AND is_repost = TRUE
+               AND created_at > NOW() - INTERVAL '24 hours'""",
+            wallet,
+        )
+    else:
+        return False, 0, 0
+
+    used = int(count or 0)
+    return used < limit, used, limit
+
 TREASURY_WALLET = os.getenv(
     "TREASURY_WALLET",
     "4DdLPRDiLRY8Q2E4Fv31kvcfMf3XJf11HgaSaW7tKVcx",
@@ -171,40 +231,46 @@ async def create_post(body: CreatePostRequest):
 
     conn = await get_conn()
     try:
-        # Score gate: require score >= 40 to post
-        ts = await conn.fetchrow(
-            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        ts_row = await conn.fetchrow(
+            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1", wallet
         )
-        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
-        tier = get_score_tier(score)
+        score = float(ts_row["score"]) if ts_row and ts_row.get("score") is not None else 0.0
+        risk_level_raw = (ts_row["risk_level"] or "MEDIUM").upper() if ts_row else "MEDIUM"
 
-        if tier == "BLOCKED":
-            raise HTTPException(
-                status_code=403,
-                detail="Trust score too low to post. "
-                "Score 30+ required for basic access.",
-            )
-        if tier == "READ_ONLY":
-            raise HTTPException(
-                status_code=403,
-                detail="Score 40+ required to create posts.",
-            )
+        # Get plan
+        plan_row = await conn.fetchrow(
+            """SELECT plan FROM subscriptions
+               WHERE user_id = $1 AND status = 'active'
+               ORDER BY created_at DESC NULLS LAST LIMIT 1""",
+            wallet,
+        )
+        plan = (plan_row["plan"] or "free").lower() if plan_row else "free"
 
-        # Rate limit for BASIC tier (score 40-49): 3 posts/day
-        if tier == "BASIC":
-            today_count = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM social_posts
-                WHERE wallet = $1
-                  AND created_at > NOW() - INTERVAL '24 hours'
-                """,
-                wallet,
-            )
-            if (today_count or 0) >= 3:
+        action = "reply" if body.parent_id else "post"
+        allowed, used, limit = await check_social_limit(conn, wallet, action, risk_level_raw, plan)
+
+        if not allowed:
+            if limit == 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "trust_score_too_low",
+                        "message": "Your trust score is too low to post. Improve your on-chain activity to unlock this action.",
+                        "risk_level": risk_level_raw,
+                        "action": action,
+                    }
+                )
+            else:
                 raise HTTPException(
                     status_code=429,
-                    detail="Daily post limit reached (3/day for your score tier). "
-                    "Reach score 50+ for unlimited posting.",
+                    detail={
+                        "error": "daily_limit_reached",
+                        "message": f"Daily {action} limit reached ({limit}/day). Improve your trust score to unlock more.",
+                        "risk_level": risk_level_raw,
+                        "used": used,
+                        "limit": limit,
+                        "reset_in": "24 hours",
+                    }
                 )
 
         visibility = await check_post_visibility(wallet, conn)
@@ -455,35 +521,46 @@ async def create_post_with_image(
 
     conn = await get_conn()
     try:
-        ts = await conn.fetchrow(
-            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        ts_row = await conn.fetchrow(
+            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1", wallet
         )
-        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
-        tier = get_score_tier(score)
+        score = float(ts_row["score"]) if ts_row and ts_row.get("score") is not None else 0.0
+        risk_level_raw = (ts_row["risk_level"] or "MEDIUM").upper() if ts_row else "MEDIUM"
 
-        if tier == "BLOCKED":
-            raise HTTPException(
-                status_code=403,
-                detail="Trust score too low to post. Score 30+ required for basic access.",
-            )
-        if tier == "READ_ONLY":
-            raise HTTPException(
-                status_code=403,
-                detail="Score 40+ required to create posts.",
-            )
+        # Get plan
+        plan_row = await conn.fetchrow(
+            """SELECT plan FROM subscriptions
+               WHERE user_id = $1 AND status = 'active'
+               ORDER BY created_at DESC NULLS LAST LIMIT 1""",
+            wallet,
+        )
+        plan = (plan_row["plan"] or "free").lower() if plan_row else "free"
 
-        if tier == "BASIC":
-            today_count = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM social_posts
-                WHERE wallet = $1 AND created_at > NOW() - INTERVAL '24 hours'
-                """,
-                wallet,
-            )
-            if (today_count or 0) >= 3:
+        action = "post"
+        allowed, used, limit = await check_social_limit(conn, wallet, action, risk_level_raw, plan)
+
+        if not allowed:
+            if limit == 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "trust_score_too_low",
+                        "message": "Your trust score is too low to post. Improve your on-chain activity to unlock this action.",
+                        "risk_level": risk_level_raw,
+                        "action": action,
+                    }
+                )
+            else:
                 raise HTTPException(
                     status_code=429,
-                    detail="Daily post limit reached (3/day for your score tier). Reach score 50+ for unlimited posting.",
+                    detail={
+                        "error": "daily_limit_reached",
+                        "message": f"Daily {action} limit reached ({limit}/day). Improve your trust score to unlock more.",
+                        "risk_level": risk_level_raw,
+                        "used": used,
+                        "limit": limit,
+                        "reset_in": "24 hours",
+                    }
                 )
 
         visibility = await check_post_visibility(wallet, conn)
@@ -1092,30 +1169,42 @@ async def repost_post(body: Dict[str, Any]):
 
     conn = await get_conn()
     try:
-        # Score gate: require >= 40
-        ts = await conn.fetchrow(
-            "SELECT score FROM trust_scores WHERE wallet = $1", wallet
+        ts_row = await conn.fetchrow(
+            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1", wallet
         )
-        score = float(ts["score"]) if ts and ts.get("score") is not None else 0.0
-        tier = get_score_tier(score)
-        if tier in ("BLOCKED", "READ_ONLY"):
-            raise HTTPException(
-                status_code=403,
-                detail="Score 40+ required to repost.",
-            )
+        risk_level_raw = (ts_row["risk_level"] or "MEDIUM").upper() if ts_row else "MEDIUM"
 
-        # Rate limit BASIC tier (40-49): 3 posts/day
-        if tier == "BASIC":
-            today_count = await conn.fetchval(
-                """SELECT COUNT(*) FROM social_posts
-                   WHERE wallet = $1
-                   AND created_at > NOW() - INTERVAL '24 hours'""",
-                wallet,
-            )
-            if (today_count or 0) >= 3:
+        plan_row = await conn.fetchrow(
+            """SELECT plan FROM subscriptions
+               WHERE user_id = $1 AND status = 'active'
+               ORDER BY created_at DESC NULLS LAST LIMIT 1""",
+            wallet,
+        )
+        plan = (plan_row["plan"] or "free").lower() if plan_row else "free"
+
+        allowed, used, limit = await check_social_limit(conn, wallet, "repost", risk_level_raw, plan)
+
+        if not allowed:
+            if limit == 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "trust_score_too_low",
+                        "message": "Your trust score is too low to repost.",
+                        "risk_level": risk_level_raw,
+                    }
+                )
+            else:
                 raise HTTPException(
                     status_code=429,
-                    detail="Daily limit reached. Score 50+ for unlimited.",
+                    detail={
+                        "error": "daily_limit_reached",
+                        "message": f"Daily repost limit reached ({limit}/day). Improve your trust score to unlock more.",
+                        "risk_level": risk_level_raw,
+                        "used": used,
+                        "limit": limit,
+                        "reset_in": "24 hours",
+                    }
                 )
 
         # Get original post
@@ -2758,6 +2847,48 @@ async def get_reposted_ids(wallet: str):
         return {
             "wallet": wallet,
             "post_ids": [r["repost_of"] for r in rows],
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/limits/{wallet}")
+async def get_social_limits(wallet: str):
+    """Get current social usage and limits for wallet."""
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    conn = await get_conn()
+    try:
+        ts_row = await conn.fetchrow(
+            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1", wallet
+        )
+        risk_level_raw = (ts_row["risk_level"] or "MEDIUM").upper() if ts_row else "MEDIUM"
+        score = float(ts_row["score"]) if ts_row and ts_row.get("score") is not None else 0.0
+
+        plan_row = await conn.fetchrow(
+            """SELECT plan FROM subscriptions
+               WHERE user_id = $1 AND status = 'active'
+               ORDER BY created_at DESC NULLS LAST LIMIT 1""",
+            wallet,
+        )
+        plan = (plan_row["plan"] or "free").lower() if plan_row else "free"
+
+        _, post_used, post_limit = await check_social_limit(conn, wallet, "post", risk_level_raw, plan)
+        _, reply_used, reply_limit = await check_social_limit(conn, wallet, "reply", risk_level_raw, plan)
+        _, repost_used, repost_limit = await check_social_limit(conn, wallet, "repost", risk_level_raw, plan)
+
+        return {
+            "wallet": wallet,
+            "risk_level": risk_level_raw,
+            "score": score,
+            "plan": plan,
+            "limits": {
+                "post":   {"used": post_used,   "limit": post_limit,   "remaining": -1 if post_limit == -1 else max(0, post_limit - post_used)},
+                "reply":  {"used": reply_used,  "limit": reply_limit,  "remaining": -1 if reply_limit == -1 else max(0, reply_limit - reply_used)},
+                "repost": {"used": repost_used, "limit": repost_limit, "remaining": -1 if repost_limit == -1 else max(0, repost_limit - repost_used)},
+            }
         }
     finally:
         await release_conn(conn)
