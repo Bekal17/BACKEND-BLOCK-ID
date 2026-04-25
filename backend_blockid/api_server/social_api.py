@@ -1790,7 +1790,7 @@ async def get_badges(wallet: str):
     conn = await get_conn()
     try:
         reason_rows = await conn.fetch(
-            "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1 AND weight > 0",
+            "SELECT DISTINCT reason_code FROM wallet_reasons WHERE wallet = $1",
             wallet,
         )
         profile_row = await conn.fetchrow(
