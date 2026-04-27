@@ -1820,7 +1820,7 @@ async def get_profile(
         )
 
         profile_row = await conn.fetchrow(
-            "SELECT displayed_badges FROM social_profiles WHERE wallet = $1",
+            "SELECT displayed_badges, is_og_member, og_member_number FROM social_profiles WHERE wallet = $1",
             wallet,
         )
         displayed_badges = (
@@ -1870,8 +1870,27 @@ async def get_profile(
             "bio": sp_row["bio"] if sp_row else None,
             "website": sp_row["website"] if sp_row else None,
             "location": sp_row["location"] if sp_row else None,
+            "is_og_member": profile_row["is_og_member"] if profile_row else False,
+            "og_member_number": profile_row["og_member_number"] if profile_row else None,
             "displayed_badges": displayed_badges,
             "joined_at": id_row["minted_at"].isoformat() if id_row and id_row.get("minted_at") else None,
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/og-count")
+async def get_og_count():
+    conn = await get_conn()
+    try:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) as count FROM social_profiles WHERE is_og_member = TRUE AND og_member_number IS NOT NULL"
+        )
+        remaining = max(0, 100 - row["count"])
+        return {
+            "total_og_new": row["count"],
+            "remaining": remaining,
+            "is_open": remaining > 0
         }
     finally:
         await release_conn(conn)
