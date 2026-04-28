@@ -158,7 +158,7 @@ class SetBadgesRequest(BaseModel):
 
 class SetProfileAvatarRequest(BaseModel):
     wallet: str
-    avatar_url: str = ""
+    avatar_url: Optional[str] = None
     avatar_type: str
     avatar_is_animated: bool = False
     avatar_nft_mint: Optional[str] = None
@@ -744,7 +744,8 @@ async def create_post_with_image(
 async def set_profile_avatar(body: SetProfileAvatarRequest):
     wallet = (body.wallet or "").strip()
     avatar_type = (body.avatar_type or "").strip().upper()
-    avatar_url = (body.avatar_url or "").strip()
+    avatar_url = (body.avatar_url or "").strip() or None
+    avatar_is_animated = bool(body.avatar_is_animated)
     avatar_nft_mint = (body.avatar_nft_mint or "").strip() or None
 
     if not wallet:
@@ -763,6 +764,7 @@ async def set_profile_avatar(body: SetProfileAvatarRequest):
         if not avatar_nft_mint:
             raise HTTPException(status_code=400, detail="avatar_nft_mint required for NFT avatar")
 
+        wallet_nfts: list[dict[str, Any]] = []
         owns_nft = await verify_nft_ownership(wallet, avatar_nft_mint)
         if not owns_nft:
             wallet_nfts = await get_wallet_nfts(wallet, page=1, limit=100)
@@ -772,6 +774,35 @@ async def set_profile_avatar(body: SetProfileAvatarRequest):
             )
         if not owns_nft:
             raise HTTPException(status_code=403, detail="Wallet does not own avatar_nft_mint")
+
+        if avatar_url is None:
+            if not wallet_nfts:
+                wallet_nfts = await get_wallet_nfts(wallet, page=1, limit=100)
+
+            nft_match = next(
+                (
+                    nft
+                    for nft in wallet_nfts
+                    if (nft.get("mint") or "").lower() == avatar_nft_mint.lower()
+                ),
+                None,
+            )
+            resolved_url = (nft_match or {}).get("image_url") if nft_match else None
+            if not resolved_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not resolve NFT image URL from Helius",
+                )
+            avatar_url = resolved_url
+
+            url_lower = avatar_url.lower()
+            animation_url = ((nft_match or {}).get("animation_url") or "").lower()
+            avatar_is_animated = (
+                url_lower.endswith(".gif")
+                or url_lower.endswith(".mp4")
+                or animation_url.endswith(".gif")
+                or animation_url.endswith(".mp4")
+            )
     else:
         avatar_nft_mint = None
         if avatar_type == "NONE":
@@ -796,7 +827,7 @@ async def set_profile_avatar(body: SetProfileAvatarRequest):
             wallet,
             avatar_url,
             avatar_type,
-            body.avatar_is_animated,
+            avatar_is_animated,
             avatar_nft_mint,
         )
         return {
