@@ -15,7 +15,7 @@ from backend_blockid.api_server.session_auth import verify_session_token
 from backend_blockid.api_server.signature_verify import BLOCKID_ENV, DEVNET_BYPASS, verify_or_raise
 from backend_blockid.api_server.privacy_api import _ensure_privacy_settings
 from backend_blockid.api_server.vision_moderation import check_image_safe
-from backend_blockid.integrations.r2_client import upload_image
+from backend_blockid.integrations.r2_client import upload_image, upload_profile_photo
 from backend_blockid.api_server.social_moderation import (
     check_appeal,
     check_post_visibility,
@@ -807,6 +807,66 @@ async def set_profile_avatar(body: SetProfileAvatarRequest):
             "avatar_is_animated": bool(row["avatar_is_animated"]),
             "avatar_nft_mint": row["avatar_nft_mint"],
         }
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/profile/avatar/photo")
+async def set_profile_avatar_photo(
+    wallet: str = Form(...),
+    session_token: str = Form(...),
+    file: UploadFile = File(...),
+):
+    wallet = (wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    if BLOCKID_ENV != "DEV":
+        if not session_token:
+            raise HTTPException(status_code=401, detail="session_token required")
+        verified_wallet = verify_session_token(session_token)
+        if verified_wallet != wallet:
+            raise HTTPException(status_code=401, detail="Invalid session")
+
+    content_type = file.content_type or "image/jpeg"
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="File is empty")
+
+    try:
+        upload_res = await upload_profile_photo(
+            file_bytes=file_bytes,
+            content_type=content_type,
+            wallet=wallet,
+            photo_type="avatar",
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.warning("avatar_photo_upload_failed", wallet=wallet[:16], error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to upload avatar photo")
+
+    public_url = upload_res["url"]
+
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            """
+            INSERT INTO social_profiles (
+                wallet, avatar_url, avatar_type, avatar_is_animated, avatar_nft_mint, updated_at
+            )
+            VALUES ($1, $2, 'PHOTO', FALSE, NULL, NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+                avatar_url = EXCLUDED.avatar_url,
+                avatar_type = EXCLUDED.avatar_type,
+                avatar_is_animated = EXCLUDED.avatar_is_animated,
+                avatar_nft_mint = EXCLUDED.avatar_nft_mint,
+                updated_at = NOW()
+            """,
+            wallet,
+            public_url,
+        )
+        return {"success": True, "avatar_url": public_url}
     finally:
         await release_conn(conn)
 
