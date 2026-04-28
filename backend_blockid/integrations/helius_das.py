@@ -131,10 +131,14 @@ async def get_wallet_nfts(
 
             grouping = item.get("grouping") or []
             collection: str | None = None
+            collection_address: str | None = None
+            collection_image: str | None = None
             for g in grouping:
                 if g.get("group_key") == "collection":
                     col_meta = g.get("collection_metadata") or {}
                     collection = col_meta.get("name")
+                    collection_address = g.get("group_value")
+                    collection_image = col_meta.get("image") or col_meta.get("image_uri")
                     break
 
             nfts.append(
@@ -146,6 +150,8 @@ async def get_wallet_nfts(
                     "animation_url": animation_url,
                     "is_animated": is_animated,
                     "collection": collection,
+                    "collection_address": collection_address,
+                    "collection_image": collection_image,
                     "description": metadata.get("description") or "",
                 }
             )

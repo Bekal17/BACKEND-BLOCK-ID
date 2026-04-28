@@ -165,6 +165,17 @@ class SetProfileAvatarRequest(BaseModel):
     session_token: str = ""
 
 
+class CommunitySyncRequest(BaseModel):
+    wallet: str
+    session_token: str
+
+
+class CommunityPinRequest(BaseModel):
+    wallet: str
+    collection_address: str
+    session_token: str
+
+
 async def _has_identity_nft(wallet: str) -> bool:
     """Check if wallet has Identity NFT (mint_status = MINTED)."""
     conn = await get_conn()
@@ -3204,6 +3215,245 @@ async def search_token(ticker: str):
             return []
     except Exception:
         return []
+
+
+@router.get("/communities")
+async def get_communities(wallet: Optional[str] = Query(None)):
+    conn = await get_conn()
+    try:
+        wallet_clean = (wallet or "").strip()
+        pinned_set: set[str] = set()
+        member_set: set[str] = set()
+
+        if wallet_clean:
+            wallet_nfts = await get_wallet_nfts(wallet_clean, page=1, limit=200)
+            member_set = {
+                str((nft.get("collection_address") or "")).strip().lower()
+                for nft in wallet_nfts
+                if str((nft.get("collection_address") or "")).strip()
+            }
+            pinned_rows = await conn.fetch(
+                """
+                SELECT collection_address
+                FROM community_pins
+                WHERE wallet = $1
+                """,
+                wallet_clean,
+            )
+            pinned_set = {
+                str((row.get("collection_address") or "")).strip().lower()
+                for row in pinned_rows
+                if str((row.get("collection_address") or "")).strip()
+            }
+
+        rows = await conn.fetch(
+            """
+            SELECT
+                c.collection_address,
+                c.collection_name,
+                c.collection_image,
+                COALESCE(stats.member_count, 0) AS member_count,
+                COALESCE(stats.post_count, 0) AS post_count
+            FROM nft_communities c
+            LEFT JOIN (
+                SELECT
+                    community_address,
+                    COUNT(*) AS post_count,
+                    COUNT(DISTINCT wallet) AS member_count
+                FROM social_posts
+                WHERE community_address IS NOT NULL
+                  AND community_address <> ''
+                  AND is_hidden = FALSE
+                GROUP BY community_address
+            ) stats
+              ON LOWER(stats.community_address) = LOWER(c.collection_address)
+            ORDER BY c.updated_at DESC NULLS LAST, c.collection_name ASC
+            """
+        )
+
+        communities = []
+        for row in rows:
+            item = dict(row)
+            addr = str((item.get("collection_address") or "")).strip().lower()
+            item["is_member"] = addr in member_set if wallet_clean else False
+            item["is_pinned"] = addr in pinned_set if wallet_clean else False
+            communities.append(item)
+
+        return {"communities": communities}
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/communities/sync")
+async def sync_communities(body: CommunitySyncRequest):
+    wallet = (body.wallet or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+    if not body.session_token:
+        raise HTTPException(status_code=401, detail="session_token required")
+
+    verified_wallet = verify_session_token(body.session_token)
+    if verified_wallet.lower() != wallet.lower():
+        raise HTTPException(status_code=403, detail="wallet mismatch")
+
+    wallet_nfts = await get_wallet_nfts(wallet, page=1, limit=200)
+    by_collection: dict[str, dict[str, Optional[str]]] = {}
+    for nft in wallet_nfts:
+        raw_address = str((nft.get("collection_address") or "")).strip()
+        if not raw_address:
+            continue
+        key = raw_address.lower()
+        by_collection[key] = {
+            "collection_address": raw_address,
+            "collection_name": (nft.get("collection") or None),
+            "collection_image": (nft.get("collection_image") or None),
+        }
+
+    conn = await get_conn()
+    try:
+        for item in by_collection.values():
+            await conn.execute(
+                """
+                INSERT INTO nft_communities (
+                    collection_address,
+                    collection_name,
+                    collection_image,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (collection_address) DO UPDATE SET
+                    collection_name = EXCLUDED.collection_name,
+                    collection_image = EXCLUDED.collection_image,
+                    updated_at = NOW()
+                """,
+                item["collection_address"],
+                item["collection_name"],
+                item["collection_image"],
+            )
+
+        return {
+            "wallet": wallet,
+            "communities": [
+                {
+                    "collection_address": item["collection_address"],
+                    "collection_name": item["collection_name"],
+                    "collection_image": item["collection_image"],
+                    "is_member": True,
+                }
+                for item in by_collection.values()
+            ],
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/communities/pin")
+async def pin_community(body: CommunityPinRequest):
+    wallet = (body.wallet or "").strip()
+    collection_address = (body.collection_address or "").strip()
+    if not wallet or not collection_address:
+        raise HTTPException(status_code=400, detail="wallet and collection_address required")
+    if not body.session_token:
+        raise HTTPException(status_code=401, detail="session_token required")
+
+    verified_wallet = verify_session_token(body.session_token)
+    if verified_wallet.lower() != wallet.lower():
+        raise HTTPException(status_code=403, detail="wallet mismatch")
+
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            """
+            INSERT INTO community_pins (wallet, collection_address, created_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (wallet, collection_address) DO NOTHING
+            """,
+            wallet,
+            collection_address,
+        )
+        return {"success": True}
+    finally:
+        await release_conn(conn)
+
+
+@router.delete("/communities/pin")
+async def unpin_community(body: CommunityPinRequest):
+    wallet = (body.wallet or "").strip()
+    collection_address = (body.collection_address or "").strip()
+    if not wallet or not collection_address:
+        raise HTTPException(status_code=400, detail="wallet and collection_address required")
+    if not body.session_token:
+        raise HTTPException(status_code=401, detail="session_token required")
+
+    verified_wallet = verify_session_token(body.session_token)
+    if verified_wallet.lower() != wallet.lower():
+        raise HTTPException(status_code=403, detail="wallet mismatch")
+
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            """
+            DELETE FROM community_pins
+            WHERE wallet = $1 AND collection_address = $2
+            """,
+            wallet,
+            collection_address,
+        )
+        return {"success": True}
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/communities/{collection_address}/feed")
+async def get_community_feed(
+    collection_address: str,
+    wallet: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=50),
+    before: Optional[datetime] = Query(None),
+):
+    conn = await get_conn()
+    try:
+        before_clause = "AND p.created_at < $3" if before else ""
+        params: List[Any] = [collection_address, limit]
+        if before:
+            params.append(before)
+
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                p.*,
+                sp_prof.avatar_url,
+                sp_prof.avatar_type,
+                sp_prof.avatar_is_animated,
+                COALESCE(sub.plan, 'free') AS plan
+            FROM social_posts p
+            LEFT JOIN social_profiles sp_prof
+              ON sp_prof.wallet = p.wallet
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id) user_id, plan
+                FROM subscriptions
+                WHERE status = 'active'
+                ORDER BY user_id, created_at DESC NULLS LAST
+            ) sub ON sub.user_id = p.wallet
+            WHERE LOWER(p.community_address) = LOWER($1)
+              AND p.is_hidden = FALSE
+              {before_clause}
+            ORDER BY p.created_at DESC
+            LIMIT $2
+            """,
+            *params,
+        )
+
+        posts = [dict(r) for r in rows]
+        next_cursor = posts[-1]["created_at"].isoformat() if posts else None
+        return {
+            "collection_address": collection_address,
+            "wallet": wallet,
+            "posts": posts,
+            "next_cursor": next_cursor,
+        }
+    finally:
+        await release_conn(conn)
 
 
 HELIUS_BASE = (os.getenv("HELIUS_BASE") or "https://api.helius.xyz").rstrip("/")
