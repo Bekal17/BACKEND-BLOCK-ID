@@ -26,6 +26,7 @@ from backend_blockid.database.score_history import log_score_change
 from backend_blockid.config.env import get_helius_api_key
 from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.database.repositories import insert_wallet_reason
+from backend_blockid.integrations.helius_das import get_wallet_nfts, verify_nft_ownership
 from backend_blockid.utils.og_fetcher import extract_first_url, fetch_og_metadata
 
 
@@ -153,6 +154,15 @@ class CreatePostRequest(BaseModel):
 class SetBadgesRequest(BaseModel):
     wallet: str
     badges: list[str]
+
+
+class SetProfileAvatarRequest(BaseModel):
+    wallet: str
+    avatar_url: str = ""
+    avatar_type: str
+    avatar_is_animated: bool = False
+    avatar_nft_mint: Optional[str] = None
+    session_token: str = ""
 
 
 async def _has_identity_nft(wallet: str) -> bool:
@@ -376,6 +386,16 @@ async def create_post(body: CreatePostRequest):
 
         auto_hide = bool(visibility.get("auto_hide"))
         hide_reason = visibility.get("hide_reason")
+
+        await conn.execute(
+            """
+            INSERT INTO social_profiles (wallet, updated_at)
+            VALUES ($1, NOW())
+            ON CONFLICT (wallet) DO UPDATE
+            SET updated_at = NOW()
+            """,
+            wallet,
+        )
 
         row = await conn.fetchrow(
             """
@@ -660,6 +680,16 @@ async def create_post_with_image(
         auto_hide = bool(visibility.get("auto_hide"))
         hide_reason = visibility.get("hide_reason")
 
+        await conn.execute(
+            """
+            INSERT INTO social_profiles (wallet, updated_at)
+            VALUES ($1, NOW())
+            ON CONFLICT (wallet) DO UPDATE
+            SET updated_at = NOW()
+            """,
+            wallet,
+        )
+
         row = await conn.fetchrow(
             """
             INSERT INTO social_posts (
@@ -706,6 +736,77 @@ async def create_post_with_image(
                 await _notify(conn, parent_row["wallet"], "REPLY", wallet, parent_id_val)
 
         return PostResponse(**dict(row))
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/profile/avatar")
+async def set_profile_avatar(body: SetProfileAvatarRequest):
+    wallet = (body.wallet or "").strip()
+    avatar_type = (body.avatar_type or "").strip().upper()
+    avatar_url = (body.avatar_url or "").strip()
+    avatar_nft_mint = (body.avatar_nft_mint or "").strip() or None
+
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+    if avatar_type not in {"NFT", "PHOTO", "NONE"}:
+        raise HTTPException(status_code=400, detail="avatar_type must be NFT, PHOTO, or NONE")
+
+    if BLOCKID_ENV != "DEV":
+        if not body.session_token:
+            raise HTTPException(status_code=401, detail="session_token required")
+        verified_wallet = verify_session_token(body.session_token)
+        if verified_wallet != wallet:
+            raise HTTPException(status_code=401, detail="Invalid session")
+
+    if avatar_type == "NFT":
+        if not avatar_nft_mint:
+            raise HTTPException(status_code=400, detail="avatar_nft_mint required for NFT avatar")
+
+        owns_nft = await verify_nft_ownership(wallet, avatar_nft_mint)
+        if not owns_nft:
+            wallet_nfts = await get_wallet_nfts(wallet, page=1, limit=100)
+            owns_nft = any(
+                (nft.get("mint") or "").lower() == avatar_nft_mint.lower()
+                for nft in wallet_nfts
+            )
+        if not owns_nft:
+            raise HTTPException(status_code=403, detail="Wallet does not own avatar_nft_mint")
+    else:
+        avatar_nft_mint = None
+        if avatar_type == "NONE":
+            avatar_url = ""
+
+    conn = await get_conn()
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO social_profiles (
+                wallet, avatar_url, avatar_type, avatar_is_animated, avatar_nft_mint, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+                avatar_url = EXCLUDED.avatar_url,
+                avatar_type = EXCLUDED.avatar_type,
+                avatar_is_animated = EXCLUDED.avatar_is_animated,
+                avatar_nft_mint = EXCLUDED.avatar_nft_mint,
+                updated_at = NOW()
+            RETURNING wallet, avatar_url, avatar_type, avatar_is_animated, avatar_nft_mint
+            """,
+            wallet,
+            avatar_url,
+            avatar_type,
+            body.avatar_is_animated,
+            avatar_nft_mint,
+        )
+        return {
+            "success": True,
+            "wallet": row["wallet"],
+            "avatar_url": row["avatar_url"],
+            "avatar_type": row["avatar_type"],
+            "avatar_is_animated": bool(row["avatar_is_animated"]),
+            "avatar_nft_mint": row["avatar_nft_mint"],
+        }
     finally:
         await release_conn(conn)
 

@@ -1,70 +1,80 @@
 """
-Background worker that scans social posts for @sage mentions
-and triggers Sage auto-replies.
+Background polling worker for @sage mentions in social feed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 
+from backend_blockid.api_server.sage_api import process_sage_mention
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
-from backend_blockid.api_server.sage_api import process_sage_mention
-
 
 logger = get_logger(__name__)
 
-SAGE_POLL_INTERVAL_SEC = float(os.getenv("SAGE_POLL_INTERVAL_SEC", "15").strip() or "15")
-SAGE_BATCH_LIMIT = int(os.getenv("SAGE_BATCH_LIMIT", "20").strip() or "20")
+last_processed_id = 0
 
 
-async def _fetch_pending_mentions():
+async def _initialize_last_processed_id() -> None:
+    """Set starting cursor so restarts do not reply to old posts."""
+    global last_processed_id
     conn = await get_conn()
     try:
-        rows = await conn.fetch(
+        row = await conn.fetchrow(
             """
-            SELECT sp.id, sp.content, sp.wallet AS author_wallet, COALESCE(sp.handle, '') AS author_handle
-            FROM social_posts sp
-            WHERE sp.parent_id IS NULL
-              AND sp.content ILIKE '%@sage%'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM social_posts r
-                WHERE r.parent_id = sp.id
-                  AND LOWER(COALESCE(r.handle, '')) = 'sage'
-              )
-            ORDER BY sp.created_at DESC
-            LIMIT $1
-            """,
-            SAGE_BATCH_LIMIT,
+            SELECT COALESCE(MAX(id), 0) AS max_id
+            FROM social_posts
+            WHERE handle != 'sage'
+            """
         )
-        return rows
+        last_processed_id = int(row["max_id"] or 0) if row else 0
+        logger.info("sage_worker_initialized", last_processed_id=last_processed_id)
     finally:
         await release_conn(conn)
 
 
-async def start_sage_worker():
-    """Run forever: process posts that mention @sage and have no sage reply."""
-    logger.info("sage_worker_started", interval_sec=SAGE_POLL_INTERVAL_SEC, batch_limit=SAGE_BATCH_LIMIT)
+async def poll_sage_mentions() -> None:
+    """Fetch and process new @sage mentions since last processed post ID."""
+    global last_processed_id
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT id, wallet, handle, content
+            FROM social_posts
+            WHERE id > $1
+              AND handle != 'sage'
+              AND content ILIKE '%@sage%'
+              AND parent_id IS NULL
+            ORDER BY id ASC
+            LIMIT 20
+            """,
+            last_processed_id,
+        )
+    finally:
+        await release_conn(conn)
+
+    for row in rows:
+        post_id = int(row["id"])
+        try:
+            await process_sage_mention(
+                post_id=post_id,
+                content=row["content"] or "",
+                author_wallet=row["wallet"] or "",
+                author_handle=row["handle"] or "",
+            )
+        except Exception as e:
+            logger.warning("sage_worker_process_error", post_id=post_id, error=str(e))
+        finally:
+            last_processed_id = post_id
+
+
+async def start_sage_worker() -> None:
+    """Run forever: poll @sage mentions every 30 seconds."""
+    await _initialize_last_processed_id()
     while True:
         try:
-            rows = await _fetch_pending_mentions()
-            for row in rows:
-                try:
-                    await process_sage_mention(
-                        post_id=row["id"],
-                        content=row["content"] or "",
-                        author_wallet=row["author_wallet"] or "",
-                        author_handle=row["author_handle"] or "",
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "sage_worker_process_failed",
-                        post_id=row.get("id"),
-                        error=str(e),
-                    )
+            await poll_sage_mentions()
         except Exception as e:
-            logger.warning("sage_worker_loop_error", error=str(e))
-
-        await asyncio.sleep(SAGE_POLL_INTERVAL_SEC)
+            logger.warning("sage_worker_poll_error", error=str(e))
+        await asyncio.sleep(30)
