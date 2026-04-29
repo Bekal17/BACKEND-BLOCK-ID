@@ -30,6 +30,8 @@ JUPITER_BASE_URL = "https://api.jup.ag/swap/v2"
 JUPITER_ORDER_URL = f"{JUPITER_BASE_URL}/order"
 JUPITER_EXECUTE_URL = f"{JUPITER_BASE_URL}/execute"
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "")
+JUPITER_REFERRAL_ACCOUNT = "8SVPrMMD5kL7yxtE8Rk8h5DTK4AvWD5QSGNQnEH4fFaY"
+JUPITER_REFERRAL_FEE_BPS = "95"
 
 BADGE_LABELS = {
     "NO_SCAM_HISTORY": "Clean Record",
@@ -312,6 +314,8 @@ async def get_quote(req: QuoteRequest):
                         "outputMint": output_info["mint"],
                         "amount": str(amount_raw),
                         "slippageBps": "50",
+                        "referralAccount": JUPITER_REFERRAL_ACCOUNT,
+                        "referralFee": JUPITER_REFERRAL_FEE_BPS,
                     },
                     headers=headers,
                 )
@@ -382,6 +386,8 @@ async def swap_quote(req: SwapQuoteRequest):
                     "outputMint": output_info["mint"],
                     "amount": str(amount_raw),
                     "slippageBps": str(req.slippage_bps),
+                    "referralAccount": JUPITER_REFERRAL_ACCOUNT,
+                    "referralFee": JUPITER_REFERRAL_FEE_BPS,
                 },
                 headers=headers,
             )
@@ -451,6 +457,8 @@ async def prepare_swap(req: SwapRequest):
                     "amount": str(amount_raw),
                     "slippageBps": str(req.slippage_bps),
                     "taker": taker_wallet,
+                    "referralAccount": JUPITER_REFERRAL_ACCOUNT,
+                    "referralFee": JUPITER_REFERRAL_FEE_BPS,
                 },
                 headers=headers,
             )
