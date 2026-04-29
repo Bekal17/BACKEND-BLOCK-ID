@@ -119,11 +119,14 @@ async def embedded_login(body: EmbeddedLoginRequest):
 
         await conn.execute(
             """
-            INSERT INTO social_profiles (wallet, updated_at)
-            VALUES ($1, NOW())
-            ON CONFLICT (wallet) DO UPDATE SET updated_at = NOW()
+            INSERT INTO social_profiles (wallet, auth_type, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+              auth_type = EXCLUDED.auth_type,
+              updated_at = NOW()
             """,
             wallet_address,
+            auth_provider,
         )
 
         session_token = create_session_token(wallet_address)
