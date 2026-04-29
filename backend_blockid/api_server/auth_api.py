@@ -156,8 +156,7 @@ async def embedded_login(body: EmbeddedLoginRequest):
     finally:
         await release_conn(conn)
 
-    if is_new_user:
-        asyncio.create_task(run_realtime_wallet_pipeline(wallet_address))
+    asyncio.create_task(run_realtime_wallet_pipeline(wallet_address))
 
     return {
         "success": True,
