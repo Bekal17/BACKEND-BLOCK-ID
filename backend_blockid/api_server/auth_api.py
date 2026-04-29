@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from solders.pubkey import Pubkey
 
 from backend_blockid.api_server.session_auth import create_session_token
 from backend_blockid.oracle.realtime_wallet_pipeline import run_realtime_wallet_pipeline
+from backend_blockid.database.pg_connection import get_conn, release_conn
 from backend_blockid.api_server.signature_verify import (
     BLOCKID_ENV,
     DEVNET_BYPASS,
@@ -22,6 +25,14 @@ class LoginRequest(BaseModel):
     wallet: str
     signed_message: str
     signature: str
+
+
+class EmbeddedLoginRequest(BaseModel):
+    wallet_address: str
+    auth_provider: str
+
+
+_SOLANA_BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 @router.post("/login")
@@ -75,4 +86,79 @@ async def login(body: LoginRequest):
         "wallet": wallet,
         "expires_in": 86400,
         "message": "Login successful. Token valid for 24 hours.",
+    }
+
+
+@router.post("/embedded-login")
+async def embedded_login(body: EmbeddedLoginRequest):
+    """
+    Login/register wallet from embedded auth provider (Google/Apple).
+    Creates a JWT session and stores latest session token server-side.
+    """
+    wallet_address = (body.wallet_address or "").strip()
+    auth_provider = (body.auth_provider or "").strip().lower()
+
+    if not wallet_address:
+        raise HTTPException(400, detail="wallet_address required")
+    if not _SOLANA_BASE58_RE.match(wallet_address):
+        raise HTTPException(400, detail="Invalid Solana wallet address format")
+    try:
+        Pubkey.from_string(wallet_address)
+    except Exception:
+        raise HTTPException(400, detail="Invalid Solana wallet address")
+    if not auth_provider:
+        raise HTTPException(400, detail="auth_provider required")
+
+    conn = await get_conn()
+    try:
+        has_score = await conn.fetchval(
+            "SELECT 1 FROM trust_scores WHERE wallet=$1 LIMIT 1",
+            wallet_address,
+        )
+        is_new_user = not bool(has_score)
+
+        await conn.execute(
+            """
+            INSERT INTO social_profiles (wallet, updated_at)
+            VALUES ($1, NOW())
+            ON CONFLICT (wallet) DO UPDATE SET updated_at = NOW()
+            """,
+            wallet_address,
+        )
+
+        session_token = create_session_token(wallet_address)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                wallet TEXT PRIMARY KEY,
+                session_token TEXT NOT NULL,
+                auth_provider TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO auth_sessions (wallet, session_token, auth_provider, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+                session_token = EXCLUDED.session_token,
+                auth_provider = EXCLUDED.auth_provider,
+                updated_at = NOW()
+            """,
+            wallet_address,
+            session_token,
+            auth_provider,
+        )
+    finally:
+        await release_conn(conn)
+
+    if is_new_user:
+        asyncio.create_task(run_realtime_wallet_pipeline(wallet_address))
+
+    return {
+        "success": True,
+        "wallet_address": wallet_address,
+        "session_token": session_token,
+        "is_new_user": is_new_user,
     }
