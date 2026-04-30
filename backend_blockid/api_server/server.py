@@ -79,6 +79,20 @@ logger = get_logger(__name__)
 
 print("API USING DATABASE: PostgreSQL (asyncpg)")
 
+
+def _run_pipeline(wallet: str) -> None:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_realtime_wallet_pipeline(wallet))
+    finally:
+        loop.close()
+
+
+def _trigger_pipeline_thread(wallet: str) -> None:
+    thread = threading.Thread(target=_run_pipeline, args=(wallet,), daemon=True)
+    thread.start()
+
 # Periodic runner: interval and shutdown join timeout (seconds)
 PERIODIC_INTERVAL_SEC = float(os.getenv("PERIODIC_INTERVAL_SEC", "30").strip() or "30")
 PERIODIC_SHUTDOWN_JOIN_SEC = 15.0
@@ -378,6 +392,8 @@ def track_wallet(body: TrackWalletRequest):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid Solana wallet address")
     registered = tracking_add_wallet(wallet)
+    if registered:
+        _trigger_pipeline_thread(wallet)
     resp = TrackWalletResponse(wallet=wallet, registered=registered)
     return JSONResponse(
         status_code=201 if registered else 200,
@@ -611,6 +627,8 @@ def track_wallet_step2(body: TrackWalletStep2Request) -> JSONResponse:
     """
     try:
         registered = tracking_add_wallet(body.wallet, body.label or "")
+        if registered:
+            _trigger_pipeline_thread(body.wallet.strip())
         label = (body.label or "").strip()
         return JSONResponse(
             status_code=201 if registered else 200,

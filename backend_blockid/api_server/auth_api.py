@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -35,6 +36,20 @@ class EmbeddedLoginRequest(BaseModel):
 _SOLANA_BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
+def _run_pipeline(wallet: str) -> None:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_realtime_wallet_pipeline(wallet))
+    finally:
+        loop.close()
+
+
+def _trigger_pipeline_thread(wallet: str) -> None:
+    thread = threading.Thread(target=_run_pipeline, args=(wallet,), daemon=True)
+    thread.start()
+
+
 @router.post("/login")
 async def login(body: LoginRequest):
     """
@@ -60,7 +75,7 @@ async def login(body: LoginRequest):
     # In DEV mode accept bypass
     if BLOCKID_ENV == "DEV" and body.signature in DEVNET_BYPASS:
         token = create_session_token(wallet)
-        asyncio.create_task(run_realtime_wallet_pipeline(wallet))
+        _trigger_pipeline_thread(wallet)
         return {"session_token": token, "wallet": wallet, "expires_in": 86400}
 
     # Verify signature
@@ -80,7 +95,7 @@ async def login(body: LoginRequest):
         raise HTTPException(401, detail="Invalid message format")
 
     token = create_session_token(wallet)
-    asyncio.create_task(run_realtime_wallet_pipeline(wallet))
+    _trigger_pipeline_thread(wallet)
     return {
         "session_token": token,
         "wallet": wallet,
@@ -156,7 +171,7 @@ async def embedded_login(body: EmbeddedLoginRequest):
     finally:
         await release_conn(conn)
 
-    asyncio.create_task(run_realtime_wallet_pipeline(wallet_address))
+    _trigger_pipeline_thread(wallet_address)
 
     return {
         "success": True,
