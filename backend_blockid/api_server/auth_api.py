@@ -95,6 +95,19 @@ async def login(body: LoginRequest):
         raise HTTPException(401, detail="Invalid message format")
 
     token = create_session_token(wallet)
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            """
+            INSERT INTO social_profiles (wallet, auth_type, updated_at)
+            VALUES ($1, 'wallet', NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+              updated_at = NOW()
+            """,
+            wallet,
+        )
+    finally:
+        await release_conn(conn)
     _trigger_pipeline_thread(wallet)
     return {
         "session_token": token,
