@@ -946,6 +946,7 @@ async def get_following_feed(
                 sp_orig.avatar_is_animated AS original_avatar_is_animated,
                 COALESCE(sub.plan, 'free') AS plan,
                 COALESCE(sub_orig.plan, 'free') AS original_plan,
+                nc.collection_name AS community_name,
                 sp_prof.avatar_url,
                 sp_prof.avatar_type,
                 sp_prof.avatar_is_animated
@@ -970,6 +971,8 @@ async def get_following_feed(
                 WHERE status = 'active'
                 ORDER BY user_id, created_at DESC NULLS LAST
             ) sub_orig ON sub_orig.user_id = orig.wallet
+            LEFT JOIN nft_communities nc
+              ON LOWER(nc.collection_address) = LOWER(p.community_address)
             WHERE f.follower_wallet = $1
               AND p.is_hidden = FALSE
               AND p.parent_id IS NULL
@@ -1089,6 +1092,7 @@ async def get_explore_feed(
                     sp_orig.avatar_is_animated AS original_avatar_is_animated,
                     COALESCE(sub.plan, 'free') AS plan,
                     COALESCE(sub_orig.plan, 'free') AS original_plan,
+                    nc.collection_name AS community_name,
                     sp_prof.avatar_url,
                     sp_prof.avatar_type,
                     sp_prof.avatar_is_animated
@@ -1117,6 +1121,8 @@ async def get_explore_feed(
                     WHERE status = 'active'
                     ORDER BY user_id, created_at DESC NULLS LAST
                 ) sub_orig ON sub_orig.user_id = orig.wallet
+                LEFT JOIN nft_communities nc
+                  ON LOWER(nc.collection_address) = LOWER(p.community_address)
                 WHERE p.post_type = 'PUBLIC'
                   AND p.is_hidden = FALSE
                   AND p.parent_id IS NULL
