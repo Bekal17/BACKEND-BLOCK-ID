@@ -146,6 +146,8 @@ class CreatePostRequest(BaseModel):
     image_url: Optional[str] = None
     media_type: Optional[str] = None
     parent_id: Optional[int] = None
+    community_address: Optional[str] = None
+    share_to_everyone: Optional[bool] = True
     signed_message: str = ""
     signature: str = ""
     session_token: str = ""
@@ -414,7 +416,8 @@ async def create_post(body: CreatePostRequest):
                 wallet, handle, content, image_url, image_key,
                 post_type, parent_id, is_hidden, hide_reason,
                 trust_score, risk_level,
-                link_url, link_title, link_description, link_image, media_type
+                link_url, link_title, link_description, link_image, media_type,
+                community_address, share_to_everyone
             )
             VALUES (
                 $1,
@@ -422,7 +425,7 @@ async def create_post(body: CreatePostRequest):
                 $2, $3, $4,
                 $5, $6, $7, $8,
                 $9, $10,
-                $11, $12, $13, $14, $15
+                $11, $12, $13, $14, $15, $16, $17
             )
             RETURNING id, wallet, handle, content, image_url, post_type,
                       trust_score, risk_level, is_hidden, created_at
@@ -442,6 +445,8 @@ async def create_post(body: CreatePostRequest):
             link_description,
             link_image,
             body.media_type,
+            body.community_address,
+            body.share_to_everyone,
         )
         if parent_id:
             await conn.execute(
