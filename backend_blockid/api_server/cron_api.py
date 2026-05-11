@@ -10,9 +10,11 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, BackgroundTasks
+from fastapi import Request
 from pydantic import BaseModel
 
 import asyncpg
+from backend_blockid.oracle.blacklist_sync import sync_allenhark_blacklist
 
 logger = logging.getLogger("cron_recalculate")
 
@@ -130,3 +132,18 @@ async def auto_recalculate(
         "message": "Batch recalculate triggered in background",
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+@router.post("/sync-blacklist")
+async def sync_blacklist(request: Request):
+    """
+    Daily cron endpoint to sync allenhark scammer blacklist.
+    Call this once per day from cron-job.org.
+    Protected by X-Cron-Secret header.
+    """
+    secret = request.headers.get("X-Cron-Secret")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return {"error": "unauthorized"}, 401
+
+    result = await sync_allenhark_blacklist()
+    return result
