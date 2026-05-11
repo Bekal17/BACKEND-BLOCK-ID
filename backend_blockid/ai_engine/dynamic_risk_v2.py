@@ -178,6 +178,84 @@ async def _get_last_tx_time_and_count(conn: Any, wallet: str) -> tuple[int, int]
     return last_tx_time, tx_count
 
 
+async def _get_wallet_establishment_data(conn: Any, wallet: str) -> dict[str, Any]:
+    """
+    Returns wallet establishment metrics for cap scoring.
+    Cap activates if 2 or more of these 3 conditions are unmet:
+      - wallet_age_days >= 60
+      - tx_count_total >= 30
+      - usd_outgoing_total >= 1000
+    """
+    age_row = await conn.fetchrow(
+        "SELECT wallet_age_days FROM trust_scores WHERE wallet = $1",
+        wallet,
+    )
+    wallet_age_days = int(age_row["wallet_age_days"] or 0) if age_row and age_row["wallet_age_days"] else 0
+
+    tx_row = await conn.fetchrow(
+        """
+        SELECT
+            COUNT(*) as tx_count,
+            COALESCE(SUM(CASE WHEN usd_amount IS NOT NULL THEN usd_amount ELSE 0 END), 0) as usd_outgoing
+        FROM transactions
+        WHERE sender = $1
+        """,
+        wallet,
+    )
+    tx_count = int(tx_row["tx_count"] or 0) if tx_row else 0
+    usd_outgoing = float(tx_row["usd_outgoing"] or 0.0) if tx_row else 0.0
+
+    age_ok = wallet_age_days >= 60
+    tx_ok = tx_count >= 30
+    usd_ok = usd_outgoing >= 1000.0
+
+    conditions_met = sum([age_ok, tx_ok, usd_ok])
+    cap_active = conditions_met < 2
+
+    return {
+        "wallet_age_days": wallet_age_days,
+        "tx_count_total": tx_count,
+        "usd_outgoing_total": usd_outgoing,
+        "age_ok": age_ok,
+        "tx_ok": tx_ok,
+        "usd_ok": usd_ok,
+        "cap_active": cap_active,
+        "conditions_met": conditions_met,
+    }
+
+
+async def _get_cyclops_penalty(conn: Any, wallet: str) -> float:
+    """
+    Returns penalty based on Cyclops/Daemon risk score from wallet_meta.
+    Formula:
+      base_penalty = -(cyclops_risk_score / 100) * 40   -> max -40
+      sanction_bonus = -20 if cyclops_is_sanctioned else 0
+      total = max(-50, base + sanction_bonus)
+
+    Normal wallet (score ~10): penalty ~-4 (minimal)
+    High risk wallet (score 80): penalty -32
+    Sanctioned + score 100: penalty -50 (capped)
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT cyclops_risk_score, cyclops_is_sanctioned
+        FROM wallet_meta WHERE wallet = $1
+        """,
+        wallet,
+    )
+    if not row or row["cyclops_risk_score"] is None:
+        return 0.0
+
+    cyclops_score = float(row["cyclops_risk_score"] or 0)
+    is_sanctioned = bool(row["cyclops_is_sanctioned"] or False)
+
+    base_penalty = -(cyclops_score / 100.0) * 40.0
+    sanction_bonus = -20.0 if is_sanctioned else 0.0
+    total = max(-50.0, base_penalty + sanction_bonus)
+
+    return total
+
+
 async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
     conn = await get_conn()
     try:
@@ -248,8 +326,15 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         ml_score = details["ml_score"]
         dynamic_risk = details["dynamic_risk"]
         reason_penalty = await _get_reason_penalty(conn, wallet)
-        final_score = (dynamic_risk + reason_penalty)
+        establishment = await _get_wallet_establishment_data(conn, wallet)
+        cyclops_penalty = await _get_cyclops_penalty(conn, wallet)
+        final_score = (dynamic_risk + reason_penalty + cyclops_penalty)
         final_score = max(0.0, min(97.0, final_score))
+
+        # Apply new wallet cap: if unestablished, score cannot exceed 50
+        if establishment["cap_active"]:
+            final_score = min(final_score, 50.0)
+
         risk_level = score_to_risk(int(round(final_score)))
 
         # Fetch score_before for history (before any UPDATE)
@@ -279,6 +364,11 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
             decay=0.0,
             activity_boost=float(details.get("activity_boost", 0.0)),
             risk_level=str(risk_level),
+            metadata={
+                "cyclops_penalty": float(cyclops_penalty),
+                "cap_active": establishment["cap_active"],
+                "conditions_met": establishment["conditions_met"],
+            },
         )
 
         exists = await conn.fetchval("SELECT 1 FROM trust_scores WHERE wallet = $1", wallet)
@@ -340,6 +430,12 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
 
         details["final_score"] = float(final_score)
         details["reason_penalty"] = float(reason_penalty)
+        details["cyclops_penalty"] = float(cyclops_penalty)
+        details["cap_active"] = establishment["cap_active"]
+        details["cap_conditions_met"] = establishment["conditions_met"]
+        details["wallet_age_days"] = establishment["wallet_age_days"]
+        details["tx_count_total"] = establishment["tx_count_total"]
+        details["usd_outgoing_total"] = establishment["usd_outgoing_total"]
         details["risk_level"] = risk_level
         return details
     finally:
