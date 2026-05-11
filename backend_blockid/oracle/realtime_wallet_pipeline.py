@@ -44,6 +44,23 @@ from backend_blockid.integrations.cyclops_client import analyze_wallet as cyclop
 from backend_blockid.integrations.daemon_ai_client import explain_wallet_risk
 from backend_blockid.tools.helius_client import helius_request
 
+
+async def _fetch_sol_price_usd() -> float:
+    """Fetch current SOL price in USD from Jupiter Price API."""
+    try:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://price.jup.ag/v6/price?ids=SOL&vsToken=USDC",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                data = await resp.json()
+                return float(data["data"]["SOL"]["price"])
+    except Exception:
+        return 150.0  # fallback if API fails
+
+
 logger = get_logger(__name__)
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -90,20 +107,25 @@ def _parse_tx_to_record(tx: dict[str, Any], queried_wallet: str) -> dict[str, An
             amt = float(t.get("amount") or 0) / 1e9
         except (TypeError, ValueError):
             amt = 0.0
+        amt_lamports = int((amt or 0) * 1e9)
         return {
             "signature": sig,
             "wallet": queried_wallet,
             "from_wallet": frm,
             "to_wallet": to,
             "amount": amt,
-            "amount_lamports": int((amt or 0) * 1e9),
+            "amount_lamports": amt_lamports,
             "timestamp": int(ts) if ts else 0,
             "program_id": program_id or "11111111111111111111111111111111",
+            "token_mint": None,
+            "token_symbol": "SOL",
+            "raw_token_amount": amt_lamports / 1e9,
         }
 
     for t in tx.get("tokenTransfers") or []:
         frm = (t.get("fromUserAccount") or t.get("fromTokenAccount") or "").strip()
         to = (t.get("toUserAccount") or t.get("toTokenAccount") or "").strip()
+        mint = (t.get("mint") or t.get("tokenMint") or "").strip()
         if not frm or not to:
             continue
         try:
@@ -116,6 +138,16 @@ def _parse_tx_to_record(tx: dict[str, Any], queried_wallet: str) -> dict[str, An
                 amt = float(raw)
         except (TypeError, ValueError):
             amt = 0.0
+
+        # Determine token symbol from mint
+        USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+        token_symbol = None
+        if mint == USDC_MINT:
+            token_symbol = "USDC"
+        elif mint == USDT_MINT:
+            token_symbol = "USDT"
+
         return {
             "signature": sig,
             "wallet": queried_wallet,
@@ -125,6 +157,9 @@ def _parse_tx_to_record(tx: dict[str, Any], queried_wallet: str) -> dict[str, An
             "amount_lamports": int((amt or 0) * 1e9),
             "timestamp": int(ts) if ts else 0,
             "program_id": program_id or "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "token_mint": mint or None,
+            "token_symbol": token_symbol,
+            "raw_token_amount": amt,
         }
     return None
 
@@ -200,15 +235,27 @@ async def _ensure_wallet_in_trust_scores(wallet: str) -> None:
 
 
 async def _insert_transactions(conn, wallet: str, records: list[dict[str, Any]]) -> int:
+    sol_price = await _fetch_sol_price_usd()
     inserted = 0
     for r in records:
         try:
+            # Calculate usd_amount
+            symbol = r.get("token_symbol")
+            raw_amount = r.get("raw_token_amount") or 0.0
+            if symbol in ("USDC", "USDT"):
+                usd_amount = raw_amount  # already USD
+            elif symbol == "SOL":
+                usd_amount = raw_amount * sol_price
+            else:
+                usd_amount = None  # unknown token, skip
+
             await conn.execute(
                 """
                 INSERT INTO transactions
                 (wallet, signature, sender, receiver, amount_lamports,
-                timestamp, slot, created_at, program_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                timestamp, slot, created_at, program_id,
+                usd_amount, token_mint, token_symbol)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (wallet, signature) DO NOTHING
                 """,
                 r["wallet"],
@@ -220,6 +267,9 @@ async def _insert_transactions(conn, wallet: str, records: list[dict[str, Any]])
                 None,
                 int(time.time()),
                 r.get("program_id"),
+                usd_amount,
+                r.get("token_mint"),
+                symbol,
             )
             inserted += 1
         except Exception as e:
