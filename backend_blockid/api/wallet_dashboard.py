@@ -40,6 +40,43 @@ async def _detect_tx_columns(conn) -> tuple[str, str, str]:
     return from_col, to_col, amount_col
 
 
+def _build_alerts(trust_score: int, reasons: list[str], raw_ml_score: float) -> list[str]:
+    """
+    Generate risk alerts based on score, reason codes, and ML score.
+    """
+    alerts = []
+    reason_set = set(reasons)
+
+    # Critical reason codes
+    if "MEGA_DRAINER" in reason_set or "DRAINER_FLOW" in reason_set or "DRAINER_FLOW_DETECTED" in reason_set:
+        alerts.append("Drainer activity detected — do not send funds")
+    if "RUG_PULL_DEPLOYER" in reason_set:
+        alerts.append("Wallet is a known rug pull deployer")
+    if any(r in reason_set for r in ["SCAM_CLUSTER_MEMBER", "SCAM_CLUSTER_MEMBER_LARGE", "SCAM_CLUSTER_MEMBER_SMALL"]):
+        alerts.append("Wallet is linked to a scam cluster")
+    if "BLACKLISTED_CREATOR" in reason_set:
+        alerts.append("Wallet is a blacklisted token creator")
+    if "HIGH_RISK_TOKEN_INTERACTION" in reason_set or "SUSPICIOUS_TOKEN_MINT" in reason_set:
+        alerts.append("High-risk token interaction detected")
+    if "DRAINER_INTERACTION" in reason_set:
+        alerts.append("Wallet has interacted with a known drainer")
+    if "CONTENT_VIOLATION_CRITICAL" in reason_set:
+        alerts.append("Critical content violation on record")
+
+    # ML score signals
+    if raw_ml_score > 0 and raw_ml_score < 30:
+        if not any("drainer" in a.lower() or "rug" in a.lower() or "scam" in a.lower() for a in alerts):
+            alerts.append("ML model detected high-risk behavioral patterns")
+
+    # Score-based fallback
+    if trust_score < 30 and len(alerts) == 0:
+        alerts.append("Multiple risk signals detected — proceed with caution")
+    elif trust_score < 50 and len(alerts) == 0:
+        alerts.append("Moderate risk signals present — verify before transacting")
+
+    return alerts
+
+
 @router.get("/wallet/{wallet}/needs-refresh")
 async def check_needs_refresh(wallet: str) -> dict:
     """
@@ -87,7 +124,7 @@ async def get_wallet_dashboard(wallet: str) -> dict:
     conn = await get_conn()
     try:
         row = await conn.fetchrow(
-            """SELECT score, risk_level, wallet_age_days AS ts_wallet_age_days
+            """SELECT score, risk_level, wallet_age_days AS ts_wallet_age_days, raw_ml_score
                FROM trust_scores WHERE wallet=$1 ORDER BY computed_at DESC NULLS LAST LIMIT 1""",
             wallet,
         )
@@ -98,7 +135,7 @@ async def get_wallet_dashboard(wallet: str) -> dict:
                 pass
 
             row = await conn.fetchrow(
-                """SELECT score, risk_level, wallet_age_days AS ts_wallet_age_days
+                """SELECT score, risk_level, wallet_age_days AS ts_wallet_age_days, raw_ml_score
                    FROM trust_scores WHERE wallet=$1 ORDER BY computed_at DESC NULLS LAST LIMIT 1""",
                 wallet,
             )
@@ -108,6 +145,7 @@ async def get_wallet_dashboard(wallet: str) -> dict:
         if row is not None:
             trust_score = int(round(float(row.get("score") or 0)))
             risk_tier = str(row.get("risk_level") or "unknown").strip()
+        raw_ml_score = float(row.get("raw_ml_score") or 0) if row is not None else 0.0
 
         wm = None
         try:
@@ -302,7 +340,7 @@ async def get_wallet_dashboard(wallet: str) -> dict:
                 "volume_30d": round(volume_30d, 2),
             },
             "behavior": behavior,
-            "alerts": [],
+            "alerts": _build_alerts(trust_score, reasons, raw_ml_score),
             "reasons": reasons,
             "risk_exposure": risk_exposure,
             "activity": activity,
