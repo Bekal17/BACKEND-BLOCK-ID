@@ -257,6 +257,65 @@ async def _get_cyclops_penalty(conn: Any, wallet: str) -> float:
     return total
 
 
+async def _get_wallet_token_holdings_helius(wallet: str) -> list[str]:
+    """
+    Fetch current token holdings for a wallet from Helius DAS API.
+    Returns list of token mint addresses currently held by wallet.
+    Uses getAssetsByOwner — same API already used in predict_wallet_score.py.
+    """
+    import os
+    import aiohttp
+
+    HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
+    if not HELIUS_KEY:
+        return []
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAssetsByOwner",
+                "params": {
+                    "ownerAddress": wallet,
+                    "page": 1,
+                    "limit": 50,
+                    "displayOptions": {
+                        "showFungible": True,
+                        "showNativeBalance": False,
+                    },
+                },
+            }
+            async with session.post(
+                f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                items = (data.get("result") or {}).get("items") or []
+
+                # Extract mint addresses from fungible tokens only
+                mints = []
+                for item in items:
+                    # Get mint address from id field (Helius DAS uses id as mint)
+                    mint = item.get("id", "").strip()
+                    token_info = item.get("token_info") or {}
+
+                    # Only include fungible tokens with some balance
+                    balance = float(token_info.get("balance") or 0)
+                    if mint and balance > 0:
+                        mints.append(mint)
+
+                return mints[:20]  # limit to 20 tokens
+
+    except Exception as e:
+        logger.warning("helius_token_holdings_error",
+                      wallet=wallet[:16], error=str(e))
+        return []
+
+
 async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
     """
     Checks tokens held/sent by wallet against Rugcheck and Birdeye.
@@ -288,21 +347,29 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
         logger.info("token_risk_using_birdeye_holdings",
                    wallet=wallet[:16], count=len(token_mints))
     else:
-        # Fallback: use transactions table (only works for new transactions)
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT token_mint
-            FROM transactions
-            WHERE sender = $1
-              AND token_mint IS NOT NULL
-              AND token_mint != ''
-            LIMIT 20
-            """,
-            wallet,
-        )
-        if not rows:
-            return 0.0
-        token_mints = [r["token_mint"] for r in rows]
+        # Try Helius DAS API to get current token holdings
+        helius_token_mints = await _get_wallet_token_holdings_helius(wallet)
+
+        if helius_token_mints:
+            token_mints = helius_token_mints
+            logger.info("token_risk_using_helius_holdings",
+                       wallet=wallet[:16], count=len(token_mints))
+        else:
+            # Final fallback: transactions table
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT token_mint
+                FROM transactions
+                WHERE sender = $1
+                  AND token_mint IS NOT NULL
+                  AND token_mint != ''
+                LIMIT 20
+                """,
+                wallet,
+            )
+            if not rows:
+                return 0.0
+            token_mints = [r["token_mint"] for r in rows]
     total = len(token_mints)
     high_risk_count = 0
     suspicious_count = 0
