@@ -87,6 +87,61 @@ def _get_recommended_actions(
     return actions
 
 
+def _build_summary_message(
+    score: float,
+    cluster_info: dict | None,
+    reason_codes: list[str],
+    raw_ml_score: float,
+) -> str:
+    """
+    Build summary message based on actual reason codes and score.
+    """
+    reason_set = set(reason_codes)
+
+    # Highest priority: scam cluster
+    if cluster_info and cluster_info.get("cluster_type") == "scam":
+        size = cluster_info.get("size", 0)
+        return f"Wallet is linked to a scam cluster with {size} other members."
+
+    # Critical reason codes
+    if "MEGA_DRAINER" in reason_set or "DRAINER_FLOW" in reason_set or "DRAINER_FLOW_DETECTED" in reason_set:
+        return "Wallet is associated with drainer activity. Do not send funds."
+    if "RUG_PULL_DEPLOYER" in reason_set:
+        return "Wallet is associated with rug pull activity. Proceed with extreme caution."
+    if any(r in reason_set for r in ["SCAM_CLUSTER_MEMBER", "SCAM_CLUSTER_MEMBER_LARGE", "SCAM_CLUSTER_MEMBER_SMALL"]):
+        return "Wallet is linked to high-risk network activity."
+    if "BLACKLISTED_CREATOR" in reason_set:
+        return "Wallet is flagged as a known scammer. Avoid all interactions."
+    if "HIGH_RISK_TOKEN_INTERACTION" in reason_set or "SUSPICIOUS_TOKEN_MINT" in reason_set:
+        return "High-risk token interaction detected. Verify before transacting."
+    if "DRAINER_INTERACTION" in reason_set:
+        return "Wallet has interacted with a known drainer. Exercise caution."
+
+    # ML score signal
+    if raw_ml_score > 0 and raw_ml_score < 30 and score < 30:
+        return "ML model detected high-risk behavioral patterns. Do not transact."
+
+    # Score-based with reason context
+    if score < 30:
+        if "NEW_WALLET" in reason_set:
+            return "New wallet with high-risk behavioral signals detected."
+        return "Multiple risk signals detected. Do not transact with this wallet."
+
+    if score < 50:
+        if "NEW_WALLET" in reason_set:
+            return "New wallet with limited history. Exercise caution."
+        if "HIGH_PROPAGATION_RISK" in reason_set:
+            return "Wallet has indirect exposure to risky network activity."
+        return "Moderate risk signals detected. Verify wallet before transacting."
+
+    if score < 70:
+        if "NEW_WALLET" in reason_set:
+            return "New wallet with no established history. Monitor activity."
+        return "Low risk signals present. Continue monitoring."
+
+    return "No major threats detected."
+
+
 @router.get("/wallet_overview/{wallet}")
 async def get_wallet_overview(wallet: str) -> dict:
     """
@@ -109,7 +164,7 @@ async def get_wallet_overview(wallet: str) -> dict:
 
     try:
         score_row = await conn.fetchrow(
-            "SELECT score, risk_level FROM trust_scores WHERE wallet = $1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT score, risk_level, raw_ml_score FROM trust_scores WHERE wallet = $1 ORDER BY updated_at DESC LIMIT 1",
             wallet,
         )
         if score_row is None:
@@ -129,12 +184,18 @@ async def get_wallet_overview(wallet: str) -> dict:
             risk_level = "LOW"
         else:
             risk_level = "SAFE"
+        raw_ml_score = float(score_row["raw_ml_score"] or 0) if score_row and score_row["raw_ml_score"] else 0.0
 
         behavioral_pattern: list[str] = []
         reason_rows = await conn.fetch(
             "SELECT reason_code FROM wallet_reasons WHERE wallet = $1 ORDER BY created_at DESC LIMIT 5",
             wallet,
         )
+        raw_reason_codes = []
+        for r in reason_rows:
+            code = (r["reason_code"] or "").strip()
+            if code:
+                raw_reason_codes.append(code)
         for r in reason_rows:
             code = (r["reason_code"] or "").strip()
             if code:
@@ -240,17 +301,7 @@ async def get_wallet_overview(wallet: str) -> dict:
         ),
         "badges": [],
         "confidence": "HIGH" if cluster_info else "MEDIUM",
-        "summary_message": (
-            f"Wallet is linked to a scam cluster with {len(cluster_members)} other members."
-            if cluster_info and cluster_info["cluster_type"] == "scam"
-            else "Wallet shows high-risk token patterns. Proceed with caution."
-            if score < 30
-            else "Wallet shows suspicious activity. Verify before transacting."
-            if score < 50
-            else "Wallet has moderate risk signals. Monitor activity."
-            if score < 70
-            else "No major threats detected."
-        ),
+        "summary_message": _build_summary_message(score, cluster_info, raw_reason_codes, raw_ml_score),
         "recommended_actions": _get_recommended_actions(behavioral_pattern, cluster_info, score),
         "counterparties": [],
         "evidence": [],
