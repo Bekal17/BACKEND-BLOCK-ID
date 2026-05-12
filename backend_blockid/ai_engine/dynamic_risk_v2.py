@@ -602,9 +602,19 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty)
         final_score = max(0.0, min(97.0, final_score))
 
-        # Apply new wallet cap: if unestablished, score cannot exceed 50
+        # Apply new wallet cap: if unestablished, score cannot exceed cap_value
+        # If raw_ml_score < 50, use it as cap (ML already detected risk)
+        # If raw_ml_score >= 50 or not available, use default cap of 50
         if establishment["cap_active"]:
-            final_score = min(final_score, 50.0)
+            raw_ml = await conn.fetchval(
+                "SELECT raw_ml_score FROM trust_scores WHERE wallet = $1",
+                wallet,
+            )
+            if raw_ml is not None and float(raw_ml) < 50.0:
+                cap_value = float(raw_ml)
+            else:
+                cap_value = 50.0
+            final_score = min(final_score, cap_value)
 
         risk_level = score_to_risk(int(round(final_score)))
 

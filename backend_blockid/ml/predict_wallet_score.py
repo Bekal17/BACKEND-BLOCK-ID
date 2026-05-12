@@ -498,11 +498,13 @@ async def predict_wallet_score_for_wallet(wallet: str) -> float:
         await conn.execute(
             """
             UPDATE trust_scores
-            SET ml_score = $2
+            SET ml_score = $2,
+                raw_ml_score = $3
             WHERE wallet = $1
             """,
             wallet,
             capped_ml_score,
+            float(ml_score),  # raw ML score before capping
         )
         logger.info(
             "predict_wallet_score_realtime_done",
