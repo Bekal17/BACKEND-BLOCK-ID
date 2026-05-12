@@ -63,8 +63,8 @@ def _build_alerts(trust_score: int, reasons: list[str], raw_ml_score: float) -> 
     if "CONTENT_VIOLATION_CRITICAL" in reason_set:
         alerts.append("Critical content violation on record")
 
-    # ML score signals
-    if raw_ml_score > 0 and raw_ml_score < 30:
+    # ML score signals — only alert if both ML score AND final score are low
+    if raw_ml_score > 0 and raw_ml_score < 30 and trust_score < 40:
         if not any("drainer" in a.lower() or "rug" in a.lower() or "scam" in a.lower() for a in alerts):
             alerts.append("ML model detected high-risk behavioral patterns")
 
