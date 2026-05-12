@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any
 
@@ -256,6 +257,172 @@ async def _get_cyclops_penalty(conn: Any, wallet: str) -> float:
     return total
 
 
+async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
+    """
+    Checks tokens held/sent by wallet against Rugcheck and Birdeye.
+    Returns penalty based on percentage of risky tokens.
+    Results cached 24h per token to avoid excessive API calls.
+
+    Penalty scale:
+      > 50% tokens high risk (score_normalised >= 80) → -20
+      > 30% tokens high risk → -15
+      > 50% tokens suspicious (score_normalised >= 50) → -10
+      otherwise → 0
+    """
+    import aiohttp
+    import time as time_module
+
+    CACHE_TTL = 86400  # 24 hours
+    BIRDEYE_KEY = os.environ.get("BIRDEYE_API_KEY", "")
+    now = int(time_module.time())
+
+    # Get distinct token mints from transactions (sender only, outgoing)
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT token_mint
+        FROM transactions
+        WHERE sender = $1
+          AND token_mint IS NOT NULL
+          AND token_mint != ''
+        LIMIT 20
+        """,
+        wallet,
+    )
+    if not rows:
+        return 0.0
+
+    token_mints = [r["token_mint"] for r in rows]
+    total = len(token_mints)
+    high_risk_count = 0
+    suspicious_count = 0
+
+    async with aiohttp.ClientSession() as session:
+        for mint in token_mints:
+            try:
+                # Check cache first
+                cached = await conn.fetchrow(
+                    "SELECT rugcheck_score_normalised, is_high_risk, risk_label, cached_at FROM token_risk_cache WHERE token_mint = $1",
+                    mint,
+                )
+                if cached and (now - int(cached["cached_at"] or 0)) < CACHE_TTL:
+                    # Use cached result
+                    score_norm = int(cached["rugcheck_score_normalised"] or 0)
+                else:
+                    # Fetch from Rugcheck
+                    rugcheck_score = 0
+                    score_norm = 0
+                    try:
+                        async with session.get(
+                            f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary",
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                rugcheck_score = int(data.get("score", 0) or 0)
+                                score_norm = int(data.get("score_normalised", 0) or 0)
+                    except Exception:
+                        pass
+
+                    # Fetch from Birdeye token_overview
+                    birdeye_liquidity = 0.0
+                    birdeye_holder = 0
+                    birdeye_price_change_24h = 0.0
+                    if BIRDEYE_KEY:
+                        try:
+                            async with session.get(
+                                f"https://public-api.birdeye.so/defi/token_overview?address={mint}",
+                                headers={
+                                    "X-API-KEY": BIRDEYE_KEY,
+                                    "x-chain": "solana",
+                                    "accept": "application/json",
+                                },
+                                timeout=aiohttp.ClientTimeout(total=5),
+                            ) as resp:
+                                if resp.status == 200:
+                                    bdata = await resp.json()
+                                    d = bdata.get("data") or {}
+                                    birdeye_liquidity = float(d.get("liquidity") or 0)
+                                    birdeye_holder = int(d.get("holder") or 0)
+                                    birdeye_price_change_24h = float(d.get("priceChange24hPercent") or 0)
+                        except Exception:
+                            pass
+
+                    # Determine risk label
+                    is_high_risk = score_norm >= 80
+                    if score_norm >= 80:
+                        risk_label = "high_risk"
+                    elif score_norm >= 50:
+                        risk_label = "suspicious"
+                    elif birdeye_liquidity < 1000 and birdeye_price_change_24h < -80:
+                        risk_label = "probable_rug"
+                        is_high_risk = True
+                    else:
+                        risk_label = "safe"
+
+                    # Upsert cache
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO token_risk_cache (
+                                token_mint, rugcheck_score, rugcheck_score_normalised,
+                                birdeye_liquidity, birdeye_holder, birdeye_price_change_24h,
+                                is_high_risk, risk_label, cached_at
+                            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                            ON CONFLICT (token_mint) DO UPDATE SET
+                                rugcheck_score = EXCLUDED.rugcheck_score,
+                                rugcheck_score_normalised = EXCLUDED.rugcheck_score_normalised,
+                                birdeye_liquidity = EXCLUDED.birdeye_liquidity,
+                                birdeye_holder = EXCLUDED.birdeye_holder,
+                                birdeye_price_change_24h = EXCLUDED.birdeye_price_change_24h,
+                                is_high_risk = EXCLUDED.is_high_risk,
+                                risk_label = EXCLUDED.risk_label,
+                                cached_at = EXCLUDED.cached_at
+                            """,
+                            mint, rugcheck_score, score_norm,
+                            birdeye_liquidity, birdeye_holder, birdeye_price_change_24h,
+                            is_high_risk, risk_label, now,
+                        )
+                    except Exception:
+                        pass
+
+                # Count risks
+                if score_norm >= 80:
+                    high_risk_count += 1
+                elif score_norm >= 50:
+                    suspicious_count += 1
+
+            except Exception as e:
+                logger.warning("token_risk_check_error", mint=mint[:16], error=str(e))
+                continue
+
+    if total == 0:
+        return 0.0
+
+    high_risk_pct = high_risk_count / total
+    suspicious_pct = suspicious_count / total
+
+    if high_risk_pct > 0.5:
+        penalty = -20.0
+    elif high_risk_pct > 0.3:
+        penalty = -15.0
+    elif suspicious_pct > 0.5:
+        penalty = -10.0
+    else:
+        penalty = 0.0
+
+    if penalty != 0.0:
+        logger.info(
+            "token_risk_penalty_applied",
+            wallet=wallet[:16],
+            total_tokens=total,
+            high_risk_count=high_risk_count,
+            suspicious_count=suspicious_count,
+            penalty=penalty,
+        )
+
+    return penalty
+
+
 async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
     conn = await get_conn()
     try:
@@ -328,7 +495,8 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         reason_penalty = await _get_reason_penalty(conn, wallet)
         establishment = await _get_wallet_establishment_data(conn, wallet)
         cyclops_penalty = await _get_cyclops_penalty(conn, wallet)
-        final_score = (dynamic_risk + reason_penalty + cyclops_penalty)
+        token_risk_penalty = await _get_token_risk_penalty(conn, wallet)
+        final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty)
         final_score = max(0.0, min(97.0, final_score))
 
         # Apply new wallet cap: if unestablished, score cannot exceed 50
@@ -431,6 +599,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         details["final_score"] = float(final_score)
         details["reason_penalty"] = float(reason_penalty)
         details["cyclops_penalty"] = float(cyclops_penalty)
+        details["token_risk_penalty"] = float(token_risk_penalty)
         details["cap_active"] = establishment["cap_active"]
         details["cap_conditions_met"] = establishment["conditions_met"]
         details["wallet_age_days"] = establishment["wallet_age_days"]
