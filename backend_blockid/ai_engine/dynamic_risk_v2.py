@@ -276,22 +276,33 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
     BIRDEYE_KEY = os.environ.get("BIRDEYE_API_KEY", "")
     now = int(time_module.time())
 
-    # Get distinct token mints from transactions (sender only, outgoing)
-    rows = await conn.fetch(
-        """
-        SELECT DISTINCT token_mint
-        FROM transactions
-        WHERE sender = $1
-          AND token_mint IS NOT NULL
-          AND token_mint != ''
-        LIMIT 20
-        """,
-        wallet,
-    )
-    if not rows:
-        return 0.0
+    # Try Birdeye wallet token list first (Premium tier required)
+    # When Premium is active, this solves cold start problem for historical wallets
+    # ACTIVATION: remove the "if False" condition below when Premium is confirmed
+    birdeye_token_mints = []
+    if False:  # Change to: if True  — when Premium access is confirmed
+        birdeye_token_mints = await _get_wallet_token_holdings_birdeye(wallet)
 
-    token_mints = [r["token_mint"] for r in rows]
+    if birdeye_token_mints:
+        token_mints = birdeye_token_mints
+        logger.info("token_risk_using_birdeye_holdings",
+                   wallet=wallet[:16], count=len(token_mints))
+    else:
+        # Fallback: use transactions table (only works for new transactions)
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT token_mint
+            FROM transactions
+            WHERE sender = $1
+              AND token_mint IS NOT NULL
+              AND token_mint != ''
+            LIMIT 20
+            """,
+            wallet,
+        )
+        if not rows:
+            return 0.0
+        token_mints = [r["token_mint"] for r in rows]
     total = len(token_mints)
     high_risk_count = 0
     suspicious_count = 0
@@ -458,6 +469,61 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
         )
 
     return penalty
+
+
+async def _get_wallet_token_holdings_birdeye(wallet: str) -> list[str]:
+    """
+    Fetch current token holdings for a wallet from Birdeye /v1/wallet/token_list.
+    Returns list of token mint addresses.
+
+    Requires Birdeye Premium tier or above.
+    When available, this replaces transactions table as source of token_mints,
+    solving the cold start problem for historical wallets.
+
+    Currently INACTIVE - uncomment the call in _get_token_risk_penalty()
+    when Premium access is confirmed.
+    """
+    import aiohttp
+    import os
+
+    BIRDEYE_KEY = os.environ.get("BIRDEYE_API_KEY", "")
+    if not BIRDEYE_KEY:
+        return []
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://public-api.birdeye.so/v1/wallet/token_list?wallet={wallet}",
+                headers={
+                    "X-API-KEY": BIRDEYE_KEY,
+                    "x-chain": "solana",
+                    "accept": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    items = (data.get("data") or {}).get("items") or []
+                    # Return list of token mint addresses, excluding SOL native
+                    SOL_MINT = "So11111111111111111111111111111111111111112"
+                    return [
+                        item["address"]
+                        for item in items
+                        if item.get("address")
+                        and item["address"] != SOL_MINT
+                        and item.get("valueUsd", 0) > 0
+                    ]
+                else:
+                    logger.warning(
+                        "birdeye_wallet_token_list_error",
+                        wallet=wallet[:16],
+                        status=resp.status,
+                    )
+                    return []
+    except Exception as e:
+        logger.warning("birdeye_wallet_token_list_exception",
+                      wallet=wallet[:16], error=str(e))
+        return []
 
 
 async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
