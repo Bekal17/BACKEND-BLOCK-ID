@@ -327,6 +327,10 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
                     birdeye_liquidity = 0.0
                     birdeye_holder = 0
                     birdeye_price_change_24h = 0.0
+                    birdeye_buy_24h = 0
+                    birdeye_sell_24h = 0
+                    birdeye_trade_24h = 0
+                    birdeye_unique_wallet_24h = 0
                     if BIRDEYE_KEY:
                         try:
                             async with session.get(
@@ -344,13 +348,38 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
                                     birdeye_liquidity = float(d.get("liquidity") or 0)
                                     birdeye_holder = int(d.get("holder") or 0)
                                     birdeye_price_change_24h = float(d.get("priceChange24hPercent") or 0)
+                                    birdeye_buy_24h = int(d.get("buy24h") or 0)
+                                    birdeye_sell_24h = int(d.get("sell24h") or 0)
+                                    birdeye_trade_24h = int(d.get("trade24h") or 0)
+                                    birdeye_unique_wallet_24h = int(d.get("uniqueWallet24h") or 0)
                         except Exception:
                             pass
 
                     # Determine risk label
                     is_high_risk = score_norm >= 80
-                    if score_norm >= 80:
+
+                    # Honeypot detection: people can buy but cannot sell
+                    is_honeypot = (
+                        birdeye_buy_24h > 50
+                        and birdeye_sell_24h < 5
+                        and birdeye_trade_24h > 50
+                    )
+
+                    # Wash trading detection: too many trades per unique wallet
+                    wash_ratio = (
+                        birdeye_trade_24h / birdeye_unique_wallet_24h
+                        if birdeye_unique_wallet_24h > 0 else 0
+                    )
+                    is_wash_trading = wash_ratio > 20 and birdeye_trade_24h > 100
+
+                    if is_honeypot:
+                        risk_label = "honeypot"
+                        is_high_risk = True
+                    elif score_norm >= 80:
                         risk_label = "high_risk"
+                    elif is_wash_trading:
+                        risk_label = "wash_trading"
+                        is_high_risk = True
                     elif score_norm >= 50:
                         risk_label = "suspicious"
                     elif birdeye_liquidity < 1000 and birdeye_price_change_24h < -80:
