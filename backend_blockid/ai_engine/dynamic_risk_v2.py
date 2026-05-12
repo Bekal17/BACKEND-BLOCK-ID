@@ -436,12 +436,14 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
     high_risk_pct = high_risk_count / total
     suspicious_pct = suspicious_count / total
 
+    # Conservative penalties: target users are likely victims not perpetrators
+    # New user non-crypto lebih sering jadi korban token rug/dump/honeypot
     if high_risk_pct > 0.5:
-        penalty = -20.0
-    elif high_risk_pct > 0.3:
-        penalty = -15.0
-    elif suspicious_pct > 0.5:
         penalty = -10.0
+    elif high_risk_pct > 0.3:
+        penalty = -7.0
+    elif suspicious_pct > 0.5:
+        penalty = -5.0
     else:
         penalty = 0.0
 
