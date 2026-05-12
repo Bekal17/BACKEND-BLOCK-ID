@@ -243,6 +243,12 @@ async def get_wallet_overview(wallet: str) -> dict:
         "summary_message": (
             f"Wallet is linked to a scam cluster with {len(cluster_members)} other members."
             if cluster_info and cluster_info["cluster_type"] == "scam"
+            else "Wallet shows high-risk token patterns. Proceed with caution."
+            if score < 30
+            else "Wallet shows suspicious activity. Verify before transacting."
+            if score < 50
+            else "Wallet has moderate risk signals. Monitor activity."
+            if score < 70
             else "No major threats detected."
         ),
         "recommended_actions": _get_recommended_actions(behavioral_pattern, cluster_info, score),
