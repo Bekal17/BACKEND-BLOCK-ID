@@ -356,6 +356,12 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
                     elif birdeye_liquidity < 1000 and birdeye_price_change_24h < -80:
                         risk_label = "probable_rug"
                         is_high_risk = True
+                    elif (birdeye_liquidity < 100000
+                          and birdeye_price_change_24h < -50
+                          and birdeye_holder > 0
+                          and birdeye_holder < 5000):
+                        risk_label = "probable_dump"
+                        is_high_risk = True
                     else:
                         risk_label = "safe"
 
