@@ -113,7 +113,6 @@ FEATURE_ORDER = [
     "metadata_missing",
     "decimals",
     "supply",
-    "is_compressed",
 ]
 
 def _load_valid_wallets_from_cluster(path: Path) -> list[str]:
@@ -285,15 +284,14 @@ def _get_token_history_mock(wallet: str) -> list[dict]:
 def _feature_vector_from_tokens(tokens: list[dict]) -> np.ndarray:
     """Aggregate token features into one vector (max of binary flags, mean of numeric)."""
     if not tokens:
-        return np.array([[0, 0, 0, 0, 0, 0]], dtype=np.float64)
+        return np.array([[0, 0, 0, 0, 0]], dtype=np.float64)
     mint_max = max(t.get("mint_authority_exists", 0) for t in tokens)
     freeze_max = max(t.get("freeze_authority_exists", 0) for t in tokens)
     meta_max = max(t.get("metadata_missing", 0) for t in tokens)
     dec_mean = np.mean([safe_num(t.get("decimals", 0)) for t in tokens])
     supply_mean = np.mean([safe_num(t.get("supply", 0)) for t in tokens])
-    compressed_ratio = sum(1 for t in tokens if t.get("is_compressed", 0)) / max(1, len(tokens))
     return np.array(
-        [[mint_max, freeze_max, meta_max, dec_mean, supply_mean, compressed_ratio]],
+        [[mint_max, freeze_max, meta_max, dec_mean, supply_mean]],
         dtype=np.float64,
     )
 
