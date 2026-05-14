@@ -293,12 +293,11 @@ def _feature_vector_from_tokens(tokens: list[dict]) -> np.ndarray:
     meta_max = max(t.get("metadata_missing", 0) for t in tokens)
     dec_mean = np.mean([safe_num(t.get("decimals", 0)) for t in tokens])
     supply_mean = np.mean([safe_num(t.get("supply", 0)) for t in tokens])
-    # Use ratio instead of max for mutable — 1 mutable token should not flag entire wallet
-    mutable_ratio = sum(1 for t in tokens if t.get("is_mutable", 0)) / max(1, len(tokens))
+    mutable_max = max(t.get("is_mutable", 0) for t in tokens)
     compressed_ratio = sum(1 for t in tokens if t.get("is_compressed", 0)) / max(1, len(tokens))
     unverified_max = max(t.get("has_unverified_creator", 0) for t in tokens)
     return np.array(
-        [[mint_max, freeze_max, meta_max, dec_mean, supply_mean, mutable_ratio, compressed_ratio, unverified_max]],
+        [[mint_max, freeze_max, meta_max, dec_mean, supply_mean, mutable_max, compressed_ratio, unverified_max]],
         dtype=np.float64,
     )
 
