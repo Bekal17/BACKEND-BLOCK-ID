@@ -294,6 +294,226 @@ async def _get_wallet_age_boost(conn: Any, wallet: str) -> float:
         return 0.0
 
 
+async def _fetch_from_helius(conn: Any, wallet: str, now: int) -> dict:
+    """
+    Fetch tx_count and unique_counterparties from Helius RPC.
+    Replace this function body with Birdeye API call when Premium is available.
+    """
+    import os
+
+    import aiohttp
+
+    HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
+    if not HELIUS_KEY:
+        return {"tx_count": 0, "unique_counterparties": 0}
+
+    tx_count = 0
+    unique_counterparties: set[str] = set()
+    sigs: list = []
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Get signatures (up to 100)
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [
+                    wallet,
+                    {"limit": 100},
+                ],
+            }
+            async with session.post(
+                f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    sigs = data.get("result") or []
+                    if not isinstance(sigs, list):
+                        sigs = []
+                    tx_count = len(sigs)
+
+            # Get unique counterparties from last 20 transactions
+            if tx_count > 0:
+                sigs_to_check = sigs[:20]
+                for sig_info in sigs_to_check:
+                    sig = ""
+                    if isinstance(sig_info, dict):
+                        sig = sig_info.get("signature", "") or ""
+                    if not sig:
+                        continue
+                    try:
+                        tx_payload = {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "getTransaction",
+                            "params": [
+                                sig,
+                                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+                            ],
+                        }
+                        async with session.post(
+                            f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+                            json=tx_payload,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as tx_resp:
+                            if tx_resp.status == 200:
+                                tx_data = await tx_resp.json()
+                                tx = tx_data.get("result") or {}
+                                account_keys = (
+                                    (tx.get("transaction") or {})
+                                    .get("message") or {}
+                                ).get("accountKeys") or []
+                                for ak in account_keys:
+                                    addr = ak if isinstance(ak, str) else ak.get("pubkey", "")
+                                    if addr and addr != wallet:
+                                        unique_counterparties.add(str(addr))
+                    except Exception:
+                        continue
+
+    except Exception as e:
+        logger.warning(
+            "helius_behavior_fetch_error",
+            wallet=wallet[:16],
+            error=str(e),
+        )
+        return {"tx_count": 0, "unique_counterparties": 0}
+
+    result = {
+        "tx_count": tx_count,
+        "unique_counterparties": len(unique_counterparties),
+    }
+
+    # Cache to DB
+    try:
+        await conn.execute(
+            """UPDATE trust_scores
+               SET tx_count_helius = $2,
+                   unique_counterparties_helius = $3,
+                   behavior_fetched_at = $4
+               WHERE wallet = $1""",
+            wallet,
+            tx_count,
+            len(unique_counterparties),
+            now,
+        )
+        logger.info(
+            "wallet_behavior_cached",
+            wallet=wallet[:16],
+            tx_count=tx_count,
+            unique_counterparties=len(unique_counterparties),
+        )
+    except Exception as e:
+        logger.warning(
+            "wallet_behavior_cache_error",
+            wallet=wallet[:16],
+            error=str(e),
+        )
+
+    return result
+
+
+async def _fetch_wallet_behavior_features(conn: Any, wallet: str) -> dict:
+    """
+    Fetch wallet behavior features: tx_count and unique_counterparties.
+    Currently uses Helius getSignaturesForAddress.
+    Swap to Birdeye Premium when available by replacing _fetch_from_helius
+    with _fetch_from_birdeye (same return schema).
+
+    Results cached in trust_scores.tx_count_helius and
+    unique_counterparties_helius with 7-day TTL.
+    """
+    import time as time_module
+
+    CACHE_TTL = 7 * 86400  # 7 days
+    now = int(time_module.time())
+
+    # Check cache first
+    try:
+        row = await conn.fetchrow(
+            """SELECT tx_count_helius, unique_counterparties_helius, behavior_fetched_at
+               FROM trust_scores WHERE wallet = $1""",
+            wallet,
+        )
+        if (
+            row
+            and row["tx_count_helius"] is not None
+            and row["behavior_fetched_at"] is not None
+            and (now - int(row["behavior_fetched_at"])) < CACHE_TTL
+        ):
+            return {
+                "tx_count": int(row["tx_count_helius"]),
+                "unique_counterparties": int(row["unique_counterparties_helius"] or 0),
+            }
+    except Exception:
+        pass
+
+    # Fetch from Helius (swap to Birdeye when Premium available)
+    return await _fetch_from_helius(conn, wallet, now)
+
+
+async def _get_wallet_behavior_score(conn: Any, wallet: str) -> float:
+    """
+    Uses wallet_classifier.pkl to score wallet behavior.
+    Features: tx_count, account_age_days, unique_counterparties
+    Returns adjustment: positive for legitimate behavior, negative for suspicious.
+    """
+    import joblib
+    from pathlib import Path
+
+    import numpy as np
+
+    # Repo root: backend_blockid/ai_engine -> parents[2]
+    MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "wallet_classifier.pkl"
+    if not MODEL_PATH.exists():
+        return 0.0
+
+    try:
+        # Get features
+        behavior = await _fetch_wallet_behavior_features(conn, wallet)
+        tx_count = float(behavior["tx_count"])
+        unique_counterparties = float(behavior["unique_counterparties"])
+
+        # Get wallet age from DB
+        row = await conn.fetchrow(
+            "SELECT wallet_age_days FROM trust_scores WHERE wallet = $1",
+            wallet,
+        )
+        account_age_days = float(row["wallet_age_days"] or 0) if row else 0.0
+
+        # Predict
+        model = joblib.load(MODEL_PATH)
+        X = np.array([[tx_count, account_age_days, unique_counterparties]])
+        prob_good = float(model.predict_proba(X)[0, 0])  # probability of "good"
+
+        # Convert to score adjustment: -10 to +10
+        # prob_good = 1.0 → +10 (very legitimate)
+        # prob_good = 0.5 → 0 (neutral)
+        # prob_good = 0.0 → -10 (very suspicious)
+        adjustment = (prob_good - 0.5) * 20.0
+
+        logger.info(
+            "wallet_behavior_score",
+            wallet=wallet[:16],
+            tx_count=int(tx_count),
+            account_age_days=int(account_age_days),
+            unique_counterparties=int(unique_counterparties),
+            prob_good=round(prob_good, 3),
+            adjustment=round(adjustment, 2),
+        )
+        return float(adjustment)
+
+    except Exception as e:
+        logger.warning(
+            "wallet_behavior_score_error",
+            wallet=wallet[:16],
+            error=str(e),
+        )
+        return 0.0
+
+
 async def _get_wallet_token_holdings_helius(wallet: str) -> list[str]:
     """
     Fetch current token holdings for a wallet from Helius DAS API.
@@ -704,7 +924,8 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         cyclops_penalty = await _get_cyclops_penalty(conn, wallet)
         token_risk_penalty = await _get_token_risk_penalty(conn, wallet)
         age_boost = await _get_wallet_age_boost(conn, wallet)
-        final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty + age_boost)
+        behavior_score = await _get_wallet_behavior_score(conn, wallet)
+        final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty + age_boost + behavior_score)
         final_score = max(0.0, min(97.0, final_score))
 
         # Apply new wallet cap: if unestablished, score cannot exceed cap_value
@@ -741,6 +962,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
             score_after=float(final_score),
             final_score=float(final_score),
             age_boost=float(age_boost),
+            behavior_score=float(behavior_score),
         )
         await log_score_change(
             wallet=wallet,
@@ -824,6 +1046,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         details["cyclops_penalty"] = float(cyclops_penalty)
         details["token_risk_penalty"] = float(token_risk_penalty)
         details["age_boost"] = float(age_boost)
+        details["behavior_score"] = float(behavior_score)
         details["cap_active"] = establishment["cap_active"]
         details["cap_conditions_met"] = establishment["conditions_met"]
         details["wallet_age_days"] = establishment["wallet_age_days"]
