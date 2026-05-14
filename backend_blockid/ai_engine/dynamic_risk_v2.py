@@ -467,6 +467,11 @@ async def _get_wallet_behavior_score(conn: Any, wallet: str) -> float:
 
     # Repo root: backend_blockid/ai_engine -> parents[2]
     MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "wallet_classifier.pkl"
+    logger.info(
+        "wallet_classifier_path",
+        path=str(MODEL_PATH),
+        exists=MODEL_PATH.exists(),
+    )
     if not MODEL_PATH.exists():
         return 0.0
 
