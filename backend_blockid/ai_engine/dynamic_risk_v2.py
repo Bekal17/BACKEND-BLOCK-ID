@@ -465,8 +465,8 @@ async def _get_wallet_behavior_score(conn: Any, wallet: str) -> float:
 
     import numpy as np
 
-    # Repo root: backend_blockid/ai_engine -> parents[2]
-    MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "wallet_classifier.pkl"
+    # backend_blockid/models/ (same dir as token_scam_model.joblib)
+    MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "wallet_classifier.pkl"
     logger.info(
         "wallet_classifier_path",
         path=str(MODEL_PATH),
