@@ -263,9 +263,9 @@ async def _get_wallet_age_boost(conn: Any, wallet: str) -> float:
     Older wallets are more likely to be legitimate.
 
     Boost scale:
-      >= 365 days (1+ year)  → +15
-      >= 180 days (6+ months) → +10
-      >= 90 days (3+ months)  → +5
+      >= 365 days (1+ year)  → +20
+      >= 180 days (6+ months) → +12
+      >= 90 days (3+ months)  → +6
       < 90 days               → 0
 
     Does NOT apply if wallet is already flagged as high risk
@@ -282,11 +282,11 @@ async def _get_wallet_age_boost(conn: Any, wallet: str) -> float:
         age_days = int(row["wallet_age_days"] or 0)
 
         if age_days >= 365:
-            return 15.0
+            return 20.0
         elif age_days >= 180:
-            return 10.0
+            return 12.0
         elif age_days >= 90:
-            return 5.0
+            return 6.0
         else:
             return 0.0
     except Exception as e:
