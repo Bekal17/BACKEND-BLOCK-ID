@@ -95,11 +95,7 @@ def main() -> int:
     df = pd.read_csv(TOKEN_FEATURES_CSV)
     scam_wallets = _load_scam_wallets(SCAM_WALLETS_CSV)
 
-    if "wallet" not in df.columns:
-        print("[ml] ERROR: token_features.csv must have a wallet column for wallet-level aggregation")
-        return 1
-
-    # Labels: scam_flag from CSV or any creator in scam_wallets → scam=1 (per token row)
+    # Labels: scam_flag from CSV or any creator in scam_wallets → scam=1
     labels = []
     for _, row in df.iterrows():
         scam_flag = _bool_to_int(row.get("scam_flag"))
@@ -107,55 +103,48 @@ def main() -> int:
         creator_in_scam = 1 if any(c in scam_wallets for c in creator_wallets) else 0
         label = 1 if (scam_flag or creator_in_scam) else 0
         labels.append(label)
-    df["_label"] = labels
+    y = np.array(labels, dtype=int)
 
-    # Per-row features (same semantics as predict_wallet_score token dicts)
+    # Features: DAS export uses *_exists ints; legacy CSV uses mint_authority/freeze_authority text
     if "mint_authority_exists" in df.columns:
-        df["_mint"] = df["mint_authority_exists"].map(_bool_to_int)
+        mint_authority_exists = df["mint_authority_exists"].map(_bool_to_int)
     else:
-        df["_mint"] = (
+        mint_authority_exists = (
             (df["mint_authority"].fillna("").astype(str).str.strip() != "").astype(int)
         )
     if "freeze_authority_exists" in df.columns:
-        df["_freeze"] = df["freeze_authority_exists"].map(_bool_to_int)
+        freeze_authority_exists = df["freeze_authority_exists"].map(_bool_to_int)
     else:
-        df["_freeze"] = (
+        freeze_authority_exists = (
             (df["freeze_authority"].fillna("").astype(str).str.strip() != "").astype(int)
         )
-    df["_meta"] = df["metadata_missing"].map(_bool_to_int)
-    df["_dec"] = pd.to_numeric(df["decimals"], errors="coerce").fillna(0)
-    df["_supply"] = pd.to_numeric(df["supply"], errors="coerce").fillna(0).astype(np.float64)
-    df["_mut"] = pd.to_numeric(
+    metadata_missing = df["metadata_missing"].map(_bool_to_int)
+    decimals = pd.to_numeric(df["decimals"], errors="coerce").fillna(0).astype(int)
+    supply = pd.to_numeric(df["supply"], errors="coerce").fillna(0).astype(np.int64)
+
+    # New features from DAS API
+    is_mutable_col = pd.to_numeric(
         df.get("is_mutable", pd.Series([0] * len(df))), errors="coerce"
     ).fillna(0).astype(int)
-    df["_cmp"] = pd.to_numeric(
+    is_compressed_col = pd.to_numeric(
         df.get("is_compressed", pd.Series([0] * len(df))), errors="coerce"
     ).fillna(0).astype(int)
-    df["_unv"] = pd.to_numeric(
+    has_unverified_creator_col = pd.to_numeric(
         df.get("has_unverified_creator", pd.Series([0] * len(df))), errors="coerce"
     ).fillna(0).astype(int)
 
-    # Wallet-level aggregation — must match predict_wallet_score._feature_vector_from_tokens
-    def _mut_ratio(s: pd.Series) -> float:
-        return float((s.astype(int) == 1).sum()) / max(1, len(s))
+    X = pd.DataFrame({
+        "mint_authority_exists": mint_authority_exists,
+        "freeze_authority_exists": freeze_authority_exists,
+        "metadata_missing": metadata_missing,
+        "decimals": decimals,
+        "supply": supply,
+        "is_mutable": is_mutable_col,
+        "is_compressed": is_compressed_col,
+        "has_unverified_creator": has_unverified_creator_col,
+    })
 
-    def _cmp_ratio(s: pd.Series) -> float:
-        return float((s.astype(int) == 1).sum()) / max(1, len(s))
-
-    wdf = df.groupby("wallet", sort=False).agg(
-        mint_authority_exists=pd.NamedAgg(column="_mint", aggfunc="max"),
-        freeze_authority_exists=pd.NamedAgg(column="_freeze", aggfunc="max"),
-        metadata_missing=pd.NamedAgg(column="_meta", aggfunc="max"),
-        decimals=pd.NamedAgg(column="_dec", aggfunc="mean"),
-        supply=pd.NamedAgg(column="_supply", aggfunc="mean"),
-        is_mutable=pd.NamedAgg(column="_mut", aggfunc=_mut_ratio),
-        is_compressed=pd.NamedAgg(column="_cmp", aggfunc=_cmp_ratio),
-        has_unverified_creator=pd.NamedAgg(column="_unv", aggfunc="max"),
-        _label=pd.NamedAgg(column="_label", aggfunc="max"),
-    )
-    X = wdf[FEATURE_COLUMNS]
-    y = wdf["_label"].to_numpy(dtype=int)
-
+    # Drop rows with any NaN (shouldn't happen after fillna)
     valid = ~X.isna().any(axis=1)
     X = X.loc[valid].values.astype(np.float64)
     y = y[valid]
