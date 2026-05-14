@@ -1108,16 +1108,20 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         # If raw_ml_score < 50, use it as cap (ML already detected risk)
         # If raw_ml_score >= 50 or not available, use default cap of 50
         if establishment["cap_active"]:
-            raw_ml = await conn.fetchval(
-                "SELECT raw_ml_score FROM trust_scores WHERE wallet = $1",
-                wallet,
-            )
-            if raw_ml is not None and float(raw_ml) < 50.0:
-                cap_value = float(raw_ml)
-            else:
+            # For BEHAVIORAL_USER: skip raw_ml_score cap
+            # Their score should not be limited by token ML
+            # which is designed for TOKEN_CREATOR wallets
+            if wallet_type == "BEHAVIORAL_USER":
                 cap_value = 50.0
-            # Include behavior_score in cap — legitimate behavioral history
-            # allows cap to rise beyond raw ML score
+            else:
+                raw_ml = await conn.fetchval(
+                    "SELECT raw_ml_score FROM trust_scores WHERE wallet = $1",
+                    wallet,
+                )
+                if raw_ml is not None and float(raw_ml) < 50.0:
+                    cap_value = float(raw_ml)
+                else:
+                    cap_value = 50.0
             effective_cap = min(cap_value + age_boost + max(0, behavior_score), 97.0)
             final_score = min(final_score, effective_cap)
 
