@@ -471,6 +471,11 @@ async def _get_wallet_behavior_score(conn: Any, wallet: str) -> float:
         "wallet_classifier_path",
         path=str(MODEL_PATH),
         exists=MODEL_PATH.exists(),
+        file_location=str(Path(__file__).resolve()),
+        parents_0=str(Path(__file__).resolve().parents[0]),
+        parents_1=str(Path(__file__).resolve().parents[1]),
+        parents_2=str(Path(__file__).resolve().parents[2]),
+        parents_3=str(Path(__file__).resolve().parents[3]),
     )
     if not MODEL_PATH.exists():
         return 0.0
