@@ -719,7 +719,10 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
                 cap_value = float(raw_ml)
             else:
                 cap_value = 50.0
-            final_score = min(final_score, cap_value)
+            # Allow age_boost to exceed cap — older wallets deserve higher score
+            # even if ML score is low, because age is strong legitimacy signal
+            effective_cap = min(cap_value + age_boost, 97.0)
+            final_score = min(final_score, effective_cap)
 
         risk_level = score_to_risk(int(round(final_score)))
 
