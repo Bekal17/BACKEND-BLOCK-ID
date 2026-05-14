@@ -415,6 +415,155 @@ async def _fetch_from_helius(conn: Any, wallet: str, now: int) -> dict:
     return result
 
 
+async def _detect_wallet_type(conn: Any, wallet: str) -> str:
+    """
+    Detect if wallet is a TOKEN_CREATOR or BEHAVIORAL_USER.
+
+    TOKEN_CREATOR: wallet has created/launched tokens
+    → Use token ML scoring (rug pull signals)
+
+    BEHAVIORAL_USER: wallet is a holder/trader
+    → Use behavioral scoring only, skip token ML
+
+    Cached in trust_scores.wallet_type.
+    TTL: 30 days (wallet type rarely changes)
+    """
+    import os
+    import time as time_module
+
+    import aiohttp
+
+    CACHE_TTL = 30 * 86400  # 30 days
+    now = int(time_module.time())
+
+    # Check cache first
+    try:
+        row = await conn.fetchrow(
+            "SELECT wallet_type, behavior_fetched_at FROM trust_scores WHERE wallet = $1",
+            wallet,
+        )
+        if (
+            row
+            and row["wallet_type"] is not None
+            and row["behavior_fetched_at"] is not None
+            and (now - int(row["behavior_fetched_at"])) < CACHE_TTL
+        ):
+            return str(row["wallet_type"])
+    except Exception:
+        pass
+
+    # Detect via Helius — check if wallet has created tokens
+    HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
+    if not HELIUS_KEY:
+        return "BEHAVIORAL_USER"
+
+    tokens_created = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Check transaction history for token creation
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [wallet, {"limit": 100}],
+            }
+            async with session.post(
+                f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    sigs = data.get("result") or []
+                    if not isinstance(sigs, list):
+                        sigs = []
+
+                    # Check each tx for token creation
+                    for sig_info in sigs[:20]:
+                        sig = ""
+                        if isinstance(sig_info, dict):
+                            sig = sig_info.get("signature", "") or ""
+                        if not sig:
+                            continue
+                        try:
+                            tx_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "getTransaction",
+                                "params": [
+                                    sig,
+                                    {
+                                        "encoding": "jsonParsed",
+                                        "maxSupportedTransactionVersion": 0,
+                                    },
+                                ],
+                            }
+                            async with session.post(
+                                f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+                                json=tx_payload,
+                                timeout=aiohttp.ClientTimeout(total=8),
+                            ) as tx_resp:
+                                if tx_resp.status == 200:
+                                    tx_data = await tx_resp.json()
+                                    tx = tx_data.get("result") or {}
+                                    # Look for token creation instructions
+                                    meta = tx.get("meta") or {}
+                                    post_token_balances = meta.get("postTokenBalances") or []
+                                    pre_token_balances = meta.get("preTokenBalances") or []
+                                    # New token accounts created = token creation signal
+                                    new_accounts = len(post_token_balances) - len(pre_token_balances)
+                                    if new_accounts > 0:
+                                        # Check if wallet is the mint authority
+                                        inner_instructions = meta.get("innerInstructions") or []
+                                        for inner in inner_instructions:
+                                            if not isinstance(inner, dict):
+                                                continue
+                                            for ix in inner.get("instructions") or []:
+                                                if not isinstance(ix, dict):
+                                                    continue
+                                                parsed = ix.get("parsed") or {}
+                                                info = parsed.get("info") or {}
+                                                if (
+                                                    parsed.get("type") == "initializeMint"
+                                                    and info.get("mintAuthority") == wallet
+                                                ):
+                                                    tokens_created += 1
+                        except Exception:
+                            continue
+
+    except Exception as e:
+        logger.warning(
+            "detect_wallet_type_error",
+            wallet=wallet[:16],
+            error=str(e),
+        )
+
+    # Classify: more than 2 tokens created = TOKEN_CREATOR
+    wallet_type = "TOKEN_CREATOR" if tokens_created > 2 else "BEHAVIORAL_USER"
+
+    # Cache result
+    try:
+        await conn.execute(
+            "UPDATE trust_scores SET wallet_type = $2 WHERE wallet = $1",
+            wallet,
+            wallet_type,
+        )
+        logger.info(
+            "wallet_type_detected",
+            wallet=wallet[:16],
+            wallet_type=wallet_type,
+            tokens_created=tokens_created,
+        )
+    except Exception as e:
+        logger.warning(
+            "wallet_type_cache_error",
+            wallet=wallet[:16],
+            error=str(e),
+        )
+
+    return wallet_type
+
+
 async def _fetch_wallet_behavior_features(conn: Any, wallet: str) -> dict:
     """
     Fetch wallet behavior features: tx_count and unique_counterparties.
@@ -927,7 +1076,24 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
     now = int(time.time())
     try:
         details = await compute_dynamic_risk(wallet)
+        wallet_type = await _detect_wallet_type(conn, wallet)
         ml_score = details["ml_score"]
+        # TOKEN_CREATOR: use token ML (rug pull signals valid)
+        # BEHAVIORAL_USER: skip token ML, use neutral 50
+        # This prevents legitimate holders from being penalized
+        # for holding tokens with mint_authority (USDC, NFTs, etc.)
+        if wallet_type == "BEHAVIORAL_USER":
+            # Override ML score with neutral for behavioral users
+            # Their score is determined by behavior, age, and graph signals
+            ml_score = 50.0
+            logger.info(
+                "wallet_type_ml_override",
+                wallet=wallet[:16],
+                wallet_type=wallet_type,
+                original_ml=details["ml_score"],
+                override_ml=50.0,
+            )
+            details["ml_score"] = float(ml_score)
         dynamic_risk = details["dynamic_risk"]
         reason_penalty = await _get_reason_penalty(conn, wallet)
         establishment = await _get_wallet_establishment_data(conn, wallet)
@@ -1057,6 +1223,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         details["token_risk_penalty"] = float(token_risk_penalty)
         details["age_boost"] = float(age_boost)
         details["behavior_score"] = float(behavior_score)
+        details["wallet_type"] = wallet_type
         details["cap_active"] = establishment["cap_active"]
         details["cap_conditions_met"] = establishment["conditions_met"]
         details["wallet_age_days"] = establishment["wallet_age_days"]
