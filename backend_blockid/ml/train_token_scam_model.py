@@ -43,7 +43,6 @@ FEATURE_COLUMNS = [
     "decimals",
     "supply",
     "is_compressed",
-    "has_unverified_creator",
 ]
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
@@ -125,9 +124,6 @@ def main() -> int:
     is_compressed_col = pd.to_numeric(
         df.get("is_compressed", pd.Series([0] * len(df))), errors="coerce"
     ).fillna(0).astype(int)
-    has_unverified_creator_col = pd.to_numeric(
-        df.get("has_unverified_creator", pd.Series([0] * len(df))), errors="coerce"
-    ).fillna(0).astype(int)
 
     X = pd.DataFrame({
         "mint_authority_exists": mint_authority_exists,
@@ -136,7 +132,6 @@ def main() -> int:
         "decimals": decimals,
         "supply": supply,
         "is_compressed": is_compressed_col,
-        "has_unverified_creator": has_unverified_creator_col,
     })
 
     # Drop rows with any NaN (shouldn't happen after fillna)
