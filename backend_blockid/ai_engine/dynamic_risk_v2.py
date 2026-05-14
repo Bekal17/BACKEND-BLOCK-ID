@@ -257,6 +257,43 @@ async def _get_cyclops_penalty(conn: Any, wallet: str) -> float:
     return total
 
 
+async def _get_wallet_age_boost(conn: Any, wallet: str) -> float:
+    """
+    Returns a score boost based on wallet age.
+    Older wallets are more likely to be legitimate.
+
+    Boost scale:
+      >= 365 days (1+ year)  → +15
+      >= 180 days (6+ months) → +10
+      >= 90 days (3+ months)  → +5
+      < 90 days               → 0
+
+    Does NOT apply if wallet is already flagged as high risk
+    (cyclops sanctioned or in scam_wallets blacklist).
+    """
+    try:
+        row = await conn.fetchrow(
+            "SELECT wallet_age_days FROM trust_scores WHERE wallet = $1",
+            wallet,
+        )
+        if not row or row["wallet_age_days"] is None:
+            return 0.0
+
+        age_days = int(row["wallet_age_days"] or 0)
+
+        if age_days >= 365:
+            return 15.0
+        elif age_days >= 180:
+            return 10.0
+        elif age_days >= 90:
+            return 5.0
+        else:
+            return 0.0
+    except Exception as e:
+        logger.warning("wallet_age_boost_error", wallet=wallet[:16], error=str(e))
+        return 0.0
+
+
 async def _get_wallet_token_holdings_helius(wallet: str) -> list[str]:
     """
     Fetch current token holdings for a wallet from Helius DAS API.
@@ -666,7 +703,8 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         establishment = await _get_wallet_establishment_data(conn, wallet)
         cyclops_penalty = await _get_cyclops_penalty(conn, wallet)
         token_risk_penalty = await _get_token_risk_penalty(conn, wallet)
-        final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty)
+        age_boost = await _get_wallet_age_boost(conn, wallet)
+        final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty + age_boost)
         final_score = max(0.0, min(97.0, final_score))
 
         # Apply new wallet cap: if unestablished, score cannot exceed cap_value
@@ -698,6 +736,8 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
             wallet=wallet[:16],
             score_before=score_before,
             score_after=float(final_score),
+            final_score=float(final_score),
+            age_boost=float(age_boost),
         )
         await log_score_change(
             wallet=wallet,
@@ -780,6 +820,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         details["reason_penalty"] = float(reason_penalty)
         details["cyclops_penalty"] = float(cyclops_penalty)
         details["token_risk_penalty"] = float(token_risk_penalty)
+        details["age_boost"] = float(age_boost)
         details["cap_active"] = establishment["cap_active"]
         details["cap_conditions_met"] = establishment["conditions_met"]
         details["wallet_age_days"] = establishment["wallet_age_days"]
