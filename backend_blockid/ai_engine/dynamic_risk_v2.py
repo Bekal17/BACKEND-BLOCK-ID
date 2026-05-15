@@ -1299,11 +1299,31 @@ async def _get_wallet_token_holdings_birdeye(wallet: str) -> list[str]:
         return []
 
 
-async def compute_dynamic_risk(wallet: str) -> dict[str, float]:
+async def compute_dynamic_risk(
+    wallet: str, wallet_type: str | None = None
+) -> dict[str, float]:
     conn = await get_conn()
     try:
         ml_score = await _get_ml_score(conn, wallet)
         prior = await _get_prior_risk(conn, wallet)
+        if wallet_type is None:
+            wallet_type = await _detect_wallet_type(conn, wallet)
+
+        # Floor prior for BEHAVIORAL_USER and NFT_COLLECTOR wallets
+        # Prevents slow EMA recovery after score reset
+        # TOKEN_CREATOR wallets keep real prior (their prior matters for rug pull detection)
+        # EMA converges to ml_score (50) so this cannot compound beyond ~72-73
+        if wallet_type in ("BEHAVIORAL_USER", "NFT_COLLECTOR"):
+            if prior is not None and float(prior) < 40.0:
+                logger.info(
+                    "prior_floor_applied",
+                    wallet=wallet[:16],
+                    wallet_type=wallet_type,
+                    original_prior=float(prior),
+                    adjusted_prior=40.0,
+                )
+                prior = 40.0
+
         last_tx_time, tx_count_24h = await _get_last_tx_time_and_count(conn, wallet)
 
         if prior == 0 and last_tx_time == 0:
@@ -1365,8 +1385,8 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
     conn = await get_conn()
     now = int(time.time())
     try:
-        details = await compute_dynamic_risk(wallet)
         wallet_type = await _detect_wallet_type(conn, wallet)
+        details = await compute_dynamic_risk(wallet, wallet_type)
         ml_score = details["ml_score"]
         # TOKEN_CREATOR: use token ML (rug pull signals valid)
         # BEHAVIORAL_USER: skip token ML, use neutral 50
