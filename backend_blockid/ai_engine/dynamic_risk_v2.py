@@ -324,7 +324,7 @@ async def _get_wallet_age_boost(conn: Any, wallet: str) -> float:
     """
     try:
         row = await conn.fetchrow(
-            "SELECT wallet_age_days FROM trust_scores WHERE wallet = $1",
+            "SELECT wallet_age_days FROM wallet_meta WHERE wallet = $1",
             wallet,
         )
         if not row or row["wallet_age_days"] is None:
