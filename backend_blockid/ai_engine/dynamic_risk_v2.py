@@ -1300,7 +1300,9 @@ async def _get_wallet_token_holdings_birdeye(wallet: str) -> list[str]:
 
 
 async def compute_dynamic_risk(
-    wallet: str, wallet_type: str | None = None
+    wallet: str,
+    wallet_type: str | None = None,
+    ml_score_override: float | None = None,
 ) -> dict[str, float]:
     conn = await get_conn()
     try:
@@ -1325,6 +1327,19 @@ async def compute_dynamic_risk(
                 prior = 40.0
 
         last_tx_time, tx_count_24h = await _get_last_tx_time_and_count(conn, wallet)
+
+        # Override ml_score for BEHAVIORAL_USER and NFT_COLLECTOR
+        # Token ML is not reliable for these wallet types (false positives)
+        # Use neutral 50 so EMA converges to fair baseline
+        if ml_score_override is not None:
+            logger.info(
+                "compute_dynamic_risk_ml_override",
+                wallet=wallet[:16],
+                wallet_type=wallet_type or "unknown",
+                original_ml=float(ml_score),
+                override_ml=float(ml_score_override),
+            )
+            ml_score = ml_score_override
 
         if prior == 0 and last_tx_time == 0:
             # New wallet with no transactions: neutral score, do not inherit ml_score
@@ -1386,24 +1401,13 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
     now = int(time.time())
     try:
         wallet_type = await _detect_wallet_type(conn, wallet)
-        details = await compute_dynamic_risk(wallet, wallet_type)
+        # For non-creator wallets, override ml_score in EMA to neutral 50
+        # This prevents token ML false positives from dragging down dynamic_risk
+        _ml_override = 50.0 if wallet_type in ("BEHAVIORAL_USER", "NFT_COLLECTOR") else None
+        details = await compute_dynamic_risk(wallet, wallet_type, ml_score_override=_ml_override)
         ml_score = details["ml_score"]
         # TOKEN_CREATOR: use token ML (rug pull signals valid)
-        # BEHAVIORAL_USER: skip token ML, use neutral 50
-        # This prevents legitimate holders from being penalized
-        # for holding tokens with mint_authority (USDC, NFTs, etc.)
-        if wallet_type in ("BEHAVIORAL_USER", "NFT_COLLECTOR"):
-            # Override ML score with neutral for behavioral users
-            # Their score is determined by behavior, age, and graph signals
-            ml_score = 50.0
-            logger.info(
-                "wallet_type_ml_override",
-                wallet=wallet[:16],
-                wallet_type=wallet_type,
-                original_ml=details["ml_score"],
-                override_ml=50.0,
-            )
-            details["ml_score"] = float(ml_score)
+        # BEHAVIORAL_USER / NFT_COLLECTOR: ml_score already neutral in compute_dynamic_risk EMA
         dynamic_risk = details["dynamic_risk"]
         reason_penalty = await _get_reason_penalty(conn, wallet)
         establishment = await _get_wallet_establishment_data(conn, wallet)
