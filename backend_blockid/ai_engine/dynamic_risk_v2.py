@@ -38,6 +38,27 @@ KNOWN_LEGITIMATE_PROGRAMS = {
     "TCMPhJdwDryooaGtiocG1u3xcYbRpiJzb283XfCZsDp",
 }
 
+WHITELISTED_TOKENS = {
+    # Major stablecoins — price ≈ $1, never flag these
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",   # USDH
+    "UXPhBoR3qG4UCiGNJfV7MqhHyFqKN68g45GoYvAeL2X",   # UXD
+    # Major Solana ecosystem tokens — established projects
+    "So11111111111111111111111111111111111111112",     # SOL (wrapped)
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",   # JUP
+    "WIFbAbsGT1hxW1MBsGuVxRBgNsN4GLbgvdFrJKXkTS",    # WIF
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",   # mSOL (Marinade)
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",  # jitoSOL
+    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",   # bSOL (BlazeStake)
+    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",   # ETH (Wormhole)
+    "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",  # WBTC (Wormhole)
+    "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # WIF token mint
+    "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof",   # RENDER
+    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",  # Pyth
+}
+
 KNOWN_LEGITIMATE_INTERFACES = {
     "MplCoreAsset",       # Metaplex Core (BlockID uses this)
     "ProgrammableNFT",    # Metaplex pNFT (royalty enforced)
@@ -1022,6 +1043,10 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
 
     async with aiohttp.ClientSession() as session:
         for mint in token_mints:
+            # Skip whitelisted tokens — major stablecoins and well-known tokens
+            # These are established projects that should never be flagged
+            if mint in WHITELISTED_TOKENS:
+                continue
             try:
                 # Check cache first
                 cached = await conn.fetchrow(
@@ -1055,6 +1080,8 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
                     birdeye_sell_24h = 0
                     birdeye_trade_24h = 0
                     birdeye_unique_wallet_24h = 0
+                    birdeye_volume = 0.0
+                    birdeye_price = 0.0
                     if BIRDEYE_KEY:
                         try:
                             async with session.get(
@@ -1076,6 +1103,10 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
                                     birdeye_sell_24h = int(d.get("sell24h") or 0)
                                     birdeye_trade_24h = int(d.get("trade24h") or 0)
                                     birdeye_unique_wallet_24h = int(d.get("uniqueWallet24h") or 0)
+                                    birdeye_volume = float(
+                                        d.get("v24hUSD") or d.get("volume24h") or 0
+                                    )
+                                    birdeye_price = float(d.get("price") or 0)
                         except Exception:
                             pass
 
@@ -1089,12 +1120,41 @@ async def _get_token_risk_penalty(conn: Any, wallet: str) -> float:
                         and birdeye_trade_24h > 50
                     )
 
-                    # Wash trading detection: too many trades per unique wallet
-                    wash_ratio = (
-                        birdeye_trade_24h / birdeye_unique_wallet_24h
-                        if birdeye_unique_wallet_24h > 0 else 0
-                    )
-                    is_wash_trading = wash_ratio > 20 and birdeye_trade_24h > 100
+                    # Improved wash trading detection — require multiple signals
+                    # Single signal is not enough (prevents USDC/USDT false positives)
+                    wash_signals = 0
+
+                    birdeye_volume_f = float(birdeye_volume or 0)
+                    birdeye_trade_count = int(birdeye_trade_24h or 0)
+                    birdeye_unique_wallets = int(birdeye_unique_wallet_24h or 0)
+                    birdeye_price_f = float(birdeye_price or 0)
+                    birdeye_price_change = abs(float(birdeye_price_change_24h or 0))
+                    birdeye_holder_i = int(birdeye_holder or 0)
+
+                    # Skip stablecoin check (price ≈ $1)
+                    is_stablecoin = 0.95 < birdeye_price_f < 1.05
+
+                    if not is_stablecoin:
+                        # Signal 1: Volume >> Liquidity (artificial volume pump)
+                        if birdeye_liquidity > 0 and birdeye_volume_f / birdeye_liquidity > 20:
+                            wash_signals += 1
+
+                        # Signal 2: Many trades but very few unique wallets
+                        if birdeye_unique_wallets > 0:
+                            trade_per_wallet = birdeye_trade_count / birdeye_unique_wallets
+                            if trade_per_wallet > 50:
+                                wash_signals += 1
+
+                        # Signal 3: High volume but price barely moved (not stablecoin)
+                        if birdeye_volume_f > 100000 and birdeye_price_change < 0.5:
+                            wash_signals += 1
+
+                        # Signal 4: Very few holders but high volume
+                        if birdeye_holder_i < 200 and birdeye_volume_f > 50000:
+                            wash_signals += 1
+
+                    # Only flag as wash_trading if 2+ signals detected
+                    is_wash_trading = wash_signals >= 2
 
                     if is_honeypot:
                         risk_label = "honeypot"
