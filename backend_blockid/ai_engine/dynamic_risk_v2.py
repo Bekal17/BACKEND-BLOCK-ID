@@ -1312,7 +1312,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         # BEHAVIORAL_USER: skip token ML, use neutral 50
         # This prevents legitimate holders from being penalized
         # for holding tokens with mint_authority (USDC, NFTs, etc.)
-        if wallet_type == "BEHAVIORAL_USER":
+        if wallet_type in ("BEHAVIORAL_USER", "NFT_COLLECTOR"):
             # Override ML score with neutral for behavioral users
             # Their score is determined by behavior, age, and graph signals
             ml_score = 50.0
