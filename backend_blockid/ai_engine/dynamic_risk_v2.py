@@ -15,6 +15,36 @@ logger = get_logger(__name__)
 
 DYNAMIC_RISK_THRESHOLD = 70
 
+KNOWN_LEGITIMATE_CREATORS = {
+    # DRiP Haus — largest cNFT airdrop platform on Solana
+    # Confirmed via Solscan: DRiPPP2LytGjNZ5fVpdZS7Xi1oANSY3Df1gSxvUKpzny
+    "DRiPPP2LytGjNZ5fVpdZS7Xi1oANSY3Df1gSxvUKpzny",
+    # BlockID mint authority
+    "D4dybLQkZwTngU3XbTjK9kce1nrVCPGhvfhUu8WtDYLZ",
+    # Meteora (DeFi position NFTs)
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+}
+
+KNOWN_LEGITIMATE_PROGRAMS = {
+    # Metaplex Bubblegum v1 — cNFT standard (DRiP uses this)
+    "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY",
+    # Metaplex Core — newest NFT standard
+    "CoREENxT6tW1HoK8ypY1SxRoBkygYjER9VftWCFpAarHW",
+    # Metaplex Token Metadata — original NFT standard since 2021
+    "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+    # Magic Eden v2 marketplace
+    "M2mx93ekt1fmXSVkTrUL9xVFHkmME8HTUi5Cyc5aF7K",
+    # Tensor marketplace
+    "TCMPhJdwDryooaGtiocG1u3xcYbRpiJzb283XfCZsDp",
+}
+
+KNOWN_LEGITIMATE_INTERFACES = {
+    "MplCoreAsset",       # Metaplex Core (BlockID uses this)
+    "ProgrammableNFT",    # Metaplex pNFT (royalty enforced)
+    "V1_NFT",             # Standard NFT
+    "V1_PRINT",           # Print edition NFT
+}
+
 
 async def _get_ml_score(conn: Any, wallet: str) -> float:
     """
@@ -294,6 +324,141 @@ async def _get_wallet_age_boost(conn: Any, wallet: str) -> float:
         return 0.0
 
 
+async def _get_nft_collector_score(conn: Any, wallet: str, assets: list) -> float:
+    """
+    Score NFT collector wallet based on legitimacy of their NFT holdings.
+
+    Positive signals:
+    - NFTs from known legitimate creators (DRiP, BlockID, etc.)
+    - NFTs with verified collections
+    - NFTs with complete metadata
+    - NFTs from known legitimate programs
+
+    Negative signals:
+    - NFTs with missing metadata (no name)
+    - NFTs from unknown creators with no verified collection
+    - High ratio of worthless/suspicious NFTs
+
+    Returns adjustment: -15 to +15
+    """
+    if not assets:
+        return 0.0
+
+    total = len(assets)
+    known_creator_count = 0
+    missing_metadata_count = 0
+    verified_collection_count = 0
+    core_asset_count = 0
+    suspicious_count = 0
+
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        # Check known legitimate creators
+        creators = asset.get("creators") or []
+        if not isinstance(creators, list):
+            creators = []
+        for c in creators:
+            if isinstance(c, dict) and c.get("address") in KNOWN_LEGITIMATE_CREATORS:
+                known_creator_count += 1
+                break
+
+        # Check metadata completeness
+        content = asset.get("content") or {}
+        metadata = content.get("metadata") or {}
+        name = (metadata.get("name") or "").strip()
+        if not name:
+            missing_metadata_count += 1
+
+        # Check verified collection
+        grouping = asset.get("grouping") or []
+        if not isinstance(grouping, list):
+            grouping = []
+        for g in grouping:
+            if isinstance(g, dict) and g.get("group_key") == "collection":
+                # Collection exists — check if verified
+                collection_metadata = g.get("collection_metadata") or {}
+                if collection_metadata.get("verified") or g.get("verified"):
+                    verified_collection_count += 1
+                    break
+
+        # Check Metaplex Core assets (newest legitimate standard)
+        if asset.get("interface") == "MplCoreAsset":
+            core_asset_count += 1
+
+        # Suspicious: no name, no collection, not from known creator
+        has_known_creator = any(
+            isinstance(c, dict) and c.get("address") in KNOWN_LEGITIMATE_CREATORS
+            for c in creators
+        )
+        has_collection = any(
+            isinstance(g, dict) and g.get("group_key") == "collection"
+            for g in grouping
+        )
+        if not name and not has_known_creator and not has_collection:
+            suspicious_count += 1
+
+    # Calculate ratios
+    known_ratio = known_creator_count / total
+    missing_ratio = missing_metadata_count / total
+    verified_ratio = verified_collection_count / total
+    suspicious_ratio = suspicious_count / total
+
+    # Build score
+    score = 0.0
+
+    # Boost for known legitimate creators
+    if known_ratio >= 0.5:
+        score += 10.0
+    elif known_ratio >= 0.3:
+        score += 6.0
+    elif known_ratio >= 0.1:
+        score += 3.0
+
+    # Boost for verified collections
+    if verified_ratio >= 0.5:
+        score += 8.0
+    elif verified_ratio >= 0.3:
+        score += 4.0
+    elif verified_ratio >= 0.1:
+        score += 2.0
+
+    # Boost for Metaplex Core assets (legitimate modern standard)
+    if core_asset_count > 0:
+        score += 3.0
+
+    # Penalty for missing metadata
+    if missing_ratio >= 0.5:
+        score -= 15.0
+    elif missing_ratio >= 0.3:
+        score -= 8.0
+    elif missing_ratio >= 0.1:
+        score -= 3.0
+
+    # Penalty for suspicious NFTs (no name, no collection, unknown creator)
+    if suspicious_ratio >= 0.3:
+        score -= 10.0
+    elif suspicious_ratio >= 0.1:
+        score -= 5.0
+
+    # Clamp to reasonable range
+    score = max(-15.0, min(15.0, score))
+
+    logger.info(
+        "nft_collector_score",
+        wallet=wallet[:16],
+        total_nfts=total,
+        known_creator_count=known_creator_count,
+        missing_metadata_count=missing_metadata_count,
+        verified_collection_count=verified_collection_count,
+        core_asset_count=core_asset_count,
+        suspicious_count=suspicious_count,
+        score=round(score, 2),
+    )
+
+    return float(score)
+
+
 async def _fetch_from_helius(conn: Any, wallet: str, now: int) -> dict:
     """
     Fetch tx_count and unique_counterparties from Helius RPC.
@@ -415,14 +580,73 @@ async def _fetch_from_helius(conn: Any, wallet: str, now: int) -> dict:
     return result
 
 
+async def _classify_nft_or_behavioral(wallet: str, helius_key: str) -> str:
+    """
+    Classify wallet as NFT_COLLECTOR or BEHAVIORAL_USER
+    based on asset holdings from Helius DAS getAssetsByOwner.
+
+    NFT_COLLECTOR: >60% of holdings are NFTs/cNFTs
+    BEHAVIORAL_USER: mostly fungible tokens or mixed holdings
+    """
+    try:
+        import aiohttp
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAssetsByOwner",
+            "params": {
+                "ownerAddress": wallet,
+                "page": 1,
+                "limit": 50,
+                "displayOptions": {
+                    "showFungible": True,
+                    "showNativeBalance": False,
+                },
+            },
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return "BEHAVIORAL_USER"
+                data = await resp.json()
+                items = (data.get("result") or {}).get("items") or []
+
+                if not items:
+                    return "BEHAVIORAL_USER"
+
+                total = len(items)
+                nft_count = sum(
+                    1
+                    for item in items
+                    if item.get("interface") in KNOWN_LEGITIMATE_INTERFACES
+                    or item.get("compression", {}).get("compressed", False)
+                )
+
+                nft_ratio = nft_count / total
+                if nft_ratio >= 0.6 and total >= 5:
+                    return "NFT_COLLECTOR"
+                return "BEHAVIORAL_USER"
+
+    except Exception:
+        return "BEHAVIORAL_USER"
+
+
 async def _detect_wallet_type(conn: Any, wallet: str) -> str:
     """
-    Detect if wallet is a TOKEN_CREATOR or BEHAVIORAL_USER.
+    Detect if wallet is a TOKEN_CREATOR, NFT_COLLECTOR, or BEHAVIORAL_USER.
 
     TOKEN_CREATOR: wallet has created/launched tokens
     → Use token ML scoring (rug pull signals)
 
-    BEHAVIORAL_USER: wallet is a holder/trader
+    NFT_COLLECTOR: wallet holds mostly NFTs/cNFTs (Helius DAS)
+    → NFT legitimacy scoring for behavior adjustment
+
+    BEHAVIORAL_USER: wallet is a holder/trader (non-NFT-heavy)
     → Use behavioral scoring only, skip token ML
 
     Cached in trust_scores.wallet_type.
@@ -539,7 +763,11 @@ async def _detect_wallet_type(conn: Any, wallet: str) -> str:
         )
 
     # Classify: more than 2 tokens created = TOKEN_CREATOR
-    wallet_type = "TOKEN_CREATOR" if tokens_created > 2 else "BEHAVIORAL_USER"
+    if tokens_created > 2:
+        wallet_type = "TOKEN_CREATOR"
+    else:
+        # Check if NFT_COLLECTOR via Helius DAS
+        wallet_type = await _classify_nft_or_behavioral(wallet, HELIUS_KEY)
 
     # Cache result
     try:
@@ -603,7 +831,9 @@ async def _fetch_wallet_behavior_features(conn: Any, wallet: str) -> dict:
     return await _fetch_from_helius(conn, wallet, now)
 
 
-async def _get_wallet_behavior_score(conn: Any, wallet: str) -> float:
+async def _get_wallet_behavior_score(
+    conn: Any, wallet: str, wallet_type: str | None = None
+) -> float:
     """
     Uses wallet_classifier.pkl to score wallet behavior.
     Features: tx_count, account_age_days, unique_counterparties
@@ -1100,7 +1330,44 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
         cyclops_penalty = await _get_cyclops_penalty(conn, wallet)
         token_risk_penalty = await _get_token_risk_penalty(conn, wallet)
         age_boost = await _get_wallet_age_boost(conn, wallet)
-        behavior_score = await _get_wallet_behavior_score(conn, wallet)
+        if wallet_type == "NFT_COLLECTOR":
+            # Fetch assets for NFT scoring
+            import os
+
+            import aiohttp as _aiohttp
+
+            _helius_key = os.environ.get("HELIUS_API_KEY", "")
+            _nft_assets: list = []
+            if _helius_key:
+                try:
+                    _payload = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getAssetsByOwner",
+                        "params": {
+                            "ownerAddress": wallet,
+                            "page": 1,
+                            "limit": 50,
+                            "displayOptions": {
+                                "showFungible": True,
+                                "showNativeBalance": False,
+                            },
+                        },
+                    }
+                    async with _aiohttp.ClientSession() as _session:
+                        async with _session.post(
+                            f"https://mainnet.helius-rpc.com/?api-key={_helius_key}",
+                            json=_payload,
+                            timeout=_aiohttp.ClientTimeout(total=10),
+                        ) as _resp:
+                            if _resp.status == 200:
+                                _data = await _resp.json()
+                                _nft_assets = (_data.get("result") or {}).get("items") or []
+                except Exception:
+                    pass
+            behavior_score = await _get_nft_collector_score(conn, wallet, _nft_assets)
+        else:
+            behavior_score = await _get_wallet_behavior_score(conn, wallet, wallet_type)
         final_score = (dynamic_risk + reason_penalty + cyclops_penalty + token_risk_penalty + age_boost + behavior_score)
         final_score = max(0.0, min(97.0, final_score))
 
@@ -1111,7 +1378,7 @@ async def update_wallet_score_async(wallet: str) -> dict[str, float]:
             # For BEHAVIORAL_USER: skip raw_ml_score cap
             # Their score should not be limited by token ML
             # which is designed for TOKEN_CREATOR wallets
-            if wallet_type == "BEHAVIORAL_USER":
+            if wallet_type in ("BEHAVIORAL_USER", "NFT_COLLECTOR"):
                 cap_value = 50.0
             else:
                 raw_ml = await conn.fetchval(
