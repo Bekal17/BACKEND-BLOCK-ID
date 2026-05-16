@@ -190,6 +190,7 @@ app.post("/mint", async (req, res) => {
 });
 
 // POST /mint-handle — Handle NFT: transferable (NO PermanentFreezeDelegate, NO ImmutableMetadata)
+// Uses mpl-core create() + getUmi() for standard Core assets (not compressed). Do not use createV1 here.
 app.post("/mint-handle", async (req, res) => {
   const { wallet, handle, metadata_uri } = req.body || {};
   if (!wallet || !handle) {
