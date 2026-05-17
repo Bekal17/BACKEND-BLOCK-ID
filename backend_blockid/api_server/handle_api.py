@@ -23,6 +23,7 @@ from backend_blockid.api_server.handle_pricing import (
     validate_handle_format,
 )
 from backend_blockid.api_server.nft_mint_api import verify_payment_tx
+from backend_blockid.api_server.session_auth import verify_session_token
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
 
@@ -375,6 +376,7 @@ class ClaimBlockHandleRequest(BaseModel):
     wallet: str
     handle: str
     signature: str = ""
+    session_token: str = ""
 
 
 @router.post("/block/claim")
@@ -385,6 +387,19 @@ async def claim_block_handle(request: ClaimBlockHandleRequest):
         raise HTTPException(
             status_code=400,
             detail={"code": "WALLET_REQUIRED"}
+        )
+
+    if request.session_token:
+        verified_wallet = verify_session_token(request.session_token)
+        if verified_wallet != wallet:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "UNAUTHORIZED"}
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "SESSION_REQUIRED"}
         )
 
     h = validate_block_handle(request.handle)
@@ -462,6 +477,7 @@ async def claim_block_handle(request: ClaimBlockHandleRequest):
 
 class ReleaseBlockHandleRequest(BaseModel):
     wallet: str
+    session_token: str = ""
 
 
 @router.delete("/block/release")
@@ -472,6 +488,19 @@ async def release_block_handle(request: ReleaseBlockHandleRequest):
         raise HTTPException(
             status_code=400,
             detail={"code": "WALLET_REQUIRED"}
+        )
+
+    if request.session_token:
+        verified_wallet = verify_session_token(request.session_token)
+        if verified_wallet != wallet:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "UNAUTHORIZED"}
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "SESSION_REQUIRED"}
         )
 
     conn = await get_conn()
