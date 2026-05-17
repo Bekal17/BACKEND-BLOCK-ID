@@ -2659,7 +2659,7 @@ async def get_wallet_posts(
                     sp_prof.avatar_url,
                     sp_prof.avatar_type,
                     sp_prof.avatar_is_animated,
-                    sp_prof.handle_type,
+                    sp_prof.handle_type
                 FROM social_posts sp
                 LEFT JOIN social_posts orig
                     ON orig.id = sp.repost_of
