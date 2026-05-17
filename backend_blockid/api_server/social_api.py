@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -2038,9 +2038,34 @@ async def get_profile(
         )
 
         profile_row = await conn.fetchrow(
-            "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle FROM social_profiles WHERE wallet = $1",
+            "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle, handle_release_at FROM social_profiles WHERE wallet = $1",
             wallet,
         )
+
+        # Auto-clear handle after 48h cooldown
+        if profile_row and profile_row.get("handle_release_at"):
+            now = datetime.now(timezone.utc)
+            release_at = profile_row["handle_release_at"]
+            if release_at.tzinfo is None:
+                release_at = release_at.replace(tzinfo=timezone.utc)
+            if now - release_at >= timedelta(hours=48):
+                await conn.execute(
+                    """
+                    UPDATE social_profiles
+                    SET handle = NULL,
+                        handle_type = NULL,
+                        handle_release_at = NULL,
+                        updated_at = NOW()
+                    WHERE wallet = $1
+                    """,
+                    wallet,
+                )
+                # Refresh profile_row after clear
+                profile_row = await conn.fetchrow(
+                    "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle, handle_release_at FROM social_profiles WHERE wallet = $1",
+                    wallet,
+                )
+
         displayed_badges = (
             list(profile_row["displayed_badges"])
             if profile_row and profile_row["displayed_badges"]
@@ -2070,6 +2095,7 @@ async def get_profile(
             "wallet": wallet,
             "handle": _handle,
             "handle_type": _handle_type,
+            "handle_release_at": profile_row["handle_release_at"].isoformat() if profile_row and profile_row.get("handle_release_at") else None,
             "plan": plan,
             "trust_score": float(ts["trust_score"]) if ts and ts["trust_score"] is not None else None,
             "risk_level": ts["risk_level"] if ts else None,

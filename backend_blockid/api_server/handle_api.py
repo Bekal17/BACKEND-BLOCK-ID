@@ -408,21 +408,47 @@ async def claim_block_handle(request: ClaimBlockHandleRequest):
     try:
         # Check if wallet already has any handle
         existing = await conn.fetchrow(
-            "SELECT handle, handle_type FROM social_profiles WHERE wallet = $1",
+            "SELECT handle, handle_type, handle_release_at FROM social_profiles WHERE wallet = $1",
             wallet
         )
         if existing and existing["handle"]:
             existing_type = existing["handle_type"]
             existing_handle = existing["handle"]
-            if existing_type == "nft":
+            existing_release_at = existing.get("handle_release_at")
+
+            # Check if in 48h cooldown
+            if existing_release_at:
+                now = datetime.now(timezone.utc)
+                if existing_release_at.tzinfo is None:
+                    existing_release_at = existing_release_at.replace(tzinfo=timezone.utc)
+                if now - existing_release_at < timedelta(hours=48):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "WALLET_HAS_BLOCK_HANDLE", "existing": existing_handle}
+                    )
+                else:
+                    # 48h passed — auto-clear and allow claim
+                    await conn.execute(
+                        """
+                        UPDATE social_profiles
+                        SET handle = NULL,
+                            handle_type = NULL,
+                            handle_release_at = NULL,
+                            updated_at = NOW()
+                        WHERE wallet = $1
+                        """,
+                        wallet,
+                    )
+            elif existing_type == "nft":
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "WALLET_HAS_NFT_HANDLE", "existing": existing_handle}
                 )
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "WALLET_HAS_BLOCK_HANDLE", "existing": existing_handle}
-            )
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "WALLET_HAS_BLOCK_HANDLE", "existing": existing_handle}
+                )
 
         # Check handle not taken in handle_registry (NFT)
         nft_conflict = await conn.fetchrow(
@@ -527,8 +553,7 @@ async def release_block_handle(request: ReleaseBlockHandleRequest):
         await conn.execute(
             """
             UPDATE social_profiles
-            SET handle = NULL,
-                handle_type = NULL,
+            SET handle_release_at = NOW(),
                 updated_at = NOW()
             WHERE wallet = $1
             """,
@@ -537,9 +562,11 @@ async def release_block_handle(request: ReleaseBlockHandleRequest):
 
         logger.info("block_handle_released", handle=released_handle, wallet=wallet[:16])
 
+        release_time = datetime.now(timezone.utc)
         return {
             "success": True,
             "released_handle": released_handle,
+            "handle_release_at": release_time.isoformat(),
             "wallet": wallet,
         }
     finally:
