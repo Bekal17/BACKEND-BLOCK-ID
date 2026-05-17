@@ -950,7 +950,7 @@ async def get_following_feed(
                 sp_prof.avatar_url,
                 sp_prof.avatar_type,
                 sp_prof.avatar_is_animated,
-                sp_prof.handle_type,
+                sp_prof.handle_type
             FROM social_posts p
             JOIN social_follows f
               ON f.following_wallet = p.wallet
@@ -1097,7 +1097,7 @@ async def get_explore_feed(
                     sp_prof.avatar_url,
                     sp_prof.avatar_type,
                     sp_prof.avatar_is_animated,
-                    sp_prof.handle_type,
+                    sp_prof.handle_type
                 FROM social_posts p
                 LEFT JOIN social_posts orig
                   ON orig.id = p.repost_of
