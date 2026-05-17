@@ -2038,7 +2038,7 @@ async def get_profile(
         )
 
         profile_row = await conn.fetchrow(
-            "SELECT displayed_badges, is_og_member, og_member_number, handle_type FROM social_profiles WHERE wallet = $1",
+            "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle FROM social_profiles WHERE wallet = $1",
             wallet,
         )
         displayed_badges = (
@@ -2060,10 +2060,16 @@ async def get_profile(
         except Exception:
             pass
 
+        _handle = handle_row["handle"] if handle_row else None
+        _handle_type = "nft" if handle_row else None
+        if not _handle and profile_row and profile_row.get("handle_type") == "block":
+            _handle = profile_row["handle"] if profile_row else None
+            _handle_type = "block"
+
         return {
             "wallet": wallet,
-            "handle": handle_row["handle"] if handle_row else None,
-            "handle_type": profile_row["handle_type"] if profile_row else None,
+            "handle": _handle,
+            "handle_type": _handle_type,
             "plan": plan,
             "trust_score": float(ts["trust_score"]) if ts and ts["trust_score"] is not None else None,
             "risk_level": ts["risk_level"] if ts else None,
