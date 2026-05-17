@@ -460,6 +460,63 @@ async def claim_block_handle(request: ClaimBlockHandleRequest):
         await release_conn(conn)
 
 
+class ReleaseBlockHandleRequest(BaseModel):
+    wallet: str
+
+
+@router.delete("/block/release")
+async def release_block_handle(request: ReleaseBlockHandleRequest):
+    """Release (delete) a free @handle.Block handle from a wallet."""
+    wallet = (request.wallet or "").strip()
+    if not wallet:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "WALLET_REQUIRED"}
+        )
+
+    conn = await get_conn()
+    try:
+        existing = await conn.fetchrow(
+            "SELECT handle, handle_type FROM social_profiles WHERE wallet = $1",
+            wallet
+        )
+
+        if not existing or not existing["handle"]:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "NO_HANDLE_FOUND"}
+            )
+
+        if existing["handle_type"] != "block":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "CANNOT_RELEASE_NFT_HANDLE"}
+            )
+
+        released_handle = existing["handle"]
+
+        await conn.execute(
+            """
+            UPDATE social_profiles
+            SET handle = NULL,
+                handle_type = NULL,
+                updated_at = NOW()
+            WHERE wallet = $1
+            """,
+            wallet,
+        )
+
+        logger.info("block_handle_released", handle=released_handle, wallet=wallet[:16])
+
+        return {
+            "success": True,
+            "released_handle": released_handle,
+            "wallet": wallet,
+        }
+    finally:
+        await release_conn(conn)
+
+
 # --- POST /handle/link-wallet ---
 
 
