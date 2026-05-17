@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -24,6 +25,79 @@ from backend_blockid.api_server.handle_pricing import (
 from backend_blockid.api_server.nft_mint_api import verify_payment_tx
 from backend_blockid.blockid_logging import get_logger
 from backend_blockid.database.pg_connection import get_conn, release_conn
+
+RESERVED_HANDLES = {
+    # Layer 1 & Chain
+    "solana", "sol", "ethereum", "bitcoin", "btc", "eth", "polygon",
+    "avalanche", "near", "cosmos", "aptos", "sui", "base", "arbitrum",
+    "optimism", "ton", "tron", "bnb", "bsc",
+    # DeFi & DEX
+    "jupiter", "jup", "raydium", "ray", "orca", "drift", "mango",
+    "kamino", "meteora", "marinade", "jito", "sanctum", "lifinity",
+    "solend", "marginfi", "save", "tulip", "francium", "hawksight",
+    "hubble", "port", "lulo", "credix", "maple", "jet", "sunny",
+    "saber", "mercurial", "cashio", "atrix", "serum", "openbook",
+    "zeta", "cypher", "parcl", "hxro", "entropy",
+    # Wallet & Identity
+    "phantom", "backpack", "solflare", "glow", "exodus", "ledger",
+    "trezor", "brave", "metamask", "trustwallet", "coin98", "slope",
+    "safepal", "xdefi", "tiplink", "squads", "sns", "bonfida",
+    # NFT & Marketplace
+    "magiceden", "tensor", "solanart", "mallow", "formfunction",
+    "holaplex", "digitaleyes", "coral", "metaplex", "underdog",
+    "cardinal", "degods", "okay", "bears", "smb", "monkedao",
+    "aurory", "degenape", "primates", "claynosaurz", "stepn", "portals",
+    # Infrastructure & Tools
+    "helius", "quicknode", "alchemy", "triton", "chainstack", "pyth",
+    "switchboard", "wormhole", "layerzero", "allbridge", "debridge",
+    "celer", "socket", "rango", "clockwork", "genesysgo", "shadow",
+    "neon", "realms", "dialect", "blink", "actions", "superteam",
+    "colosseum", "solscan", "solanaexplorer", "explorer", "solanafm",
+    "birdeye", "dexscreener", "bubblemaps", "rugcheck", "cyclops", "daemon",
+    # Meme & Token
+    "bonk", "wif", "dogwifhat", "popcat", "myro", "samo", "bome",
+    "bookofmeme", "ponke", "slerf", "ai16z", "goat", "moodeng",
+    "trump", "melania", "fartcoin", "retardio", "harambe", "wen",
+    # Tokoh / Founder
+    "anatoly", "toly", "raj", "tristan", "armani", "noah",
+    "mert", "weremeow", "sbf", "ryan", "tyler", "elon",
+    "vitalik", "satoshi", "cz", "hayden", "stani",
+    # BlockID Internal & System
+    "blockid", "sage", "admin", "support", "system", "api",
+    "null", "undefined", "root", "me", "you", "user", "bot",
+    "ai", "gpt", "claude", "openai", "anthropic", "help", "info",
+    "team", "staff", "official", "verified", "test", "dev",
+    "staging", "prod", "anonymous", "unknown", "wallet", "score",
+    "trust", "identity", "nft", "token", "badge", "og",
+    "moderator", "mod", "owner", "founder", "contact", "security",
+    "abuse", "report", "feedback", "legal", "privacy", "tos", "terms",
+}
+
+
+def validate_block_handle(handle: str) -> str:
+    """
+    Validate and normalize a .Block handle.
+    Returns normalized handle string or raises HTTPException with error code.
+    Frontend handles all display messages via i18n error codes.
+    """
+    h = handle.lower().strip()
+    if not h:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "HANDLE_INVALID_FORMAT"}
+        )
+    if not re.match(r'^[a-z0-9_]{3,20}$', h):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "HANDLE_INVALID_FORMAT"}
+        )
+    if h in RESERVED_HANDLES:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "HANDLE_RESERVED", "handle": h}
+        )
+    return h
+
 
 logger = get_logger(__name__)
 
@@ -241,10 +315,11 @@ async def claim_handle(body: ClaimRequest) -> dict[str, Any]:
         try:
             await conn.execute(
                 """
-                INSERT INTO social_profiles (wallet, handle, created_at, updated_at)
-                VALUES ($1, $2, $3, $3)
+                INSERT INTO social_profiles (wallet, handle, handle_type, created_at, updated_at)
+                VALUES ($1, $2, 'nft', $3, $3)
                 ON CONFLICT (wallet) DO UPDATE SET
                     handle = EXCLUDED.handle,
+                    handle_type = 'nft',
                     updated_at = EXCLUDED.updated_at
                 """,
                 wallet,
@@ -262,6 +337,124 @@ async def claim_handle(body: ClaimRequest) -> dict[str, Any]:
             "price_usd": price_usd,
             "challenge_expires_at": challenge_expires_at.isoformat(),
             "message": f"Handle @{h} claimed successfully. 30-day challenge period active.",
+        }
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/block/check/{handle}")
+async def check_block_handle(handle: str):
+    """Check if a .Block handle is available."""
+    try:
+        h = validate_block_handle(handle)
+    except HTTPException as e:
+        return {"available": False, "code": e.detail.get("code")}
+
+    conn = await get_conn()
+    try:
+        nft_row = await conn.fetchrow(
+            "SELECT owner_wallet FROM handle_registry WHERE handle = $1 AND status = 'ACTIVE'",
+            h
+        )
+        if nft_row:
+            return {"available": False, "code": "HANDLE_TAKEN_NFT", "handle": h}
+
+        block_row = await conn.fetchrow(
+            "SELECT wallet FROM social_profiles WHERE handle = $1 AND handle_type = 'block'",
+            h
+        )
+        if block_row:
+            return {"available": False, "code": "HANDLE_TAKEN_BLOCK", "handle": h}
+
+        return {"available": True, "handle": h}
+    finally:
+        await release_conn(conn)
+
+
+class ClaimBlockHandleRequest(BaseModel):
+    wallet: str
+    handle: str
+    signature: str = ""
+
+
+@router.post("/block/claim")
+async def claim_block_handle(request: ClaimBlockHandleRequest):
+    """Claim a free @handle.Block."""
+    wallet = (request.wallet or "").strip()
+    if not wallet:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "WALLET_REQUIRED"}
+        )
+
+    h = validate_block_handle(request.handle)
+
+    conn = await get_conn()
+    try:
+        # Check if wallet already has any handle
+        existing = await conn.fetchrow(
+            "SELECT handle, handle_type FROM social_profiles WHERE wallet = $1",
+            wallet
+        )
+        if existing and existing["handle"]:
+            existing_type = existing["handle_type"]
+            existing_handle = existing["handle"]
+            if existing_type == "nft":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "WALLET_HAS_NFT_HANDLE", "existing": existing_handle}
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "WALLET_HAS_BLOCK_HANDLE", "existing": existing_handle}
+            )
+
+        # Check handle not taken in handle_registry (NFT)
+        nft_conflict = await conn.fetchrow(
+            "SELECT owner_wallet FROM handle_registry WHERE handle = $1 AND status = 'ACTIVE'",
+            h
+        )
+        if nft_conflict:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "HANDLE_TAKEN_NFT", "handle": h}
+            )
+
+        # Check handle not taken in social_profiles (.Block)
+        block_conflict = await conn.fetchrow(
+            "SELECT wallet FROM social_profiles WHERE handle = $1 AND handle_type = 'block'",
+            h
+        )
+        if block_conflict:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "HANDLE_TAKEN_BLOCK", "handle": h}
+            )
+
+        now_utc = datetime.utcnow()
+
+        await conn.execute(
+            """
+            INSERT INTO social_profiles (wallet, handle, handle_type, created_at, updated_at)
+            VALUES ($1, $2, 'block', $3, $3)
+            ON CONFLICT (wallet) DO UPDATE SET
+                handle = EXCLUDED.handle,
+                handle_type = 'block',
+                updated_at = EXCLUDED.updated_at
+            """,
+            wallet,
+            h,
+            now_utc,
+        )
+
+        logger.info("block_handle_claimed", handle=h, wallet=wallet[:16])
+
+        return {
+            "success": True,
+            "handle": h,
+            "display": f"@{h}.Block",
+            "wallet": wallet,
+            "handle_type": "block",
         }
     finally:
         await release_conn(conn)
