@@ -949,7 +949,8 @@ async def get_following_feed(
                 nc.collection_name AS community_name,
                 sp_prof.avatar_url,
                 sp_prof.avatar_type,
-                sp_prof.avatar_is_animated
+                sp_prof.avatar_is_animated,
+                sp_prof.handle_type,
             FROM social_posts p
             JOIN social_follows f
               ON f.following_wallet = p.wallet
@@ -1095,7 +1096,8 @@ async def get_explore_feed(
                     nc.collection_name AS community_name,
                     sp_prof.avatar_url,
                     sp_prof.avatar_type,
-                    sp_prof.avatar_is_animated
+                    sp_prof.avatar_is_animated,
+                    sp_prof.handle_type,
                 FROM social_posts p
                 LEFT JOIN social_posts orig
                   ON orig.id = p.repost_of
@@ -1994,9 +1996,11 @@ async def get_profile(
             SELECT sp.id, sp.wallet, sp.handle, sp.content, sp.image_url, sp.post_type,
                    sp.reply_count, sp.like_count, sp.trust_score, sp.risk_level,
                    sp.link_url, sp.link_title, sp.link_description, sp.link_image,
-                   sp.is_hidden, sp.created_at,
+                   sp.is_hidden, sp_prof.handle_type,
+                   sp.created_at,
                    COALESCE(sub.plan, 'free') AS plan
             FROM social_posts sp
+            LEFT JOIN social_profiles sp_prof ON sp_prof.wallet = sp.wallet
             LEFT JOIN (
                 SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
@@ -2034,7 +2038,7 @@ async def get_profile(
         )
 
         profile_row = await conn.fetchrow(
-            "SELECT displayed_badges, is_og_member, og_member_number FROM social_profiles WHERE wallet = $1",
+            "SELECT displayed_badges, is_og_member, og_member_number, handle_type FROM social_profiles WHERE wallet = $1",
             wallet,
         )
         displayed_badges = (
@@ -2059,6 +2063,7 @@ async def get_profile(
         return {
             "wallet": wallet,
             "handle": handle_row["handle"] if handle_row else None,
+            "handle_type": profile_row["handle_type"] if profile_row else None,
             "plan": plan,
             "trust_score": float(ts["trust_score"]) if ts and ts["trust_score"] is not None else None,
             "risk_level": ts["risk_level"] if ts else None,
@@ -2653,7 +2658,8 @@ async def get_wallet_posts(
                     COALESCE(sub_orig.plan, 'free') AS original_plan,
                     sp_prof.avatar_url,
                     sp_prof.avatar_type,
-                    sp_prof.avatar_is_animated
+                    sp_prof.avatar_is_animated,
+                    sp_prof.handle_type,
                 FROM social_posts sp
                 LEFT JOIN social_posts orig
                     ON orig.id = sp.repost_of
