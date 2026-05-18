@@ -2581,10 +2581,21 @@ async def get_notifications(
     try:
         rows = await conn.fetch(
             """
-            SELECT n.id, n.type, n.from_wallet, n.post_id, n.is_read, n.created_at,
-                   h.handle AS from_handle
+            SELECT
+                n.id, n.type, n.from_wallet, n.post_id, n.is_read, n.created_at,
+                COALESCE(h.handle, sp.handle) AS from_handle,
+                CASE
+                    WHEN h.handle IS NOT NULL THEN 'nft'
+                    ELSE sp.handle_type
+                END AS from_handle_type,
+                sp.avatar_url AS from_avatar_url,
+                sp.avatar_type AS from_avatar_type,
+                sp.avatar_is_animated AS from_avatar_is_animated,
+                p.content AS post_preview
             FROM social_notifications n
-            LEFT JOIN handle_registry h ON h.owner_wallet = n.from_wallet
+            LEFT JOIN handle_registry h ON h.owner_wallet = n.from_wallet AND h.status = 'ACTIVE'
+            LEFT JOIN social_profiles sp ON sp.wallet = n.from_wallet
+            LEFT JOIN social_posts p ON p.id = n.post_id
             WHERE n.wallet = $1
             ORDER BY n.is_read ASC, n.created_at DESC
             LIMIT 100
@@ -2595,12 +2606,18 @@ async def get_notifications(
         notifications = []
         for r in rows:
             msg = _notification_message(r["type"], r.get("from_handle"), r.get("post_id"))
+            preview = r.get("post_preview") or ""
             notifications.append({
                 "id": r["id"],
                 "type": r["type"],
                 "from_wallet": r["from_wallet"],
                 "from_handle": r["from_handle"],
+                "from_handle_type": r.get("from_handle_type"),
+                "from_avatar_url": r.get("from_avatar_url"),
+                "from_avatar_type": r.get("from_avatar_type"),
+                "from_avatar_is_animated": r.get("from_avatar_is_animated", False),
                 "post_id": r["post_id"],
+                "post_preview": preview[:100] if preview else None,
                 "message": msg,
                 "is_read": r["is_read"],
                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
