@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend_blockid.api_server.handle_antiskwat import (
@@ -368,6 +368,132 @@ async def check_block_handle(handle: str):
             return {"available": False, "code": "HANDLE_TAKEN_BLOCK", "handle": h}
 
         return {"available": True, "handle": h}
+    finally:
+        await release_conn(conn)
+
+
+@router.get("/search")
+async def search_handles(
+    q: str = Query("", min_length=1, max_length=20),
+    wallet: str = Query(""),
+    limit: int = Query(5, ge=1, le=10),
+):
+    """
+    Search handles for @mention autocomplete.
+    Returns handles matching prefix q.
+    Following users appear first.
+    Only returns users with a handle (nft, sns, or block).
+    """
+    q = q.strip().lower().lstrip("@")
+    if not q:
+        return {"results": []}
+
+    wallet = (wallet or "").strip()
+
+    conn = await get_conn()
+    try:
+        # Get following wallets for priority sorting
+        following_wallets: set[str] = set()
+        if wallet:
+            follow_rows = await conn.fetch(
+                "SELECT following_wallet FROM social_follows WHERE follower_wallet = $1",
+                wallet,
+            )
+            following_wallets = {r["following_wallet"] for r in follow_rows}
+
+        # Search NFT handles from handle_registry
+        nft_rows = await conn.fetch(
+            """
+            SELECT
+                hr.owner_wallet AS wallet,
+                hr.handle,
+                'nft' AS handle_type,
+                COALESCE(ts.score, 0) AS trust_score,
+                sp.avatar_url,
+                sp.avatar_type,
+                sp.avatar_is_animated
+            FROM handle_registry hr
+            LEFT JOIN trust_scores ts ON ts.wallet = hr.owner_wallet
+            LEFT JOIN social_profiles sp ON sp.wallet = hr.owner_wallet
+            WHERE hr.status = 'ACTIVE'
+              AND LOWER(hr.handle) LIKE $1
+            LIMIT $2
+            """,
+            f"{q}%",
+            limit * 2,
+        )
+
+        # Search SNS and .Block handles from social_profiles
+        sp_rows = await conn.fetch(
+            """
+            SELECT
+                sp.wallet,
+                sp.handle,
+                sp.handle_type,
+                COALESCE(ts.score, 0) AS trust_score,
+                sp.avatar_url,
+                sp.avatar_type,
+                sp.avatar_is_animated
+            FROM social_profiles sp
+            LEFT JOIN trust_scores ts ON ts.wallet = sp.wallet
+            WHERE sp.handle IS NOT NULL
+              AND sp.handle_type IN ('sns', 'block')
+              AND sp.handle_release_at IS NULL
+              AND LOWER(sp.handle) LIKE $1
+            LIMIT $2
+            """,
+            f"{q}%",
+            limit * 2,
+        )
+
+        # Merge and deduplicate by wallet (NFT takes priority)
+        seen_wallets: set[str] = set()
+        seen_handles: set[str] = set()
+        results = []
+
+        all_rows = list(nft_rows) + list(sp_rows)
+
+        # Sort: following first, then by trust_score desc
+        def sort_key(r: dict) -> tuple:
+            is_following = r["wallet"] in following_wallets
+            return (not is_following, -(r["trust_score"] or 0))
+
+        all_dicts = [dict(r) for r in all_rows]
+        all_dicts.sort(key=sort_key)
+
+        for r in all_dicts:
+            w = r["wallet"]
+            h = r["handle"]
+            if w in seen_wallets or h in seen_handles:
+                continue
+            seen_wallets.add(w)
+            seen_handles.add(h)
+
+            # Build display handle with suffix
+            ht = r["handle_type"]
+            if ht == "block":
+                display = f"@{h}.Block"
+            elif ht == "sns":
+                display = f"@{h}.sol"
+            else:
+                display = f"@{h}"
+
+            results.append({
+                "wallet": w,
+                "handle": h,
+                "handle_type": ht,
+                "display": display,
+                "trust_score": round(float(r["trust_score"] or 0), 1),
+                "avatar_url": r.get("avatar_url"),
+                "avatar_type": r.get("avatar_type"),
+                "avatar_is_animated": r.get("avatar_is_animated", False),
+                "is_following": w in following_wallets,
+            })
+
+            if len(results) >= limit:
+                break
+
+        return {"results": results}
     finally:
         await release_conn(conn)
 
