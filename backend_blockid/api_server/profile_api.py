@@ -106,6 +106,22 @@ async def get_wallet_names(wallet: str) -> dict:
                 "icon": "blockid",
             })
 
+        # .Block handle from social_profiles
+        block_row = await conn.fetchrow(
+            "SELECT handle FROM social_profiles "
+            "WHERE wallet = $1 AND handle_type = 'block' "
+            "AND handle IS NOT NULL AND handle_release_at IS NULL",
+            wallet,
+        )
+        if block_row and block_row["handle"]:
+            block_handle = block_row["handle"]
+            names.append({
+                "name": f"@{block_handle}.Block",
+                "source": "BLOCK",
+                "display": f"@{block_handle}.Block",
+                "icon": "block",
+            })
+
         # 2. SNS .sol domains (Bonfida)
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -199,7 +215,7 @@ async def update_profile(body: ProfileUpdateRequest) -> dict:
             raise HTTPException(status_code=400, detail="website max 255 chars")
     if body.location is not None and len(body.location) > 100:
         raise HTTPException(status_code=400, detail="location max 100 chars")
-    valid_sources = {"WALLET", "BLOCKID", "SNS", "ENS", "ANS"}
+    valid_sources = {"WALLET", "BLOCKID", "SNS", "ENS", "ANS", "BLOCK"}
     if body.display_name_source is not None and body.display_name_source not in valid_sources:
         raise HTTPException(
             status_code=400,
