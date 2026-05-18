@@ -423,6 +423,7 @@ async def create_post(body: CreatePostRequest):
                 $1,
                 COALESCE(
                     (SELECT handle FROM handle_registry WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1),
+                    (SELECT handle FROM social_profiles WHERE wallet = $1 AND handle_type = 'sns' LIMIT 1),
                     (SELECT handle FROM social_profiles WHERE wallet = $1 AND handle_type = 'block' LIMIT 1)
                 ),
                 $2, $3, $4,
@@ -721,6 +722,7 @@ async def create_post_with_image(
                 $1,
                 COALESCE(
                     (SELECT handle FROM handle_registry WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1),
+                    (SELECT handle FROM social_profiles WHERE wallet = $1 AND handle_type = 'sns' LIMIT 1),
                     (SELECT handle FROM social_profiles WHERE wallet = $1 AND handle_type = 'block' LIMIT 1)
                 ),
                 $2, $3, $4,
@@ -1466,12 +1468,18 @@ async def repost_post(body: Dict[str, Any]):
             wallet,
         )
         if not handle_row:
-            block_row = await conn.fetchrow(
-                "SELECT handle FROM social_profiles "
-                "WHERE wallet = $1 AND handle_type = 'block' LIMIT 1",
+            sp_row = await conn.fetchrow(
+                """
+                SELECT handle, handle_type FROM social_profiles
+                WHERE wallet = $1
+                AND handle_type IN ('sns', 'block')
+                AND handle IS NOT NULL
+                ORDER BY CASE handle_type WHEN 'sns' THEN 1 WHEN 'block' THEN 2 END
+                LIMIT 1
+                """,
                 wallet,
             )
-            handle = block_row["handle"] if block_row else None
+            handle = sp_row["handle"] if sp_row else None
         else:
             handle = handle_row["handle"]
 
@@ -2101,9 +2109,11 @@ async def get_profile(
 
         _handle = handle_row["handle"] if handle_row else None
         _handle_type = "nft" if handle_row else None
-        if not _handle and profile_row and profile_row.get("handle_type") == "block":
-            _handle = profile_row["handle"] if profile_row else None
-            _handle_type = "block"
+        if not _handle and profile_row:
+            pt = profile_row.get("handle_type")
+            if pt in ("sns", "block") and profile_row.get("handle"):
+                _handle = profile_row["handle"]
+                _handle_type = pt
 
         return {
             "wallet": wallet,
