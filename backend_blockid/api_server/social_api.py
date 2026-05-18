@@ -1010,8 +1010,11 @@ async def get_following_feed(
                     p.like_count,
                     p.reply_count,
                     p.repost_count,
-                    COALESCE(sub.plan, 'free') AS plan
+                    COALESCE(sub.plan, 'free') AS plan,
+                    sp_prof.handle_type
                 FROM social_posts p
+                LEFT JOIN social_profiles sp_prof
+                    ON sp_prof.wallet = p.wallet
                 LEFT JOIN LATERAL (
                     SELECT DISTINCT ON (user_id) user_id, plan
                     FROM subscriptions
@@ -2617,7 +2620,8 @@ async def get_post(post_id: int):
                    COALESCE(sub.plan, 'free') AS plan,
                    sp_prof.avatar_url,
                    sp_prof.avatar_type,
-                   sp_prof.avatar_is_animated
+                   sp_prof.avatar_is_animated,
+                   sp_prof.handle_type
             FROM social_posts sp
             LEFT JOIN social_profiles sp_prof
               ON sp_prof.wallet = sp.wallet
@@ -2641,7 +2645,8 @@ async def get_post(post_id: int):
                    COALESCE(sub.plan, 'free') AS plan,
                    sp_prof.avatar_url,
                    sp_prof.avatar_type,
-                   sp_prof.avatar_is_animated
+                   sp_prof.avatar_is_animated,
+                   sp_prof.handle_type
             FROM social_posts r
             LEFT JOIN social_profiles sp_prof
               ON sp_prof.wallet = r.wallet
