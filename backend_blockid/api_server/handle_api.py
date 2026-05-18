@@ -873,11 +873,28 @@ async def get_handle_profile(handle: str) -> dict[str, Any]:
             "SELECT owner_wallet, mint_address, claimed_at, linked_wallets FROM handle_registry WHERE LOWER(handle) = $1 AND status = 'ACTIVE'",
             h,
         )
+        handle_type = "nft"
         if not reg:
-            raise HTTPException(404, detail="Handle not found")
+            # Fallback to social_profiles for .Block and SNS handles
+            sp_row = await conn.fetchrow(
+                """
+                SELECT wallet, handle_type FROM social_profiles
+                WHERE LOWER(handle) = $1
+                AND handle_type IN ('block', 'sns')
+                AND handle IS NOT NULL
+                AND handle_release_at IS NULL
+                LIMIT 1
+                """,
+                h,
+            )
+            if not sp_row:
+                raise HTTPException(404, detail="Handle not found")
+            owner = sp_row["wallet"] or ""
+            handle_type = sp_row["handle_type"]
+        else:
+            owner = reg["owner_wallet"] or ""
 
-        owner = reg["owner_wallet"] or ""
-        linked = list(reg["linked_wallets"] or [])
+        linked = list(reg["linked_wallets"] or []) if reg else []
         links = await conn.fetch(
             "SELECT wallet FROM handle_wallet_links WHERE handle = $1 AND link_status = 'VERIFIED'",
             h,
@@ -903,19 +920,21 @@ async def get_handle_profile(handle: str) -> dict[str, Any]:
             except Exception:
                 pass
 
-        claimed_at = reg["claimed_at"]
+        claimed_at = reg["claimed_at"] if reg else None
         claimed_str = claimed_at.strftime("%Y-%m-%d") if claimed_at and hasattr(claimed_at, "strftime") else str(claimed_at or "")
 
         return {
             "handle": f"@{h}",
+            "handle_type": handle_type,
             "owner_wallet": owner,
+            "wallet": owner,
             "linked_wallets": linked,
             "trust_score": round(trust_score, 1),
             "risk_level": risk_level,
             "badges": badges,
             "is_verified": bool(links),
             "claimed_at": claimed_str,
-            "mint_address": reg.get("mint_address"),
+            "mint_address": reg.get("mint_address") if reg else None,
         }
     finally:
         await release_conn(conn)
