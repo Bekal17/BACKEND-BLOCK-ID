@@ -193,16 +193,23 @@ async def resolve_handle(handle: str):
             handle,
         )
         handle_type = "nft"
+        sp_row = None
         if not row:
-            block_row = await conn.fetchrow(
-                "SELECT wallet, handle FROM social_profiles "
-                "WHERE LOWER(handle) = $1 AND handle_type = 'block' LIMIT 1",
+            sp_row = await conn.fetchrow(
+                """
+                SELECT wallet, handle, handle_type FROM social_profiles
+                WHERE LOWER(handle) = $1
+                AND handle_type IN ('sns', 'block')
+                AND handle IS NOT NULL
+                ORDER BY CASE handle_type WHEN 'sns' THEN 1 WHEN 'block' THEN 2 END
+                LIMIT 1
+                """,
                 handle,
             )
-            if not block_row:
+            if not sp_row:
                 raise HTTPException(status_code=404, detail="Handle, SNS or DNS not found")
-            wallet = block_row["wallet"]
-            handle_type = "block"
+            wallet = sp_row["wallet"]
+            handle_type = sp_row["handle_type"]
         else:
             wallet = row["owner_wallet"]
 
@@ -250,9 +257,13 @@ async def resolve_handle(handle: str):
 
         return {
             "found": True,
-            "handle": handle if handle_type == "block" else row["handle"],
+            "handle": row["handle"] if row else sp_row["handle"],
             "handle_type": handle_type,
-            "handle_display": f"@{handle}.Block" if handle_type == "block" else f"@{handle}",
+            "handle_display": (
+                f"@{handle}.Block" if handle_type == "block"
+                else f"@{handle}.sol" if handle_type == "sns"
+                else f"@{handle}"
+            ),
             "wallet": wallet,
             "trust_score": float(ts["trust_score"]) if ts and ts["trust_score"] is not None else None,
             "risk_level": ts["risk_level"] if ts else None,
