@@ -1853,14 +1853,20 @@ async def get_followers(wallet: str, viewer_wallet: Optional[str] = Query(None))
             """
             SELECT
                 sf.follower_wallet as wallet,
-                hr.handle,
+                COALESCE(hr.handle, sp.handle) AS handle,
+                CASE
+                    WHEN hr.handle IS NOT NULL THEN 'nft'
+                    ELSE sp.handle_type
+                END AS handle_type,
                 (SELECT score FROM trust_scores
                  WHERE trust_scores.wallet = sf.follower_wallet
                  ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score,
                 COALESCE(sub.plan, 'free') as plan
             FROM social_follows sf
             LEFT JOIN handle_registry hr
-                ON hr.owner_wallet = sf.follower_wallet
+                ON hr.owner_wallet = sf.follower_wallet AND hr.status = 'ACTIVE'
+            LEFT JOIN social_profiles sp
+                ON sp.wallet = sf.follower_wallet
             LEFT JOIN (
                 SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
@@ -1921,14 +1927,20 @@ async def get_following(wallet: str, viewer_wallet: Optional[str] = Query(None))
             """
             SELECT
                 sf.following_wallet as wallet,
-                hr.handle,
+                COALESCE(hr.handle, sp.handle) AS handle,
+                CASE
+                    WHEN hr.handle IS NOT NULL THEN 'nft'
+                    ELSE sp.handle_type
+                END AS handle_type,
                 (SELECT score FROM trust_scores
                  WHERE trust_scores.wallet = sf.following_wallet
                  ORDER BY computed_at DESC NULLS LAST LIMIT 1) as trust_score,
                 COALESCE(sub.plan, 'free') as plan
             FROM social_follows sf
             LEFT JOIN handle_registry hr
-                ON hr.owner_wallet = sf.following_wallet
+                ON hr.owner_wallet = sf.following_wallet AND hr.status = 'ACTIVE'
+            LEFT JOIN social_profiles sp
+                ON sp.wallet = sf.following_wallet
             LEFT JOIN (
                 SELECT DISTINCT ON (user_id) user_id, plan
                 FROM subscriptions
