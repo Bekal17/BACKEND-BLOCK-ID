@@ -421,7 +421,10 @@ async def create_post(body: CreatePostRequest):
             )
             VALUES (
                 $1,
-                (SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1),
+                COALESCE(
+                    (SELECT handle FROM handle_registry WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1),
+                    (SELECT handle FROM social_profiles WHERE wallet = $1 AND handle_type = 'block' LIMIT 1)
+                ),
                 $2, $3, $4,
                 $5, $6, $7, $8,
                 $9, $10,
@@ -716,7 +719,10 @@ async def create_post_with_image(
             )
             VALUES (
                 $1,
-                (SELECT handle FROM handle_registry WHERE owner_wallet = $1 LIMIT 1),
+                COALESCE(
+                    (SELECT handle FROM handle_registry WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1),
+                    (SELECT handle FROM social_profiles WHERE wallet = $1 AND handle_type = 'block' LIMIT 1)
+                ),
                 $2, $3, $4,
                 $5, $6, $7, $8,
                 $9, $10,
@@ -1456,10 +1462,18 @@ async def repost_post(body: Dict[str, Any]):
         # Get handle
         handle_row = await conn.fetchrow(
             "SELECT handle FROM handle_registry "
-            "WHERE owner_wallet = $1 LIMIT 1",
+            "WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1",
             wallet,
         )
-        handle = handle_row["handle"] if handle_row else None
+        if not handle_row:
+            block_row = await conn.fetchrow(
+                "SELECT handle FROM social_profiles "
+                "WHERE wallet = $1 AND handle_type = 'block' LIMIT 1",
+                wallet,
+            )
+            handle = block_row["handle"] if block_row else None
+        else:
+            handle = handle_row["handle"]
 
         # Simple repost uses original content; quote repost uses quote_content
         is_quote = bool(quote_content)
