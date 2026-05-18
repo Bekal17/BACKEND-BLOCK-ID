@@ -200,6 +200,25 @@ async def _require_identity_nft(wallet: str) -> None:
         )
 
 
+import re as _re
+
+
+def _extract_mentions(content: str) -> list[str]:
+    """
+    Extract unique @handle mentions from post content.
+    Returns list of lowercase handle strings (max 5).
+    """
+    handles = _re.findall(r'@([a-zA-Z0-9_]{3,20})', content)
+    seen = []
+    for h in handles:
+        h_lower = h.lower()
+        if h_lower not in seen:
+            seen.append(h_lower)
+        if len(seen) >= 5:
+            break
+    return seen
+
+
 async def _notify(
     conn,
     wallet: str,
@@ -462,6 +481,25 @@ async def create_post(body: CreatePostRequest):
             )
             if parent_row and parent_row["wallet"] != wallet:
                 await _notify(conn, parent_row["wallet"], "REPLY", wallet, parent_id)
+
+        # Mention notifications
+        post_id = row["id"]
+        mentions = _extract_mentions(content)
+        for handle in mentions:
+            mentioned = await conn.fetchrow(
+                """
+                SELECT COALESCE(hr.owner_wallet, sp.wallet) AS wallet
+                FROM (SELECT $1::text AS h) q
+                LEFT JOIN handle_registry hr
+                    ON LOWER(hr.handle) = q.h AND hr.status = 'ACTIVE'
+                LEFT JOIN social_profiles sp
+                    ON LOWER(sp.handle) = q.h AND sp.handle_type IN ('sns','block')
+                LIMIT 1
+                """,
+                handle,
+            )
+            if mentioned and mentioned["wallet"] and mentioned["wallet"] != wallet:
+                await _notify(conn, mentioned["wallet"], "MENTION", wallet, post_id)
 
         return PostResponse(**dict(row))
     finally:
@@ -758,6 +796,25 @@ async def create_post_with_image(
             )
             if parent_row and parent_row["wallet"] != wallet:
                 await _notify(conn, parent_row["wallet"], "REPLY", wallet, parent_id_val)
+
+        # Mention notifications
+        post_id = row["id"]
+        mentions = _extract_mentions(content)
+        for handle in mentions:
+            mentioned = await conn.fetchrow(
+                """
+                SELECT COALESCE(hr.owner_wallet, sp.wallet) AS wallet
+                FROM (SELECT $1::text AS h) q
+                LEFT JOIN handle_registry hr
+                    ON LOWER(hr.handle) = q.h AND hr.status = 'ACTIVE'
+                LEFT JOIN social_profiles sp
+                    ON LOWER(sp.handle) = q.h AND sp.handle_type IN ('sns','block')
+                LIMIT 1
+                """,
+                handle,
+            )
+            if mentioned and mentioned["wallet"] and mentioned["wallet"] != wallet:
+                await _notify(conn, mentioned["wallet"], "MENTION", wallet, post_id)
 
         return PostResponse(**dict(row))
     finally:
@@ -2568,6 +2625,10 @@ def _notification_message(notif_type: str, from_handle: Optional[str], post_id: 
         return f"{handle} replied to your post"
     if notif_type == "ENDORSE":
         return f"{handle} endorsed you"
+    if notif_type == "REPOST":
+        return f"{handle} reposted your post"
+    if notif_type == "MENTION":
+        return f"{handle} mentioned you in a post"
     if notif_type == "FLAG_RESOLVED":
         return "Your flagged post was resolved"
     return str(notif_type)
