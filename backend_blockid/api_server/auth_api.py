@@ -5,6 +5,7 @@ import asyncio
 import re
 import time
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from solders.pubkey import Pubkey
@@ -17,6 +18,116 @@ from backend_blockid.api_server.signature_verify import (
     DEVNET_BYPASS,
     verify_wallet_signature,
 )
+
+
+async def _sync_sns_handle(wallet: str) -> None:
+    """
+    Check Bonfida for .sol domains owned by wallet.
+    Sync primary domain to social_profiles if:
+    - Wallet has no NFT handle in handle_registry
+    - Wallet has no .Block handle (handle_type='block')
+    If wallet had SNS but no longer owns it, clear the SNS handle.
+    This runs as a background task — errors are swallowed.
+    """
+    try:
+        conn = await get_conn()
+        try:
+            # Check if wallet already has NFT handle — SNS should not override
+            nft_row = await conn.fetchrow(
+                "SELECT handle FROM handle_registry "
+                "WHERE owner_wallet = $1 AND status = 'ACTIVE' LIMIT 1",
+                wallet,
+            )
+            if nft_row and nft_row["handle"]:
+                return  # NFT handle takes priority, skip SNS sync
+
+            # Check current handle in social_profiles
+            profile_row = await conn.fetchrow(
+                "SELECT handle, handle_type FROM social_profiles WHERE wallet = $1",
+                wallet,
+            )
+            current_type = profile_row["handle_type"] if profile_row else None
+
+            # If wallet has .Block handle, do not override with SNS
+            if current_type == "block":
+                return
+
+            # Fetch SNS domains from Bonfida
+            sns_handle = None
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(
+                    f"https://sns-sdk-proxy.bonfida.workers.dev/domains/{wallet}"
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    domains = data.get("result", [])
+                    if domains:
+                        # Take first domain as primary
+                        first = domains[0]
+                        name = first if isinstance(first, str) else first.get("domain", "")
+                        if name:
+                            # Strip .sol suffix for storage (same as NFT handle pattern)
+                            sns_handle = name.replace(".sol", "").strip().lower()
+
+            if sns_handle:
+                # Check if this SNS handle conflicts with another wallet's NFT or .Block
+                conflict_nft = await conn.fetchrow(
+                    "SELECT owner_wallet FROM handle_registry "
+                    "WHERE handle = $1 AND status = 'ACTIVE' AND owner_wallet != $2 LIMIT 1",
+                    sns_handle, wallet,
+                )
+                if conflict_nft:
+                    return  # NFT handle of same name owned by someone else, skip
+
+                # Remove SNS from any other wallet that previously had it
+                await conn.execute(
+                    """
+                    UPDATE social_profiles
+                    SET handle = NULL, handle_type = NULL, updated_at = NOW()
+                    WHERE handle = $1 AND handle_type = 'sns' AND wallet != $2
+                    """,
+                    sns_handle, wallet,
+                )
+
+                # Also remove .Block conflict (SNS > .Block priority)
+                await conn.execute(
+                    """
+                    UPDATE social_profiles
+                    SET handle = NULL, handle_type = NULL, updated_at = NOW()
+                    WHERE handle = $1 AND handle_type = 'block' AND wallet != $2
+                    """,
+                    sns_handle, wallet,
+                )
+
+                # Upsert SNS handle to this wallet
+                await conn.execute(
+                    """
+                    INSERT INTO social_profiles (wallet, handle, handle_type, updated_at)
+                    VALUES ($1, $2, 'sns', NOW())
+                    ON CONFLICT (wallet) DO UPDATE SET
+                        handle = EXCLUDED.handle,
+                        handle_type = 'sns',
+                        updated_at = NOW()
+                    """,
+                    wallet, sns_handle,
+                )
+            else:
+                # Wallet no longer owns any .sol domain
+                # If previously had SNS handle, clear it
+                if current_type == "sns":
+                    await conn.execute(
+                        """
+                        UPDATE social_profiles
+                        SET handle = NULL, handle_type = NULL, updated_at = NOW()
+                        WHERE wallet = $1 AND handle_type = 'sns'
+                        """,
+                        wallet,
+                    )
+        finally:
+            await release_conn(conn)
+    except Exception:
+        pass  # Background task — never block login
+
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -61,6 +172,7 @@ async def login(body: LoginRequest, background_tasks: BackgroundTasks):
     if BLOCKID_ENV == "DEV" and body.signature in DEVNET_BYPASS:
         token = create_session_token(wallet)
         background_tasks.add_task(run_realtime_wallet_pipeline, wallet)
+        background_tasks.add_task(_sync_sns_handle, wallet)
         return {"session_token": token, "wallet": wallet, "expires_in": 86400}
 
     # Verify signature
@@ -94,6 +206,7 @@ async def login(body: LoginRequest, background_tasks: BackgroundTasks):
     finally:
         await release_conn(conn)
     background_tasks.add_task(run_realtime_wallet_pipeline, wallet)
+    background_tasks.add_task(_sync_sns_handle, wallet)
     return {
         "session_token": token,
         "wallet": wallet,
@@ -170,6 +283,7 @@ async def embedded_login(body: EmbeddedLoginRequest, background_tasks: Backgroun
         await release_conn(conn)
 
     background_tasks.add_task(run_realtime_wallet_pipeline, wallet_address)
+    background_tasks.add_task(_sync_sns_handle, wallet_address)
 
     return {
         "success": True,
