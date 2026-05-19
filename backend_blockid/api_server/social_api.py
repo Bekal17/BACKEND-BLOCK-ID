@@ -2132,7 +2132,7 @@ async def get_profile(
         )
 
         profile_row = await conn.fetchrow(
-            "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle, handle_release_at FROM social_profiles WHERE wallet = $1",
+            "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle, handle_release_at, has_completed_tour FROM social_profiles WHERE wallet = $1",
             wallet,
         )
 
@@ -2156,7 +2156,7 @@ async def get_profile(
                 )
                 # Refresh profile_row after clear
                 profile_row = await conn.fetchrow(
-                    "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle, handle_release_at FROM social_profiles WHERE wallet = $1",
+                    "SELECT displayed_badges, is_og_member, og_member_number, handle_type, handle, handle_release_at, has_completed_tour FROM social_profiles WHERE wallet = $1",
                     wallet,
                 )
 
@@ -2192,6 +2192,7 @@ async def get_profile(
             "handle": _handle,
             "handle_type": _handle_type,
             "handle_release_at": profile_row["handle_release_at"].isoformat() if profile_row and profile_row.get("handle_release_at") else None,
+            "has_completed_tour": bool(profile_row.get("has_completed_tour", False)) if profile_row else False,
             "plan": plan,
             "trust_score": float(ts["trust_score"]) if ts and ts["trust_score"] is not None else None,
             "risk_level": ts["risk_level"] if ts else None,
@@ -2628,6 +2629,38 @@ async def get_notifications(
                 wallet,
             )
         return {"notifications": notifications, "unread_count": 0 if mark_read else unread_count}
+    finally:
+        await release_conn(conn)
+
+
+@router.post("/tour/complete")
+async def complete_tour(body: Dict[str, Any]):
+    """
+    Mark tour as completed for a wallet.
+    Called when user finishes tour or answers quiz correctly.
+    """
+    wallet = (body.get("wallet") or "").strip()
+    session_token = (body.get("session_token") or "").strip()
+
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet required")
+
+    if BLOCKID_ENV != "DEV":
+        verified = verify_session_token(session_token)
+        if verified != wallet:
+            raise HTTPException(status_code=401, detail="Invalid session")
+
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            """
+            UPDATE social_profiles
+            SET has_completed_tour = TRUE, updated_at = NOW()
+            WHERE wallet = $1
+            """,
+            wallet,
+        )
+        return {"success": True, "wallet": wallet}
     finally:
         await release_conn(conn)
 
