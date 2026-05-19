@@ -35,7 +35,7 @@ def _compute_stats() -> dict:
     engine = _engine()
     with engine.connect() as conn:
         total_users = int(
-            conn.execute(text("SELECT COUNT(*) FROM identity_nft")).scalar_one()
+            conn.execute(text("SELECT COUNT(*) FROM social_profiles")).scalar_one()
         )
         total_scans = int(
             conn.execute(
